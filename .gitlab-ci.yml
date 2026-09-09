@@ -1,0 +1,11 @@
+pages:
+  stage: deploy
+  image: python:3.12-slim
+  script:
+    - pip install --no-cache-dir mkdocs-material
+    - mkdocs build -d public
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"

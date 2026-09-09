@@ -1,0 +1,33 @@
+site_name: winx86
+site_description: Moteur générique x86 → ARMv7 pour porter des jeux Windows (PE32) sur PS Vita
+site_url: https://claude5564407.gitlab.io/winx86/
+repo_url: https://gitlab.com/claude5564407/winx86
+theme:
+  name: material
+  language: fr
+  palette:
+    - scheme: slate
+      primary: deep orange
+      accent: orange
+  features:
+    - navigation.sections
+    - content.code.copy
+    - toc.follow
+
+nav:
+  - Accueil: index.md
+  - Démarrage rapide: demarrage.md
+  - Architecture: architecture.md
+  - "Point d'extension — porter son jeu": extension.md
+  - Outils IA / agents réutilisables: outils-ia.md
+  - Historique et provenance: historique.md
+  - Limites connues / dette technique: dette.md
+  - Lexique: lexique.md
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - toc:
+      permalink: true
