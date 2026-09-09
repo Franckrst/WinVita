@@ -52,6 +52,7 @@
 #endif
 #include <cstdio>
 #include <cstring>
+#include <cerrno>
 #include <ctime>      // coeur2 : chrono des prises contendues (D2_FILSTAT)
 #include <pthread.h>
 #include <cstdlib>
@@ -714,7 +715,11 @@ public:
         if (!g_arena) {
             void* p = mmap(H(a), end - a, PROT_READ|PROT_WRITE|PROT_EXEC,
                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0);
-            if (p == MAP_FAILED || p != H(a)) return false;
+            if (p == MAP_FAILED || p != H(a)) {
+                fprintf(stderr, "[DEBUG map] va=0x%x size=%u a=0x%x end=0x%x H(a)=%p errno=%d(%s) p=%p\n",
+                        va, size, a, end, H(a), errno, strerror(errno), p);
+                return false;
+            }
         }
         if (init) std::memcpy(H(va), init, size);
         setProtection(a, end - a, host_prot(prot));    // custommem bookkeeping

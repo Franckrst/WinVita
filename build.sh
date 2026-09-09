@@ -30,7 +30,7 @@ if [ "${TARGET:-}" = vita ]; then
     # -std=gnu17: box86 uses K&R-style `void f()` decls that C23 (gcc>=14
     # default) rejects against `void f(int)` definitions.
     VITA_EXTRA="-I$SHIM/vita -std=gnu17 -D__vita__ -D__clear_cache(b,e)=dyn86_vita_clear_cache(b,e)"
-    CXX_VITA_EXTRA="-D__vita__"
+    CXX_VITA_EXTRA="-D__vita__ -I$SHIM/vita"
 else
     OUT="$ROOT/build-arm"
     LIBNAME=libwinx86.a
@@ -60,7 +60,7 @@ CFLAGS="-O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
 
 CXXFLAGS="-std=gnu++17 -O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
   -DD2RT_CPU_BOX86 $CXX_VITA_EXTRA \
-  -I$ROOT/src -I$DYN86 -I$DYN86/shim -I$DYN86/shim/vita -I$B86/include -I$B86 \
+  -I$ROOT/src -I$DYN86 -I$DYN86/shim -I$B86/include -I$B86 \
   -Wno-unused-variable -Wno-unused-parameter ${EXTRA:-}"
 
 mkdir -p "$OBJ"/{core,pass0,pass1,pass2,pass3,rt}
