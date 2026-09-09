@@ -33,7 +33,12 @@ static inline void wx86_progress(const char* msg) { if (d2vita_progress_c) d2vit
 #include <cstdlib>
 #include <cstring>
 
-extern "C" int  d2vita_pin_self(int mask, unsigned* relu);
+// Hote optionnel : d2vita fournit les vraies implementations dans
+// vita_present.cpp (epinglage de coeur, recensement des fils) ; sans
+// hote, symboles FAIBLES = pointeurs nuls, appels ci-dessous en no-op.
+// Meme convention que d2vita_progress_c ci-dessus.
+extern "C" { __attribute__((weak)) int  d2vita_pin_self_c(int mask, unsigned* relu); }
+extern "C" { __attribute__((weak)) void d2vita_core_register_c(const char* nom, int uid, unsigned wanted, int pin_rc); }
 
 namespace d2rt { namespace audio {
 
@@ -171,11 +176,11 @@ int audio_thread(SceSize, void*) {
             default: break;
         }
     }
-    const int rc = d2vita_pin_self(mask, &relu);
+    const int rc = d2vita_pin_self_c ? d2vita_pin_self_c(mask, &relu) : 0;
     char s[128];
     std::snprintf(s, sizeof s, "audio: auto-epinglage masque=0x%x rc=0x%08x relu=0x%x", (unsigned)mask, (unsigned)rc, relu);
     wx86_progress(s);
-    d2vita_core_register("d2_audio", g_th, (unsigned)mask, rc);
+    if (d2vita_core_register_c) d2vita_core_register_c("d2_audio", g_th, (unsigned)mask, rc);
     if (g_body) g_body();
     wx86_progress("audio: fil termine");
     return 0;
