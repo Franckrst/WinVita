@@ -37,19 +37,31 @@ else
     CC=arm-linux-gnueabihf-gcc
     CXX=arm-linux-gnueabihf-g++
 fi
+
+# LIBTAG/EXTRA : construire une SAVEUR de la bibliotheque (objets et archive
+# separes) pour un A/B a la compilation — ex. LIBTAG=_prof EXTRA="-DPROF_COUNTERS",
+# ou LIBTAG=_callret EXTRA="-DD2_CALLRET=1". Meme convention que l'ancien
+# tools/build_dynarec86.sh de d2vita (dont ce script prend la releve) : EXTRA
+# s'applique aux DEUX cotes (C du dynarec, C++ de la couche runtime), un define
+# non reconnu par l'un des deux cotes est simplement ignore. Sans eux, rien ne
+# change (mêmes noms de sortie qu'avant l'ajout de ce mecanisme).
 OBJ="$OUT/obj"
+if [ -n "${LIBTAG:-}" ]; then
+    LIBNAME="${LIBNAME%.a}${LIBTAG}.a"
+    OBJ="$OBJ$LIBTAG"
+fi
 LIB="$OUT/$LIBNAME"
 
 CFLAGS="-O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
   -DDYNAREC -DARM -DUSE_MMAP -DTRACE_MEMSTAT $VITA_EXTRA \
   -I$SHIM -I$DYN86 -I$B86/include -I$B86 -I$B86/dynarec \
   -Wno-unused-variable -Wno-unused-parameter -Wno-unused-function \
-  -Wno-unused-but-set-variable -Wno-pointer-sign"
+  -Wno-unused-but-set-variable -Wno-pointer-sign ${EXTRA:-}"
 
 CXXFLAGS="-std=gnu++17 -O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
   -DD2RT_CPU_BOX86 $CXX_VITA_EXTRA \
   -I$ROOT/src -I$DYN86 -I$DYN86/shim -I$DYN86/shim/vita -I$B86/include -I$B86 \
-  -Wno-unused-variable -Wno-unused-parameter"
+  -Wno-unused-variable -Wno-unused-parameter ${EXTRA:-}"
 
 mkdir -p "$OBJ"/{core,pass0,pass1,pass2,pass3,rt}
 
