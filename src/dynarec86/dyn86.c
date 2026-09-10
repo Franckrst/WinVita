@@ -123,8 +123,8 @@ void dyn86_init(void)
     {
         /* D2_FRAMEPROF (attribution par image, rt_boot) lit les MÊMES compteurs :
          * il doit donc les armer aussi, sinon ses deltas sont tous nuls. */
-        const char* e = getenv("D2_JITPROFILE");
-        const char* f = getenv("D2_FRAMEPROF");
+        const char* e = getenv("WX86_JITPROFILE"); if (!e) e = getenv("D2_JITPROFILE");
+        const char* f = getenv("WX86_FRAMEPROF"); if (!f) f = getenv("D2_FRAMEPROF");
         dyn86_jitprof = ((e && e[0] && e[0] != '0') || (f && f[0] && f[0] != '0')) ? 1 : 0;
         if (dyn86_jitprof) { jp_calibrate(); dyn86_jp_epoch_us = dyn86_jp_now_us(); }
     }
@@ -152,7 +152,7 @@ void dyn86_set_quantum(uint32_t n)
  * block-level trace sees ALL transitions (slower). */
 int dyn86_link_direct(void) {
     static int nolink = -1;
-    if (nolink < 0) nolink = getenv("D2_NOLINK") ? 1 : 0;
+    if (nolink < 0) nolink = (getenv("WX86_NOLINK") != NULL || getenv("D2_NOLINK") != NULL) ? 1 : 0;
     return !nolink;
 }
 

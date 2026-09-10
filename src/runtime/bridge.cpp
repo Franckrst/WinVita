@@ -145,7 +145,7 @@ PeImage* Bridge::add_module(const std::string& key, const std::vector<uint8_t>& 
             // to disk, and absolute guest reads (e.g. an anti-cheat MEM_CHECK) land on
             // the real bytes. D2_RELOC_EXE=1 forces the old auto-placed (0x30000000,
             // relocated) behavior for an A/B comparison.
-            bool forceReloc = std::getenv("D2_RELOC_EXE") != nullptr;
+            bool forceReloc = std::getenv("WX86_RELOC_EXE") || std::getenv("D2_RELOC_EXE");
             if (stripped || (!isDll && !forceReloc)) {
                 uint32_t pref = 0; std::memcpy(&pref, bytes.data() + pe + 24 + 28, 4);
                 base = pref; keepBase = true;
@@ -253,7 +253,7 @@ bool Bridge::commit(std::string& err) {
     // Drapeaux de diagnostic : lus ICI — une fois, apres env.txt, avant le
     // premier trap (aucun trap ne peut partir avant que set_trap ait ouvert la
     // fenetre, plus bas dans cette meme fonction).
-    { const char* w = getenv("D2_WATCH");
+    { const char* w = getenv("WX86_WATCH"); if (!w) w = getenv("D2_WATCH");
       g_watch_va = w ? (uint32_t)strtoul(w, nullptr, 16) : 0u;
       g_traptag  = getenv("TRAPTAG") != nullptr; }
     // Map every module image.
@@ -274,10 +274,10 @@ bool Bridge::commit(std::string& err) {
     // avec le meme origine. Avant ce point, bump() est inerte (base == 0) —
     // et aucun trap ne peut partir avant que set_trap ait ouvert la fenetre.
     trapcnt::base = trap_base_;
-    { const char* w = std::getenv("D2_WAKEPROF"); d2rt_wakeprof = (w && *w && *w != '0') ? 1 : 0;
+    { const char* w = std::getenv("WX86_WAKEPROF"); if (!w) w = std::getenv("D2_WAKEPROF"); d2rt_wakeprof = (w && *w && *w != '0') ? 1 : 0;
       if (d2rt_wakeprof && d2vita_progress_c)
           d2vita_progress_c("wakeprof: ARME — latence pthread_cond_signal -> reprise du fil"); }
-    { const char* e = std::getenv("D2_NATPROF"); d2rt_natprof = (e && *e && *e != '0') ? 1 : 0;
+    { const char* e = std::getenv("WX86_NATPROF"); if (!e) e = std::getenv("D2_NATPROF"); d2rt_natprof = (e && *e && *e != '0') ? 1 : 0;
       g_natprof_bridge = this;
       if (d2rt_natprof && d2vita_progress_c) d2vita_progress_c("natprof: ARME — temps par creneau publie par fenetre (cout ~5 %)"); }
     committed_ = true;
@@ -341,7 +341,7 @@ bool Bridge::link(std::string& err) {
     // dans les fenetres lentes et est ABSENT dans les fenetres fluides.
     // On publie le meme decalage que l'echantillonneur (VA - base invitee)
     // pour que les deux se lisent l'un contre l'autre sans conversion.
-    if (std::getenv("D2_DUMPTRAPS")) {
+    if (std::getenv("WX86_DUMPTRAPS") || std::getenv("D2_DUMPTRAPS")) {
         for (auto& sl : slots_) {
             char m[160];
             std::snprintf(m, sizeof m, "[trap] %x  va=0x%08x  %s",

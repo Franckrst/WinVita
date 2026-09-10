@@ -130,7 +130,7 @@ void dyn86_vita_open_vm_thread(void) {
     static int bracket = -1;   /* course benigne : deux fils calculent la meme valeur */
     /* Defaut ON : l'ABSENCE de la variable arme le bracket (convention
      * D2_FAMINE). Seul un '0' explicite retombe sur le mode historique. */
-    if (bracket < 0) { const char* e = getenv("D2_VMBRACKET"); bracket = (e && *e == '0') ? 0 : 1; }
+    if (bracket < 0) { const char* e = getenv("WX86_VMBRACKET"); if (!e) e = getenv("D2_VMBRACKET"); bracket = (e && *e == '0') ? 0 : 1; }
     int rcC = 0, rc;
     if (bracket) {
         pthread_mutex_lock(&g_vmdom_mx);
@@ -247,7 +247,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
          * en vie, et le compteur rend l'echange visible au lieu de le cacher. */
         {
             static unsigned cap_mb = 0, said = 0, said2 = 0;
-            if (!cap_mb) { const char* e = getenv("D2_JITMAX_MB");
+            if (!cap_mb) { const char* e = getenv("WX86_JITMAX_MB"); if (!e) e = getenv("D2_JITMAX_MB");
                            cap_mb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DESACTIVE */
             /* ⚡ 08/09, 2e passe : LE PLAFOND ABSOLU NE SUFFIT PAS. Session de
              * 920 s : le JIT n'etait qu'a 11 Mio — bien sous les 24 — et c'est
@@ -261,7 +261,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
              * ici est le chemin GRACIEUX (repli interpreteur, « fail= » monte) ;
              * laisser le systeme refuser est le chemin FATAL. */
             static unsigned res_kb = 0;
-            if (!res_kb) { const char* e = getenv("D2_JITRESERVE_KB");
+            if (!res_kb) { const char* e = getenv("WX86_JITRESERVE_KB"); if (!e) e = getenv("D2_JITRESERVE_KB");
                            res_kb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DESACTIVE, voir ci-dessous */
             SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
             if (res_kb && sceKernelGetFreeMemorySize(&fi) >= 0 &&
@@ -287,7 +287,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         /* --- piscine : reserver une fois, puis sous-allouer --- */
         if (!g_jitpool_tried) {
             g_jitpool_tried = 1;
-            const char* e = getenv("D2_JITPOOL_MB");
+            const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
             size_t want = (size_t)((e ? (unsigned)atoi(e) : 16u)) << 20;
             if (want) {
                 SceUID u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);

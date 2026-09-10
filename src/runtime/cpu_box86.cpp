@@ -309,8 +309,8 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
     if (e) {   // g_mb may be 0 (identity mmap) — gesp+g_mb is still the host ptr
         uint32_t gesp = e->regs[4].dword[0];
         uint32_t lo = 0x01900000, hi = 0x02100000;   // compact-layout module window (forced-reloc Game.exe, 2026-08-25 squeeze); override via D2_CODELO/HI
-        if (const char* s = getenv("D2_CODELO")) lo = (uint32_t)strtoul(s, nullptr, 16);
-        if (const char* s = getenv("D2_CODEHI")) hi = (uint32_t)strtoul(s, nullptr, 16);
+        if (const char* s = getenv("WX86_CODELO") ? getenv("WX86_CODELO") : getenv("D2_CODELO")) lo = (uint32_t)strtoul(s, nullptr, 16);
+        if (const char* s = getenv("WX86_CODEHI") ? getenv("WX86_CODEHI") : getenv("D2_CODEHI")) hi = (uint32_t)strtoul(s, nullptr, 16);
         const uint32_t* gs = (const uint32_t*)(uintptr_t)(gesp + g_mb);
         // Raw stack words: the faulting function's args (a -1 %s pointer + the
         // adjacent format-string pointer are visible here). ASCII-annotate any
@@ -354,7 +354,7 @@ static inline void* H(uint32_t va) { return (void*)((uintptr_t)va + g_mb); }
 // on Vita the knob arrives via env.txt which platform_init applies AFTER static
 // init, so a pre-main getenv could never see it. -1 = not yet checked.
 static int g_memGuardV = -1;
-static inline bool mem_guard(){ if(g_memGuardV<0) g_memGuardV = std::getenv("D2_MEMGUARD")?1:0; return g_memGuardV!=0; }
+static inline bool mem_guard(){ if(g_memGuardV<0) g_memGuardV = (std::getenv("WX86_MEMGUARD")||std::getenv("D2_MEMGUARD"))?1:0; return g_memGuardV!=0; }
 // Single-arena mode (the exact Vita model): ONE host block covers the whole
 // guest span [0, arena_size); membase = block base (kernel/host-assigned, not
 // chosen); map()/set_trap() no longer host-mmap per region — the block already
@@ -514,18 +514,19 @@ public:
         // Rollback des optimisations emutls, lu UNE fois (env.txt est deja
         // charge a la construction : les lignes « env.txt: » sortent a 0,00 s,
         // l'arene est sondee a 1,00 s).
-        g_noEmuOpt = getenv("D2_NOEMUOPT") != nullptr;
-        {   const char* fs = getenv("D2_FILSTAT"); const char* cs = getenv("D2_COEUR_SERVEUR");
+        g_noEmuOpt = getenv("WX86_NOEMUOPT") || getenv("D2_NOEMUOPT");
+        {   const char* fs = getenv("WX86_FILSTAT"); if (!fs) fs = getenv("D2_FILSTAT");
+            const char* cs = getenv("WX86_COEUR_SERVEUR"); if (!cs) cs = getenv("D2_COEUR_SERVEUR");
             g_filstat = (fs && fs[0] && !(fs[0]=='0' && !fs[1]))
                      || (cs && cs[0] && !(cs[0]=='0' && !cs[1])); }
         // B5 : lu UNE fois (un getenv par trap couterait plus que ce qu'on
         // mesure). « 0 » vaut explicitement ETEINT, comme INLINEHOT.
         {   auto on = [](const char* n){ const char* v = getenv(n);
                                         return v && v[0] && !(v[0]=='0' && !v[1]); };
-            g_b5index = on("D2_B5INDEX") || on("D2_B5");
+            g_b5index = on("WX86_B5INDEX") || on("D2_B5INDEX") || on("WX86_B5") || on("D2_B5");
             d2rt_b5_index_on = g_b5index ? 1u : 0u; }
 #ifdef D2_B5CENSUS
-        if (const char* sc = getenv("D2_B5SCALE")) {
+        if (const char* sc = getenv("WX86_B5SCALE") ? getenv("WX86_B5SCALE") : getenv("D2_B5SCALE")) {
             unsigned long v = strtoul(sc, nullptr, 10);
             if (v >= 1 && v <= 1024) g_b5scale = (uint32_t)v;
         }
@@ -1463,7 +1464,7 @@ private:
     uint32_t    idir_lo_ = 0;
     uint32_t    idir_n_  = 0;
     IntrinsicFn idir_[kDirectMax] = {};
-    bool   no_intrinsics_ = std::getenv("D2_DISABLE_INTRINSICS") != nullptr;
+    bool   no_intrinsics_ = std::getenv("WX86_DISABLE_INTRINSICS") || std::getenv("D2_DISABLE_INTRINSICS");
     // Fault/preempt state lives in the t_* __thread vars (top of file): with N
     // native runners it is per-HOST-thread, never shared members.
 };

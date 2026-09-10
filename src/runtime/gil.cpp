@@ -147,7 +147,7 @@ static void resolve2(uintptr_t ma, uintptr_t mb, uint32_t* ta, uint32_t* tb) {
 // static de fonction. assert_held() n'est appele qu'une fois le runtime lance,
 // donc bien apres l'initialisation statique.
 static bool g_gilcheck = [] {
-    const char* v = std::getenv("D2_GILCHECK");
+    const char* v = std::getenv("WX86_GILCHECK"); if (!v) v = std::getenv("D2_GILCHECK");
     return v && std::strcmp(v, "0") != 0;
 }();
 void set_identity_check(bool on) { g_gilcheck = on; }   // TESTS (cf. gil.h)

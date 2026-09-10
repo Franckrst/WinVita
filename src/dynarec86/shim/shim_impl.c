@@ -93,7 +93,7 @@ int isRetX87Wrapper(wrapper_t fun) { (void)fun; return 0; }
 /* ---- cpuid: minimal 486-class answers ---- */
 void my_cpuid(x86emu_t* emu, uint32_t tmp32u)
 {
-    static int dbg=-1; if(dbg<0){ dbg=getenv("D2_CPUIDLOG")?1:0; }
+    static int dbg=-1; if(dbg<0){ dbg=(getenv("WX86_CPUIDLOG")?getenv("WX86_CPUIDLOG"):getenv("D2_CPUIDLOG"))?1:0; }
     emu->regs[_AX].dword[0] = 0;
     switch(tmp32u) {
         case 0x0:

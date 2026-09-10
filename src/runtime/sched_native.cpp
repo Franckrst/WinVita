@@ -312,12 +312,12 @@ static uint64_t now_us_mono() {
 }
 static int yield_mode() {
     static int m = -1;
-    if (m < 0) { const char* e = getenv("D2_YIELD"); m = (e && *e) ? atoi(e) : 0; if (m < 0 || m > 3) m = 0; }
+    if (m < 0) { const char* e = getenv("WX86_YIELD"); if (!e) e = getenv("D2_YIELD"); m = (e && *e) ? atoi(e) : 0; if (m < 0 || m > 3) m = 0; }
     return m;
 }
 static unsigned yield_us() {
     static int us = -1;
-    if (us < 0) { const char* e = getenv("D2_YIELD_US"); us = (e && *e) ? atoi(e) : 10; if (us < 0) us = 10; }
+    if (us < 0) { const char* e = getenv("WX86_YIELD_US"); if (!e) e = getenv("D2_YIELD_US"); us = (e && *e) ? atoi(e) : 10; if (us < 0) us = 10; }
     return (unsigned)us;
 }
 void NativeScheduler::yield() {
@@ -390,7 +390,7 @@ uint32_t NativeScheduler::wait_common(Waitable* w, uint32_t timeout_ms, uint32_t
     // D2_POLL0=0 restaure l'ancien comportement (A/B).
     if (timeout_ms == 0) {
         static int poll0 = -1;
-        if (poll0 < 0) { const char* e = getenv("D2_POLL0"); poll0 = (e && *e == '0') ? 0 : 1; }
+        if (poll0 < 0) { const char* e = getenv("WX86_POLL0"); if (!e) e = getenv("D2_POLL0"); poll0 = (e && *e == '0') ? 0 : 1; }
         if (poll0) { ++d2rt_poll0_n; return eax_on_timeout; }
     }
     // Honest blocked-context snapshot for GetThreadContext/dumps (spec D7).
@@ -588,23 +588,23 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
 // (c'est deja le regime des portes et bancs natifs qemu depuis l'etape 1).
 static int coeur2_core() {
     static int c = -1;
-    if (c < 0) { const char* e = getenv("D2_COEUR_SERVEUR"); c = (e && *e) ? atoi(e) : 0; if (c < 0 || c > 3) c = 0; }
+    if (c < 0) { const char* e = getenv("WX86_COEUR_SERVEUR"); if (!e) e = getenv("D2_COEUR_SERVEUR"); c = (e && *e) ? atoi(e) : 0; if (c < 0 || c > 3) c = 0; }
     return c;
 }
 static uint32_t coeur2_id() {
     static int v = -1;
-    if (v < 0) { const char* e = getenv("D2_COEUR_SERVEUR_ID"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
+    if (v < 0) { const char* e = getenv("WX86_COEUR_SERVEUR_ID"); if (!e) e = getenv("D2_COEUR_SERVEUR_ID"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
     return (uint32_t)v;
 }
 static uint32_t coeur2_rva() {
     static long long v = -1;
-    if (v < 0) { const char* e = getenv("D2_COEUR_SERVEUR_RVA");
+    if (v < 0) { const char* e = getenv("WX86_COEUR_SERVEUR_RVA"); if (!e) e = getenv("D2_COEUR_SERVEUR_RVA");
                  v = (e && *e) ? (long long)strtoul(e, nullptr, 16) : (long long)NativeScheduler::kCoeur2ServerRva; }
     return (uint32_t)v;
 }
 static int qemu_monocoeur() {           // -1 = knob absent (aucune affinite hote)
     static int v = -2;
-    if (v < -1) { const char* e = getenv("D2_QEMU_MONOCOEUR"); v = (e && *e) ? atoi(e) : -1; if (v < -1) v = -1; }
+    if (v < -1) { const char* e = getenv("WX86_QEMU_MONOCOEUR"); if (!e) e = getenv("D2_QEMU_MONOCOEUR"); v = (e && *e) ? atoi(e) : -1; if (v < -1) v = -1; }
     return v;
 }
 

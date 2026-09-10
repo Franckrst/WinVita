@@ -50,7 +50,7 @@ class VitaSink : public Sink {
 public:
     bool open(int freq, int ch, int grain) override {
         srcRate_ = freq; ch_ = ch; grain_ = grain;
-        const char* pw = getenv("D2_SON_PORT");
+        const char* pw = getenv("WX86_SON_PORT"); if (!pw) pw = getenv("D2_SON_PORT");
         // Le port BGM accepte 22050 : AUCUN reechantillonnage sur le chemin par
         // defaut. Le repli MAIN impose 48000 par l'en-tete du SDK, donc une
         // interpolation lineaire x2,177 — il existe parce que « le port BGM
@@ -155,7 +155,7 @@ int audio_thread(SceSize, void*) {
     // relit 0 ; c'est rc et surtout d= (lastExecutedCpuId) de la ligne
     // « coeurs: » qui tranchent, jamais m=0x0.
     unsigned relu = 0;
-    const char* cs = getenv("D2_SONCPU");
+    const char* cs = getenv("WX86_SONCPU"); if (!cs) cs = getenv("D2_SONCPU");
     // PLACEMENT PAR DEFAUT : USER_1, ET C'EST UN CHOIX, PAS UN HERITAGE.
     // D2_COEURS vaut "222" par defaut : le presentateur, le chien de garde et le
     // battement anti-famine sont TOUS sur USER_2, les runners invites sur
@@ -204,7 +204,7 @@ bool thread_start(void (*body)(void)) {
     // On prend donc le patron prouve, et on DIT le rc : jeter le code d'erreur
     // etait la vraie faute, elle a coute une soiree de suppositions.
     int prio = 0x10000100;
-    if (const char* pe = getenv("D2_SONPRIO")) { long v = strtol(pe, nullptr, 0); if (v) prio = (int)v; }
+    if (const char* pe = getenv("WX86_SONPRIO") ? getenv("WX86_SONPRIO") : getenv("D2_SONPRIO")) { long v = strtol(pe, nullptr, 0); if (v) prio = (int)v; }
     g_th = sceKernelCreateThread("d2_audio", audio_thread, prio, 64 * 1024, 0, 0, nullptr);
     if (g_th < 0) {
         char m[160]; std::snprintf(m, sizeof m, "audio: CreateThread(prio=0x%08x pile=64Ko) ECHEC rc=0x%08x",
