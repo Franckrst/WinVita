@@ -135,6 +135,7 @@ $RT/prof.cpp
 $RT/audio_sink_host.cpp
 $RT/win32_shims_shell32.cpp
 $RT/win32_shims_advapi32.cpp
+$RT/win32_shims_user32.cpp
 $PLAT/vita_audio.cpp
 "
 
