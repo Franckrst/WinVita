@@ -48,4 +48,17 @@ void win32_shims_misc_install(Bridge& br){
     REGORD("ijl11.dll",2,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlFree   -> erreur propre
     REGORD("ijl11.dll",3,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlRead
     REGORD("ijl11.dll",5,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlInit? (echec -> chemin d'erreur)
+
+    // IMM32 : IME absent, reponses coherentes.
+    REG("IMM32.dll","ImmGetContext",1,[](Cpu&){ return 0u; });
+    REG("IMM32.dll","ImmReleaseContext",2,[](Cpu&){ return 1u; });
+    REG("IMM32.dll","ImmIsIME",1,[](Cpu&){ return 0u; });
+    REG("IMM32.dll","ImmGetOpenStatus",1,[](Cpu&){ return 0u; });
+    REG("IMM32.dll","ImmSetOpenStatus",2,[](Cpu&){ return 1u; });
+    REG("IMM32.dll","ImmGetConversionStatus",3,[](Cpu&c){ if(c.arg(1)) c.write_u32(c.arg(1),0); if(c.arg(2)) c.write_u32(c.arg(2),0); return 1u; });
+    REG("IMM32.dll","ImmSetConversionStatus",3,[](Cpu&){ return 1u; });
+    REG("IMM32.dll","ImmGetCandidateListA",4,[](Cpu&){ return 0u; });
+    REG("IMM32.dll","ImmGetCandidateListCountA",2,[](Cpu&c){ if(c.arg(1)) c.write_u32(c.arg(1),0); return 0u; });
+    REG("IMM32.dll","ImmGetCompositionStringA",4,[](Cpu&){ return 0u; });
+    REG("IMM32.dll","ImmSimulateHotKey",2,[](Cpu&){ return 1u; });
 }
