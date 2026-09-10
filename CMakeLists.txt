@@ -21,7 +21,9 @@ add_compile_options(-Wall -Wextra)
 
 add_library(winx86_core STATIC
   src/runtime/pe_image.cpp
-  src/runtime/bridge.cpp)
+  src/runtime/bridge.cpp
+  src/runtime/win32_shims_shell32.cpp
+  src/runtime/win32_shims_advapi32.cpp)
 target_include_directories(winx86_core PUBLIC src)
 
 # -- Host-side PE inspection tool (standalone, project-agnostic) --------------
