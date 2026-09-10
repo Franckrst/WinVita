@@ -137,6 +137,8 @@ $RT/win32_shims_shell32.cpp
 $RT/win32_shims_advapi32.cpp
 $RT/win32_shims_user32.cpp
 $RT/win32_shims_misc.cpp
+$RT/win32_shims_psapi.cpp
+$RT/win32_shims_version.cpp
 $PLAT/vita_audio.cpp
 "
 

@@ -49,6 +49,20 @@ public:
     PeImage* module(const std::string& key);
     uint32_t module_base(const std::string& key);
 
+    // Snapshot of every currently loaded module's (load_base, image_size),
+    // in load order. Generic module-enumeration primitive for consumers that
+    // need to reflect their own process's module list (EnumProcessModules
+    // and friends — see win32_shims_psapi.cpp).
+    std::vector<std::pair<uint32_t,uint32_t>> loaded_modules() const;
+
+    // VERSION.dll support: register the callback that turns a guest-supplied
+    // file name (as passed to GetFileVersionInfo*/VerQueryValue*) into that
+    // file's raw bytes, however the consumer resolves guest paths to real
+    // ones. win32_shims_version.cpp parses the real VS_FIXEDFILEINFO out of
+    // whatever bytes come back — it never fabricates version data itself.
+    void set_version_resource_source(std::function<std::vector<uint8_t>(const std::string&)> fn);
+    std::vector<uint8_t> version_resource_bytes(const std::string& guestFileName) const;
+
     // Register a native shim for dll!name or dll!#ordinal. Keys are matched
     // case-insensitively on the dll and exactly on symbol/ordinal.
     void register_shim(const std::string& dll, const std::string& name, Shim s);
@@ -202,6 +216,7 @@ private:
     // dll(lower)!name → shim ; dll(lower)!#ord → shim
     std::map<std::string, Shim> shims_;
     std::function<uint32_t(Cpu&, const std::string&)> default_shim_;
+    std::function<std::vector<uint8_t>(const std::string&)> version_src_;
     std::vector<TrapSlot> slots_;
     std::map<std::string, uint32_t> slot_by_tag_;  // tag → trap va
 

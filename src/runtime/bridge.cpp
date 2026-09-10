@@ -123,6 +123,21 @@ Bridge::Mod* Bridge::find(const std::string& key) {
 PeImage* Bridge::module(const std::string& key) { auto* m = find(key); return m ? m->img.get() : nullptr; }
 uint32_t Bridge::module_base(const std::string& key) { auto* m = find(key); return m ? m->img->load_base() : 0; }
 
+std::vector<std::pair<uint32_t,uint32_t>> Bridge::loaded_modules() const {
+    std::vector<std::pair<uint32_t,uint32_t>> out;
+    out.reserve(mods_.size());
+    for (auto& m : mods_) out.emplace_back(m.img->load_base(), m.img->image_size());
+    return out;
+}
+
+void Bridge::set_version_resource_source(std::function<std::vector<uint8_t>(const std::string&)> fn) {
+    version_src_ = std::move(fn);
+}
+
+std::vector<uint8_t> Bridge::version_resource_bytes(const std::string& guestFileName) const {
+    return version_src_ ? version_src_(guestFileName) : std::vector<uint8_t>{};
+}
+
 PeImage* Bridge::add_module(const std::string& key, const std::vector<uint8_t>& bytes, std::string& err) {
     auto img = std::make_unique<PeImage>();
     // Reloc-stripped modules (typically the main EXE) have no base relocations
