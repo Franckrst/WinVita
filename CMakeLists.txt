@@ -27,7 +27,9 @@ add_library(winx86_core STATIC
   src/runtime/win32_shims_user32.cpp
   src/runtime/win32_shims_misc.cpp
   src/runtime/win32_shims_psapi.cpp
-  src/runtime/win32_shims_version.cpp)
+  src/runtime/win32_shims_version.cpp
+  src/runtime/win32_shims_gdi32.cpp
+  src/runtime/win32_shims_window.cpp)
 target_include_directories(winx86_core PUBLIC src)
 
 # -- Host-side PE inspection tool (standalone, project-agnostic) --------------
