@@ -55,6 +55,24 @@ et portage confondus. Quand un doublon hérité doit être conservé (ça arrive
 garde l'ordre relatif d'origine pour que le corps gagnant ne change pas, et
 documente-le en tête de fichier.
 
+### Quand les deux corps d'un doublon diffèrent
+
+Le cas n'est pas théorique : sur un vrai retrait de doublons, deux clés sur cinq
+avaient des corps réellement différents, et le corps **mort** paraissait le
+meilleur (il portait une garde de pointeur nul que le vivant n'a pas).
+
+La règle est contre-intuitive : **garde le gagnant**, c'est-à-dire celui qui
+était déjà effectif — même s'il semble moins bon. C'est le seul que l'exécution
+et les essais aient jamais validé ; l'autre n'a jamais tourné une seule fois.
+Substituer le corps mort au passage transformerait un retrait à comportement
+nul en changement de comportement non validé, glissé sous une étiquette de
+nettoyage. C'est exactement le genre de mélange qui rend une régression
+impossible à attribuer.
+
+Si le corps mort est réellement meilleur, note le défaut du vivant sur place,
+et traite l'amélioration dans un commit séparé qui s'annonce comme tel et se
+valide pour lui-même.
+
 ## Le filet : `shim_seq`, avant ET après
 
 `tools/shim_seq.py` / `.sh` reconstruit la séquence ordonnée des inscriptions
