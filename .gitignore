@@ -2,3 +2,4 @@
 /build-desktop/
 /build-arm/
 /build-vita/
+__pycache__/
