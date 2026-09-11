@@ -241,3 +241,25 @@ the inflated unit price gets reused.
 
 - `hardware-ab-bench` — the hardware A/B protocol these instruments feed
 - `runtime-debugging` — the 3-level validation ladder
+
+## 4 ter. Vérifie OÙ ton oracle écrit, pas seulement ce qu'il dit
+
+Un banc scripté redirige souvent la sortie de l'invité vers un fichier à lui,
+et n'imprime qu'un verdict sur sa propre sortie. Grepper la sortie du script
+revient alors à grepper le mauvais fichier — et une absence y est totalement
+muette, parce que ce que tu cherches n'y a jamais été écrit.
+
+> 2026-09-11. Question posée : le chemin rapide du dynarec s'arme-t-il ?
+> Deux journaux consultés, aucun message d'armement. J'ai failli en conclure
+> que le chemin était mort — la même conclusion négative, tirée d'un silence,
+> qui avait déjà fait mentir deux runs témoins le matin même.
+> En réalité le banc écrit la sortie de l'invité dans un fichier temporaire à
+> lui et n'expose que son verdict. En relançant le binaire directement :
+> `csintrin: ... ARME`, puis `enter=7468 (replis=0) leave=7468`. Le chemin
+> s'armait depuis le début et s'exécutait 7468 fois par run.
+
+Deux silences différents se ressemblent : « le code ne s'exécute pas » et
+« son journal ne va pas là où je regarde ». Avant toute conclusion négative,
+**produis un témoin positif dans le fichier que tu grepes** — une ligne dont
+tu sais qu'elle doit s'y trouver. Si elle n'y est pas, c'est ton fichier qui
+est faux, pas le code.
