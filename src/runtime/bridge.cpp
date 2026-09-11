@@ -114,6 +114,41 @@ Bridge::Bridge(Cpu* cpu) : cpu_(cpu) {
         // irait y chercher du code.
         sentinel_   = HI + 0x10EFFFF0;   // derniere page DANS la fenetre de traps
     }
+    // Surcharges NOMMEES : un hote qui porte deja son PROPRE plan memoire
+    // (typiquement une arene mono-bloc dimensionnee et placee pour SON jeu —
+    // les presets D2LAYOUT ci-dessus sont calibres sur le profil Diablo II et
+    // ne conviennent pas a toute image) le dit directement, variable par
+    // variable, plutot que de choisir parmi des presets qui ne correspondent
+    // a rien chez lui. Appliquees APRES les presets : un appelant peut partir
+    // de « compact »/« haut » et ne surcharger qu'un seul champ.
+    //
+    // Sans ceci, un hote qui pose son PROPRE D2ARENA (bloc unique, souvent
+    // quelques centaines de Mio) mais laisse next_base_/stack_base_/trap_base_
+    // a leurs defauts EPARS (jusqu'a 0x7F100000, penses pour un mmap par
+    // region hote, pas un bloc unique) fait deborder H(va)=va+membase en
+    // arithmetique 32 bits : l'ecriture retombe sur une adresse hote sans
+    // rapport avec l'arene, que l'hote refuse (observe sous Vita3K : un
+    // trap_base_ a 0x7F000000 additionne a un membase ~0x86000000 deborde
+    // exactement sur 0x05000000).
+    auto hx = [](const char* wx86Name, const char* legacyName, uint32_t& v) {
+        const char* e = std::getenv(wx86Name);
+        if (!e) e = std::getenv(legacyName);
+        if (e && *e) v = (uint32_t)std::strtoul(e, nullptr, 16);
+    };
+    hx("WX86_MODBASE",   "D2_MODBASE",   next_base_);
+    hx("WX86_STACKBASE", "D2_STACKBASE", stack_base_);
+    {
+        const uint32_t oldTrapBase = trap_base_;
+        hx("WX86_TRAPBASE", "D2_TRAPBASE", trap_base_);
+        if (trap_base_ != oldTrapBase) {
+            // Meme etendue que les presets D2LAYOUT ci-dessus (1 Mio) : assez
+            // pour les creneaux de trap, jamais dimensionnee separement par
+            // aucun appelant connu.
+            trap_hi_  = trap_base_ + 0x00100000u;
+            sentinel_ = trap_hi_ - 0x10;
+        }
+    }
+    trap_next_ = trap_base_;
 }
 
 Bridge::Mod* Bridge::find(const std::string& key) {
