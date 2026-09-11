@@ -150,6 +150,7 @@ $RT/win32_shims_wsock32.cpp
 $RT/poll_gil.cpp
 $RT/net_nonblock.cpp
 $RT/guest_scratch.cpp
+$RT/guest_region.cpp
 $PLAT/vita_audio.cpp
 $PLAT/present_scale.cpp
 $RENDER/render_null.cpp

@@ -38,6 +38,7 @@ add_library(winx86_core STATIC
   src/runtime/poll_gil.cpp
   src/runtime/net_nonblock.cpp
   src/runtime/guest_scratch.cpp
+  src/runtime/guest_region.cpp
   src/platform/present_scale.cpp
   src/render/render_null.cpp)
 target_include_directories(winx86_core PUBLIC src)
