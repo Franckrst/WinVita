@@ -10,10 +10,10 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 225 |
-| Clés distinctes | 225 |
+| Inscriptions | 271 |
+| Clés distinctes | 271 |
 | DLL couvertes | 14 |
-| Unités d'installation | 9 |
+| Unités d'installation | 10 |
 
 ## ADVAPI32.dll
 
@@ -107,12 +107,27 @@ Décodeur JPEG Intel.
 
 Les quelques entrées d'énumération de modules que KERNEL32 expose en doublon de PSAPI (`K32*`).
 
-4 inscriptions, 4 clés distinctes — `src/runtime/win32_shims_psapi.cpp`
+50 inscriptions, 50 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`
 
 | | | |
 |---|---|---|
-| `EnumProcessModules` | `GetModuleInformation` | `K32EnumProcessModules` |
-| `K32GetModuleInformation` |  |  |
+| `CopyFileA` | `DecodePointer` | `DuplicateHandle` |
+| `EncodePointer` | `EnumProcessModules` | `EnumSystemLocalesA` |
+| `FreeEnvironmentStringsA` | `FreeEnvironmentStringsW` | `FreeLibrary` |
+| `GetCPInfo` | `GetCurrentProcessId` | `GetDriveTypeA` |
+| `GetFileType` | `GetModuleInformation` | `GetProcessAffinityMask` |
+| `GetProfileStringA` | `GetStartupInfoA` | `GetStartupInfoW` |
+| `GetSystemDirectoryA` | `GetTempPathA` | `GetThreadPriority` |
+| `GetVersionExA` | `GetWindowsDirectoryA` | `HeapDestroy` |
+| `IsBadCodePtr` | `IsBadReadPtr` | `IsBadWritePtr` |
+| `IsDebuggerPresent` | `IsProcessorFeaturePresent` | `IsValidCodePage` |
+| `IsValidLocale` | `K32EnumProcessModules` | `K32GetModuleInformation` |
+| `QueryPerformanceFrequency` | `RemoveDirectoryA` | `RtlUnwind` |
+| `SetCurrentDirectoryA` | `SetEndOfFile` | `SetErrorMode` |
+| `SetFileTime` | `SetHandleCount` | `SetPriorityClass` |
+| `SetThreadAffinityMask` | `SetThreadLocale` | `SetThreadPriority` |
+| `SuspendThread` | `TlsFree` | `UnhandledExceptionFilter` |
+| `WriteConsoleW` | `WritePrivateProfileStringA` |  |
 
 ## PSAPI.DLL
 
@@ -228,6 +243,7 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 |---|---|---|
 | `win32_shims_advapi32_install` | `src/runtime/win32_shims_advapi32.cpp` | 37 |
 | `win32_shims_gdi32_install` | `src/runtime/win32_shims_gdi32.cpp` | 36 |
+| `win32_shims_kernel32_install` | `src/runtime/win32_shims_kernel32.cpp` | 46 |
 | `win32_shims_misc_install` | `src/runtime/win32_shims_misc.cpp` | 31 |
 | `win32_shims_psapi_install` | `src/runtime/win32_shims_psapi.cpp` | 5 |
 | `win32_shims_shell32_install` | `src/runtime/win32_shims_shell32.cpp` | 2 |

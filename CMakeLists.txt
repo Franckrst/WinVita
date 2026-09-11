@@ -22,6 +22,7 @@ add_compile_options(-Wall -Wextra)
 add_library(winx86_core STATIC
   src/runtime/pe_image.cpp
   src/runtime/bridge.cpp
+  src/runtime/win32_shims_kernel32.cpp
   src/runtime/win32_shims_shell32.cpp
   src/runtime/win32_shims_advapi32.cpp
   src/runtime/win32_shims_user32.cpp
