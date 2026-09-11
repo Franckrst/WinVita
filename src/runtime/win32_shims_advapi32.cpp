@@ -5,11 +5,14 @@
 // unlike the registry emulation (hardcoded "C:\Diablo II\..." paths) and a
 // handful of security/SCM calls that DO use those d2vita-hosted helpers, in
 // the same original group, which stay d2vita-side
-// (src/runtime/win32_shims_advapi32_d2.cpp). GetUserNameA and
-// CheckTokenMembership were each registered TWICE in the original (harmless
-// duplicates, same/near-same body) — both registrations are kept here, in
-// their original relative order, so Bridge::register_shim's overwrite-on-
-// duplicate-key semantics still resolve to the same winning body.
+// (src/runtime/win32_shims_advapi32_d2.cpp).
+//
+// GetUserNameA et CheckTokenMembership etaient chacune inscrites DEUX fois
+// dans l'original. Les inscriptions mortes (celles que la seconde ecrasait)
+// ont ete retirees le 2026-09-11 : une cle = un seul site d'inscription.
+// Le corps GAGNANT est conserve tel quel dans les deux cas, la table
+// effective est donc inchangee. Pour CheckTokenMembership les deux corps
+// etaient identiques ; pour GetUserNameA ils differaient (voir ci-dessous).
 //
 // DISCLOSED BEHAVIOR CHANGE: the original `A` helper wrapped every call in a
 // TRACE/TRACEAFTER diagnostic (prints "name -> result" via the file-scope
@@ -37,15 +40,12 @@ void win32_shims_advapi32_install(Bridge& br){
     // Security/token API (D2Game realm-startup admin check, via dynamic
     // LoadLibrary("advapi32")+GetProcAddress): report "running as admin".
     A("FreeSid",1,[](Cpu&){ return 0u; });
-    A("CheckTokenMembership",3,[](Cpu&c){ if(c.arg(2)) c.write_u32(c.arg(2),1); return 1u; });  // IsMember=TRUE
     A("EqualSid",2,[](Cpu&){ return 1u; });
     A("OpenProcessToken",3,[](Cpu&c){ if(c.arg(2)) c.write_u32(c.arg(2),0x8A000001u); return 1u; });
     A("OpenThreadToken",4,[](Cpu&c){ if(c.arg(3)) c.write_u32(c.arg(3),0x8A000001u); return 1u; });
     A("GetTokenInformation",5,[](Cpu&c){ uint32_t buf=c.arg(2),len=c.arg(3),ret=c.arg(4);
         if(buf&&len){ std::vector<uint8_t> z(len,0); c.write(buf,z.data(),len); }
         if(ret) c.write_u32(ret,len?len:4); return 1u; });
-    A("GetUserNameA",2,[](Cpu&c){ uint32_t b=c.arg(0),ps=c.arg(1); const char* n="Player";
-        if(b) c.write(b,n,7); if(ps) c.write_u32(ps,7); return 1u; });
     // ACL / security-descriptor family (all "succeed" — the realm creates a
     // secured object; we have no security model, any descriptor is fine).
     A("InitializeAcl",3,[](Cpu&c){ uint32_t p=c.arg(0),n=c.arg(1);
@@ -80,6 +80,13 @@ void win32_shims_advapi32_install(Bridge& br){
     A("QueryServiceStatus",2,[](Cpu&){ return 0u; });
     A("StartServiceA",3,[](Cpu&){ return 0u; });
     A("ControlService",3,[](Cpu&){ return 0u; });
+    // Corps GAGNANT de l'ancien doublon (l'autre rendait "Player" capitalise et
+    // gardait `if(b)` avant l'ecriture). Celui-ci est celui qui a toujours ete
+    // effectif : c'est donc lui qui a ete valide par tous les essais en ligne.
+    // RESERVE CONNUE, non corrigee ici pour ne rien changer au comportement en
+    // meme temps qu'on retire un doublon : il ecrit dans `b` SANS verifier que
+    // b != 0, alors que GetUserNameA(NULL,&n) est l'idiome Win32 normal pour
+    // demander la taille du tampon. A durcir dans un changement dedie.
     A("GetUserNameA",2,[](Cpu&c){ uint32_t b=c.arg(0),pn=c.arg(1); const char* u="player";
         c.write(b,u,7); if(pn) c.write_u32(pn,7); return 1u; });
     // 1.14 extras (ADVAPI32): admin-membership check the installer/anti-tamper

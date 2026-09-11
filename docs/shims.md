@@ -10,7 +10,7 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 227 |
+| Inscriptions | 225 |
 | Clés distinctes | 225 |
 | DLL couvertes | 14 |
 | Unités d'installation | 9 |
@@ -19,16 +19,16 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 Registre, ACL et descripteurs de sécurité, jetons, gestionnaire de services — en « succès neutre » : le moteur n'a aucun modèle de sécurité à faire respecter, et un invité qui interroge ces API attend surtout qu'elles n'échouent pas.
 
-39 inscriptions, 37 clés distinctes — `src/runtime/win32_shims_advapi32.cpp`
+37 inscriptions, 37 clés distinctes — `src/runtime/win32_shims_advapi32.cpp`
 
 | | | |
 |---|---|---|
 | `AddAccessAllowedAce` | `AddAccessDeniedAce` | `AddAce` |
-| `AdjustTokenPrivileges` | `CheckTokenMembership` ⚠️ | `CloseServiceHandle` |
+| `AdjustTokenPrivileges` | `CheckTokenMembership` | `CloseServiceHandle` |
 | `ControlService` | `CopySid` | `DuplicateToken` |
 | `DuplicateTokenEx` | `EqualSid` | `FreeSid` |
 | `GetLengthSid` | `GetSecurityDescriptorLength` | `GetSecurityInfo` |
-| `GetSidLengthRequired` | `GetTokenInformation` | `GetUserNameA` ⚠️ |
+| `GetSidLengthRequired` | `GetTokenInformation` | `GetUserNameA` |
 | `ImpersonateLoggedOnUser` | `InitializeAcl` | `InitializeSecurityDescriptor` |
 | `InitializeSid` | `IsValidAcl` | `IsValidSecurityDescriptor` |
 | `IsValidSid` | `LookupAccountNameA` | `LookupPrivilegeValueA` |
@@ -36,9 +36,6 @@ Registre, ACL et descripteurs de sécurité, jetons, gestionnaire de services �
 | `RevertToSelf` | `SetSecurityDescriptorDacl` | `SetSecurityDescriptorGroup` |
 | `SetSecurityDescriptorOwner` | `SetSecurityDescriptorSacl` | `SetSecurityInfo` |
 | `StartServiceA` |  |  |
-
-!!! danger "Clés inscrites plusieurs fois (⚠️)"
-    `CheckTokenMembership`, `GetUserNameA`. `Bridge::register_shim` **écrase** : c'est la **dernière** inscription qui gagne, silencieusement. Ces doublons sont hérités et volontairement conservés dans leur ordre d'origine pour que le corps gagnant reste le même — voir l'en-tête du fichier concerné.
 
 ## binkw32.dll
 
@@ -229,7 +226,7 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 
 | Fonction | Fichier | Inscriptions |
 |---|---|---|
-| `win32_shims_advapi32_install` | `src/runtime/win32_shims_advapi32.cpp` | 39 |
+| `win32_shims_advapi32_install` | `src/runtime/win32_shims_advapi32.cpp` | 37 |
 | `win32_shims_gdi32_install` | `src/runtime/win32_shims_gdi32.cpp` | 36 |
 | `win32_shims_misc_install` | `src/runtime/win32_shims_misc.cpp` | 31 |
 | `win32_shims_psapi_install` | `src/runtime/win32_shims_psapi.cpp` | 5 |
