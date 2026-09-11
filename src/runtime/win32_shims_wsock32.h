@@ -3,8 +3,11 @@
 // them. See win32_shims_wsock32.cpp for the exact ordinal-by-ordinal split
 // rationale versus what stays embedder-side. connect/recv/send live HERE and
 // are fully generic since 2026-09-11: application policy reaches them through
-// the observer and the connect route declared below. select and the address
-// helpers are the ones still registered by the embedder.
+// the observer and the connect route declared below. The address helpers
+// (inet_addr/inet_ntoa/gethostbyname) joined them the same day, once the
+// guest scratch allocator they write through became an engine primitive
+// (guest_scratch.h). select is now the only ordinal the embedder still
+// registers itself.
 #pragma once
 #include <cstdint>
 namespace d2rt { class Bridge; class Cpu; }
@@ -94,6 +97,13 @@ enum {
     WX86_NET_RECV,           // after a recv: data/len = payload, result = bytes
                              // (0 = orderly shutdown, -1 = error)
     WX86_NET_CLOSE,
+    WX86_NET_RESOLVE,        // resolution de nom : data/len = le nom demande,
+                             // result 0 = resolu (ip = adresse obtenue),
+                             // -1 = echec (wsa_err renseigne). Le moteur
+                             // etant muet, c'est par ici que l'embarqueur
+                             // apprend qu'un nom n'a pas pu etre resolu —
+                             // premier echec attendu sur une plateforme
+                             // embarquee, il ne doit pas rester invisible.
 };
 struct WsockEvent {
     int         kind;

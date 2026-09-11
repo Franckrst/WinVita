@@ -41,10 +41,17 @@
 //     generique, mais c'est aussi le site exact d'une famine reseau reelle
 //     deja corrigee (2026-08-30, D2_SELECTBLOCK) dont la signature de
 //     regression ne se voit que sous charge reseau reelle. Non touche.
-//   - inet_addr/inet_ntoa (#10/#11) et gethostbyname (#52) : dependent de
-//     l'allocateur de brouillon invite du consommateur (misc()/put_cstr) pour
-//     les structures qu'ils rendent a l'invite ; inet_addr porte en plus un
-//     effet de bord d'inscription documente cote consommateur.
+// Quatrieme passe (2026-09-11) — inet_addr/inet_ntoa/gethostbyname rejoignent
+// le moteur. Ce qui les retenait n'etait pas leur contenu (aucun des trois ne
+// connait D2) mais le fait qu'ils ecrivent dans la memoire INVITEE, via un
+// allocateur de brouillon qui vivait chez le consommateur. Cet allocateur est
+// devenu un primitif du moteur (guest_scratch.h) et la raison est tombee.
+// Deux defauts reels corriges au passage, pas seulement deplaces :
+//   - inet_ntoa rendait une chaine "127.0.0.1" ecrite en dur sur l'ordinal
+//     WSOCK32, quel que soit l'argument (un bouchon, pas une implementation) ;
+//   - gethostbyname faisait cinq allocations DEFINITIVES a chaque appel, ce
+//     qui menait tout droit a l'epuisement de la plage en session longue.
+//     Les deux sont maintenant caches par cle.
 //
 // Trace-log tradeoff, disclosed rather than hidden: d2vita's W() helper
 // wraps every WSOCK32/WS2_32 ordinal it registers with a uniform
@@ -60,6 +67,8 @@
 #include "runtime/cpu.h"
 #include "runtime/poll_gil.h"
 #include "runtime/net_nonblock.h"
+#include "runtime/guest_scratch.h"
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -127,6 +136,22 @@ static WsockObserverFn g_observer = nullptr;
 void wx86_net_set_redirect(uint32_t ip) { g_routeIp = ip; }
 uint32_t wx86_net_redirect() { return g_routeIp; }
 void wx86_net_set_observer(WsockObserverFn cb) { g_observer = cb; }
+
+// Lecture d'une chaine C invitee, octet par octet — les shims d'adresse
+// recoivent un char* invite. Bornee (1 Kio) : un pointeur errant ne doit pas
+// faire boucler le moteur sur toute la memoire invitee a la recherche d'un
+// zero qui n'existe pas.
+static std::string wx86_guest_cstr(Cpu& c, uint32_t p) {
+    std::string s;
+    if (!p) return s;
+    for (uint32_t i = 0; i < 1024; i++) {
+        uint8_t ch = 0;
+        c.read(p + i, &ch, 1);
+        if (!ch) break;
+        s.push_back((char)ch);
+    }
+    return s;
+}
 
 // Single dispatch point. Zero cost when nobody observes.
 static void wx86_net_notify(int kind, Cpu* c, uint32_t handle, int fd,
@@ -366,6 +391,112 @@ void win32_shims_wsock32_install(Bridge& br) {
     };
     REGORD("WSOCK32.dll", 12, 3, ioctlsocket_fn);
     REGORD("WS2_32.dll", 10, 3, ioctlsocket_fn);
+
+    // --- address helpers: inet_addr / inet_ntoa / gethostbyname ------------
+    // Ils rendent des donnees a l'invite, donc ils ont besoin d'ecrire dans
+    // la memoire INVITEE : c'est ce qui les retenait chez le consommateur,
+    // qui hebergeait l'allocateur de brouillon. Cet allocateur appartient
+    // maintenant au moteur (guest_scratch.h), et la raison tombe : rien
+    // dans ces trois fonctions ne connait D2 ni Battle.net.
+    //
+    // Les ordinaux des deux DLL ne coincident PAS ici, contrairement au
+    // reste du fichier :
+    //        WSOCK32 : 10=inet_addr 11=inet_ntoa 12=ioctlsocket
+    //        WS2_32  : 10=ioctlsocket 11=inet_addr 12=inet_ntoa
+    // D'ou quatre inscriptions explicites, chacune sur le BON ordinal. Le
+    // consommateur plantait auparavant, par effet de bord de son helper a
+    // double inscription, un inet_addr transitoire sur WS2_32!#10 et un
+    // inet_ntoa transitoire sur WS2_32!#11, aussitot ecrases par la bonne
+    // fonction. Ces deux inscriptions mortes disparaissent : la table
+    // EFFECTIVE est inchangee (meme corps gagnant partout), seule la
+    // multiplicite de ces deux cles retombe de 2 a 1.
+    auto inet_addr_fn = [](Cpu& c) -> uint32_t {
+        std::string s = wx86_guest_cstr(c, c.arg(0));
+        in_addr a;
+        if (!s.empty() && inet_aton(s.c_str(), &a)) return a.s_addr;
+        return 0xFFFFFFFFu;   // INADDR_NONE
+    };
+    REGORD("WSOCK32.dll", 10, 1, inet_addr_fn);
+    REGORD("WS2_32.dll", 11, 1, inet_addr_fn);
+
+    // inet_ntoa(in_addr) -> char* : la chaine doit survivre au retour, donc
+    // elle vit dans le brouillon invite. UNE entree de cache par adresse
+    // distincte : sans cela chaque appel fuirait ~16 octets definitivement
+    // (l'allocateur ne libere jamais — cf. le contrat de guest_scratch.h), et
+    // un client qui formate une adresse a chaque image finirait par epuiser
+    // la plage. Le consommateur rendait ici une chaine "127.0.0.1" ECRITE EN
+    // DUR, quel que soit l'argument : c'etait un bouchon, pas une
+    // implementation, et sur l'ordinal WSOCK32 uniquement — l'ordinal WS2
+    // avait deja la vraie. Les deux sont desormais la vraie.
+    auto inet_ntoa_fn = [](Cpu& c) -> uint32_t {
+        static std::map<uint32_t, uint32_t> cache;   // addr reseau -> adresse invitee
+        const uint32_t a = c.arg(0);
+        auto it = cache.find(a);
+        if (it != cache.end()) return it->second;
+        char b[20];
+        std::snprintf(b, sizeof b, "%u.%u.%u.%u",
+                      a & 0xff, (a >> 8) & 0xff, (a >> 16) & 0xff, (a >> 24) & 0xff);
+        const uint32_t p = wx86_scratch_put_cstr(c, b);
+        if (p) cache[a] = p;
+        return p;
+    };
+    REGORD("WSOCK32.dll", 11, 1, inet_ntoa_fn);
+    REGORD("WS2_32.dll", 12, 1, inet_ntoa_fn);
+
+    // gethostbyname(name) -> hostent* : meme histoire, en plus gros. La
+    // structure rendue (hostent + liste d'adresses + liste d'alias + copie du
+    // nom) faisait CINQ allocations definitives A CHAQUE APPEL chez le
+    // consommateur. Un client qui re-resout son serveur a chaque tentative de
+    // connexion marchait donc droit vers l'epuisement de la plage — c'est
+    // exactement le defaut que le commentaire C6 de misc() signalait sans le
+    // corriger. Corrige ici : une entree de cache par nom, la structure est
+    // batie UNE fois. Le cache ne reflete volontairement pas les changements
+    // DNS : ces structures Winsock ont de toute facon une duree de vie
+    // processus, c'est ce que leur contrat autorise.
+    auto gethostbyname_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0u;
+        const std::string host = wx86_guest_cstr(c, c.arg(0));
+        static std::map<std::string, uint32_t> cache;
+        auto it = cache.find(host);
+        if (it != cache.end()) return it->second;
+        const uint32_t addr = wx86_net_resolve(host.c_str());
+        // Le moteur est muet : l'echec de resolution part a l'observateur,
+        // pas dans un journal qu'il ne connait pas. C'est le premier echec
+        // attendu sur une plateforme embarquee, il ne doit pas etre invisible.
+        if (!addr) {
+            wx86_net_set_last_error(11001);   // WSAHOST_NOT_FOUND
+            wx86_net_notify(WX86_NET_RESOLVE, &c, 0, -1, 0, 0, 0, -1, 11001,
+                            (const uint8_t*)host.c_str(), (int)host.size());
+            return 0u;
+        }
+        // hostent { char* h_name; char** h_aliases; short h_addrtype;
+        //           short h_length; char** h_addr_list; }
+        const uint32_t namep = wx86_scratch_put_cstr(c, host.c_str());
+        const uint32_t addrbuf = wx86_scratch_alloc(4);
+        const uint32_t addrlist = wx86_scratch_alloc(8);
+        const uint32_t aliases = wx86_scratch_alloc(4);
+        const uint32_t he = wx86_scratch_alloc(16);
+        if (!namep || !addrbuf || !addrlist || !aliases || !he) {
+            wx86_net_set_last_error(11001);
+            return 0u;   // brouillon epuise : echouer proprement, pas ecrire en 0
+        }
+        c.write_u32(addrbuf, addr);
+        c.write_u32(addrlist, addrbuf);
+        c.write_u32(addrlist + 4, 0);
+        c.write_u32(aliases, 0);
+        c.write_u32(he + 0, namep);
+        c.write_u32(he + 4, aliases);
+        uint16_t at = 2 /*AF_INET*/, ln = 4;
+        c.write(he + 8, &at, 2);     // h_addrtype et h_length sont des SHORT
+        c.write(he + 10, &ln, 2);    // accoles, pas deux mots de 32 bits
+        c.write_u32(he + 12, addrlist);
+        cache[host] = he;
+        wx86_net_notify(WX86_NET_RESOLVE, &c, 0, -1, addr, addr, 0, 0, 0,
+                        (const uint8_t*)host.c_str(), (int)host.size());
+        return he;
+    };
+    REGORD("WSOCK32.dll", 52, 1, gethostbyname_fn);
+    REGORD("WS2_32.dll", 52, 1, gethostbyname_fn);
 
     // socket(af,type,proto): real socket, host fd kept non-blocking
     // (protects the cooperative scheduler — see wx86_recv_blocking for how
