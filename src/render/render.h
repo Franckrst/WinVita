@@ -162,6 +162,34 @@ struct NullStats {
 const NullStats& null_stats();
 void null_stats_reset();
 
+// ---- LE PRIX DE CETTE COUTURE, MESURE ET NON ESTIME -----------------------
+// Le vocabulaire ci-dessus est l'UNION des besoins de deux portages, et une
+// union se paie : chaque portage porte les champs de l'autre sur le chemin par
+// image. Les trois sommets, comptes champ a champ :
+//
+//   portage 2D (anneau Glide)   x,y,u,v,argb,pal                24 octets
+//   portage 3D (Direct3D)       x,y,z,w,rgba,u,v                28 octets
+//   CE fichier (l'union)        x,y,z,w,rgba,u,v,layer          32 octets
+//
+// Le portage 2D paierait +33 % de largeur de bande de sommets pour z et w dont
+// il ne se sert pas ; le portage 3D +14 % pour `layer`. Sur le premier, le
+// journal utilisateur donne 14 157 sommets par image hors du camp : 340 Kio
+// deviendraient 453 Kio par image, en recopie CPU ET en lecture GPU, sur une
+// console dont c'est la ressource rare.
+//
+// CONSEQUENCE PRATIQUE, a savoir avant de croire la couture gratuite : un
+// backend concret existant ne se branche pas ici sans que son format de sommet
+// GPU soit refait. Le backend GXM du premier portage declare ses quatre
+// attributs exactement sur ses 24 octets ; l'y brancher demande soit une
+// conversion par sommet a la place d'un unique memcpy, soit une declaration
+// GPU elargie et son nuanceur. Les DEUX se paient par image.
+//
+// Ce n'est pas un argument contre la couture — c'est le chiffre qu'il faut
+// avoir en main pour decider, et il n'avait jamais ete pose. La voie qui ne
+// coute rien est que le CONSTRUCTEUR DE LOTS du portage produise directement
+// le sommet de ce fichier au lieu d'en convertir un : il n'y a alors aucune
+// conversion, seulement un sommet plus large.
+//
 // ---- CE QUI N'EST PAS COUVERT, NOMMEMENT ----------------------------------
 // A ajouter quand un portage reel en aura besoin, pas avant :
 //   * les matrices et l'eclairage materiel — les deux portages font leur
