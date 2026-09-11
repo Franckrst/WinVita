@@ -34,8 +34,18 @@ add_library(winx86_core STATIC
   src/runtime/win32_shims_wsock32.cpp
   src/runtime/poll_gil.cpp
   src/runtime/net_nonblock.cpp
-  src/runtime/guest_scratch.cpp)
+  src/runtime/guest_scratch.cpp
+  src/platform/present_scale.cpp
+  src/render/render_null.cpp)
 target_include_directories(winx86_core PUBLIC src)
 
 # -- Host-side PE inspection tool (standalone, project-agnostic) --------------
 add_executable(pe_analyze tools/pe_analyze.cpp)
+
+# -- Auto-controle de la mise a l'echelle de presentation ---------------------
+# La couche de presentation des portages vit sous #ifdef __vita__ : l'oracle
+# d'identite d'image du projet ne peut pas l'exercer hors console. Ce binaire
+# compare la version generique a une transcription de la boucle d'origine,
+# octet pour octet, et tourne sur bureau. Voir tools/present_scale_selftest.cpp.
+add_executable(present_scale_selftest tools/present_scale_selftest.cpp)
+target_link_libraries(present_scale_selftest PRIVATE winx86_core)

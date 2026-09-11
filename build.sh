@@ -20,6 +20,7 @@ SHIM="$ROOT/src/dynarec86/shim"
 DYN86="$ROOT/src/dynarec86"
 RT="$ROOT/src/runtime"
 PLAT="$ROOT/src/platform"
+RENDER="$ROOT/src/render"
 
 VITA_EXTRA=""
 if [ "${TARGET:-}" = vita ]; then
@@ -147,6 +148,8 @@ $RT/poll_gil.cpp
 $RT/net_nonblock.cpp
 $RT/guest_scratch.cpp
 $PLAT/vita_audio.cpp
+$PLAT/present_scale.cpp
+$RENDER/render_null.cpp
 "
 
 # Sequential on purpose: a backgrounded (`&`) compile's failure does not trip
