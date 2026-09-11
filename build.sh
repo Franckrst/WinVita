@@ -142,6 +142,8 @@ $RT/win32_shims_version.cpp
 $RT/win32_shims_gdi32.cpp
 $RT/win32_shims_window.cpp
 $RT/win32_shims_wsock32.cpp
+$RT/poll_gil.cpp
+$RT/net_nonblock.cpp
 $PLAT/vita_audio.cpp
 "
 
