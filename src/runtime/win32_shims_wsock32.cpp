@@ -15,32 +15,36 @@
 // wx86_send_simple, generic helper bodies that d2vita's connect/recv/send
 // shims (kept d2vita-side, see below) now call into instead of duplicating.
 //
-// What is STILL d2vita-side, and why that's a real boundary and not
-// leftover caution:
-//   - connect (WSOCK32.dll!#4): the BNCS/D2GS gateway-port literals
-//     (6112/4000), the D2BNCS_LOCAL redirect, the virtual/real clock flip,
-//     g_bnetConnected — D2's own login-flow orchestration. It calls
-//     wx86_connect_wait() for the generic "wait for the handshake to
-//     finish" part, same as before, just no longer duplicating that logic.
-//   - recv/send (WSOCK32.dll!#16/#19): D2_NETWATCH observation and a
-//     port==4000 diagnostic log line are d2vita-only; they now wrap calls
-//     to wx86_recv_blocking()/wx86_send_simple() for the generic transfer.
-//   - select (WSOCK32.dll!#18): NOT touched this pass either. Its core
-//     (Windows fd_set <-> pollfd translation) is generic, but it is also
-//     the exact site of a real, already-fixed starvation bug
-//     (2026-08-30, D2_SELECTBLOCK) whose regression signature only shows
-//     under real network load timing — qemu-arm boot-to-title-screen
-//     cannot prove a split here didn't reintroduce it, and this pass's
-//     online validation (see commit message) covers connect/recv/send/
-//     socket/accept/bind/listen, not select's timing-sensitive path.
-//     Left exactly as before, deliberately, not by default.
-//   - inet_addr/inet_ntoa (WSOCK32.dll!#10/#11): still not here — moving
-//     them needs the d2vita-hosted guest scratch allocator (misc()/
-//     put_cstr) for inet_ntoa's returned string, and out of scope for a
-//     WSOCK32-layer pass to drag that allocator along.
-//   - gethostbyname (WSOCK32.dll!#52): same allocator dependency for its
-//     marshalled hostent struct; calls the now-winx86-hosted
-//     wx86_net_resolve() (net_nonblock.h) for the actual resolution.
+// Troisieme passe (2026-09-11) — la couche est maintenant generique de bout
+// en bout pour connect/recv/send. Ce qui restait cote d2vita n'etait pas la
+// mecanique reseau mais la POLITIQUE posee autour : ports du protocole
+// applicatif, redirection de mise au point, bascules d'horloge propres au
+// consommateur, instrumentation. Deux points d'extension
+// generiques suffisent a la rendre au consommateur :
+//   - wx86_net_set_observer() : UN observateur passif qui recoit connect /
+//     connect-done / send / recv. Le moteur raconte, il ne demande jamais
+//     d'avis et ne change rien selon la reponse. Le decodage de protocole et
+//     toute politique applicative vivent chez le consommateur.
+//   - wx86_net_set_redirect() : une route generique de connect, l'equivalent
+//     d'une entree de fichier hosts ou d'un mandataire sortant. Elle ne sait
+//     rien du protocole qui passe dessus.
+// Note pour qui branche un client sur un serveur prive : cette route est un
+// FILET, pas la bonne facon de faire. La facon fidele au PC est de configurer
+// la liste de serveurs du client lui-meme (ses cles de registre / son .ini)
+// pour qu'il demande votre hote d'entree de jeu. Mesure le 2026-09-11 sur le
+// consommateur de reference : liste de serveurs du registre ramenee a une
+// entree locale, AUCUNE redirection activee -> le client se connecte tout seul
+// au serveur local et son transfert de fichier se deroule normalement.
+//
+// Ce qui reste cote consommateur, avec une vraie raison a chaque fois :
+//   - select (WSOCK32.dll!#18) : son coeur (traduction fd_set <-> pollfd) est
+//     generique, mais c'est aussi le site exact d'une famine reseau reelle
+//     deja corrigee (2026-08-30, D2_SELECTBLOCK) dont la signature de
+//     regression ne se voit que sous charge reseau reelle. Non touche.
+//   - inet_addr/inet_ntoa (#10/#11) et gethostbyname (#52) : dependent de
+//     l'allocateur de brouillon invite du consommateur (misc()/put_cstr) pour
+//     les structures qu'ils rendent a l'invite ; inet_addr porte en plus un
+//     effet de bord d'inscription documente cote consommateur.
 //
 // Trace-log tradeoff, disclosed rather than hidden: d2vita's W() helper
 // wraps every WSOCK32/WS2_32 ordinal it registers with a uniform
@@ -61,6 +65,7 @@
 #include <functional>
 #include <string>
 #include <map>
+#include <vector>
 #include <cerrno>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -115,6 +120,23 @@ void wx86_sock_erase(uint32_t h) { g_wsockTable.erase(h); }
 
 bool wx86_net_enabled() { return g_netEnabled; }
 void wx86_net_set_enabled(bool on) { g_netEnabled = on; }
+
+static uint32_t        g_routeIp = 0;
+static WsockObserverFn g_observer = nullptr;
+
+void wx86_net_set_redirect(uint32_t ip) { g_routeIp = ip; }
+uint32_t wx86_net_redirect() { return g_routeIp; }
+void wx86_net_set_observer(WsockObserverFn cb) { g_observer = cb; }
+
+// Single dispatch point. Zero cost when nobody observes.
+static void wx86_net_notify(int kind, Cpu* c, uint32_t handle, int fd,
+                            uint32_t ip, uint32_t routeIp, uint16_t port,
+                            int result, uint32_t wsaErr,
+                            const uint8_t* data, int len) {
+    if (!g_observer) return;
+    WsockEvent e{kind, c, handle, fd, ip, routeIp, port, result, wsaErr, data, len};
+    g_observer(e);
+}
 
 uint32_t wx86_net_last_error() { return g_wsaLastErr; }
 void wx86_net_set_last_error(uint32_t code) { g_wsaLastErr = code; }
@@ -357,6 +379,88 @@ void win32_shims_wsock32_install(Bridge& br) {
     };
     REGORD("WSOCK32.dll", 23, 3, socket_fn);
     REGORD("WS2_32.dll", 23, 3, socket_fn);
+
+    // connect(s, sockaddr*, len). Generic all the way through: read the
+    // destination, apply the generic route override if one is set, report the
+    // attempt to the observer, then do the host connect — completing a
+    // non-blocking one synchronously, because a guest whose own timeout is
+    // driven by an emulated clock can "time out" while the real TCP handshake
+    // is still in flight. No port literal, no protocol knowledge: which ports
+    // matter, and what to do when one of them connects, is the embedder's
+    // business and reaches it through the observer.
+    auto connect_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0xFFFFFFFFu;
+        int fd = wx86_sock_fd(c.arg(0));
+        if (fd < 0) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
+        uint8_t sa[16]; c.read(c.arg(1), sa, 16);
+        uint32_t dip; std::memcpy(&dip, sa + 4, 4);
+        uint16_t dport = (uint16_t)((sa[2] << 8) | sa[3]);
+        wx86_sock_set_port(c.arg(0), dport);
+        uint32_t rip = dip;
+        if (g_routeIp) {
+            // Loopback, "any" and broadcast are left alone: rewriting those
+            // would break a guest talking to itself.
+            uint8_t hi = dip & 0xff;
+            if (hi != 127 && hi != 0 && dip != 0xffffffffu) {
+                rip = g_routeIp;
+                std::memcpy(sa + 4, &rip, 4);
+                c.write(c.arg(1), sa, 16);
+            }
+        }
+        wx86_net_notify(WX86_NET_CONNECT, &c, c.arg(0), fd, dip, rip, dport, 0, 0, nullptr, 0);
+        int r = ::connect(fd, (sockaddr*)sa, (socklen_t)c.arg(2));
+        if (r == 0) {
+            wx86_net_notify(WX86_NET_CONNECT_DONE, &c, c.arg(0), fd, dip, rip, dport, 0, 0, nullptr, 0);
+            return 0u;
+        }
+        if (errno == EINPROGRESS || errno == EWOULDBLOCK || errno == EALREADY) {
+            uint32_t we = 0;
+            int rc = wx86_connect_wait(fd, 8000, &we);
+            wx86_net_notify(WX86_NET_CONNECT_DONE, &c, c.arg(0), fd, dip, rip, dport,
+                            rc == 0 ? 1 : -1, rc == 0 ? 0u : we, nullptr, 0);
+            return rc == 0 ? 0u : 0xFFFFFFFFu;
+        }
+        uint32_t e = wx86_wsa_from_errno(errno);
+        wx86_net_set_last_error(e);
+        wx86_net_notify(WX86_NET_CONNECT_DONE, &c, c.arg(0), fd, dip, rip, dport, -1, e, nullptr, 0);
+        return 0xFFFFFFFFu;
+    };
+    REGORD("WSOCK32.dll", 4, 3, connect_fn);
+    REGORD("WS2_32.dll", 4, 3, connect_fn);
+
+    auto recv_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0xFFFFFFFFu;
+        WsockHandle h;
+        if (!wx86_sock_get(c.arg(0), h)) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
+        std::vector<uint8_t> b(c.arg(2));
+        uint32_t we = 0;
+        int n = wx86_recv_blocking(h.fd, b.data(), (uint32_t)b.size(), !h.nonblock, 15000, &we);
+        if (n > 0) {
+            c.write(c.arg(1), b.data(), (uint32_t)n);
+            wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, 0, 0, h.port, n, 0, b.data(), n);
+            return (uint32_t)n;
+        }
+        wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, 0, 0, h.port,
+                        n, n < 0 ? we : 0u, nullptr, 0);
+        return n == 0 ? 0u : 0xFFFFFFFFu;
+    };
+    REGORD("WSOCK32.dll", 16, 4, recv_fn);
+    REGORD("WS2_32.dll", 16, 4, recv_fn);
+
+    auto send_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0xFFFFFFFFu;
+        int fd = wx86_sock_fd(c.arg(0));
+        if (fd < 0) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
+        std::vector<uint8_t> b(c.arg(2));
+        if (c.arg(2)) c.read(c.arg(1), b.data(), c.arg(2));
+        uint32_t we = 0;
+        int n = wx86_send_simple(fd, b.data(), (uint32_t)b.size(), &we);
+        wx86_net_notify(WX86_NET_SEND, &c, c.arg(0), fd, 0, 0, wx86_sock_port(c.arg(0)),
+                        n, n < 0 ? we : 0u, b.data(), (int)b.size());
+        return n >= 0 ? (uint32_t)n : 0xFFFFFFFFu;
+    };
+    REGORD("WSOCK32.dll", 19, 4, send_fn);
+    REGORD("WS2_32.dll", 19, 4, send_fn);
 
     // accept/bind/listen: real POSIX passthrough. No D2 client ever
     // exercises this path (D2 is a pure Winsock client), so these are
