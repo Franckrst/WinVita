@@ -108,10 +108,22 @@ Mesuré, en normalisant espaces et commentaires :
 | `KSemaphore` ↔ `WxSemaphore` | **identique** (219 caractères) |
 | `KThread` ↔ `WxThread` | **identique** (259 caractères) |
 | `KCrit` ↔ `WxCrit` | identique **au style de déclaration près** (`uint32_t va=0; uint32_t owner=0;` contre `uint32_t va=0, owner=0;`) |
+| `KMultiWait` ↔ `WxMultiWait` | **identique à la ligne près** (28 lignes de part et d'autre) |
+| `KIocp` ↔ `WxIocp` | **identique à la ligne près** (16 lignes) |
 
-Quatre objets noyau, dont trois rigoureusement identiques et le quatrième
-séparé par un point-virgule. Ce n'est pas une convergence heureuse : c'est le
-même code, recopié puis laissé diverger cosmétiquement.
+Six objets noyau, dont cinq rigoureusement identiques et le sixième séparé par
+un point-virgule. Ce n'est pas une convergence heureuse : c'est le même code,
+recopié puis laissé diverger cosmétiquement.
+
+!!! danger "Citer une preuve ne remplace pas livrer l'objet"
+    Le moteur n'a longtemps fourni que **4** de ces 6 types — alors que
+    l'en-tête de `guest_sync.h` citait déjà l'invariant d'atomicité de
+    `WxMultiWait` comme *preuve* que ces structures sont génériques. La preuve
+    était là, l'objet non, et les deux portages continuaient de l'écrire.
+
+    Défaut trouvé en migrant le second portage, corrigé depuis. C'est
+    exactement ce que le principe directeur annonce : **ce qu'un second
+    consommateur ne peut pas reprendre désigne un défaut du moteur.**
 
 ### Ce qui est déjà fait
 
@@ -222,6 +234,27 @@ erreur » ne prouve rien.
 Le portage garde son instrumentation : il l'enregistre sur l'observateur
 (`wx86_sync_set_observer`), un seul point, et dispatche en interne. Le moteur
 raconte, il ne demande jamais d'avis.
+
+!!! warning "Vérifier d'abord que le jeu utilise réellement ces objets"
+    Sur le second portage, cette vague a été faite et **l'oracle du dépôt ne
+    la voit pas** — non par défaut de l'oracle, mais parce que le jeu ne prend
+    jamais ce chemin : son renderer n'importe **aucune** fonction de
+    synchronisation, et son exécutable principal une seule
+    (`WaitForSingleObject`).
+
+    Prouvé en trois temps, pas supposé : une faute injectée dans
+    `wx86_handle_find` ne change rien au verdict ; des sondes sur
+    `handle_add`/`handle_find`/`crit_for` ne tirent aucune fois ; et leur
+    présence dans le binaire est vérifiée par `strings`, donc ce silence n'est
+    pas celui d'une sonde absente.
+
+    Conséquence pratique : pour un tel portage, ces structures sont du **poids
+    mort hérité** et non un besoin vivant. La migration reste bonne (elle
+    supprime une duplication et aligne sur du code validé ailleurs), mais elle
+    doit être annoncée comme *non validée par ce portage* — et la charge
+    réelle demandée ci-dessus est à obtenir auprès d'un portage qui exerce
+    vraiment la synchronisation. Ne pas maquiller un chemin non exercé en
+    validation verte.
 
 ### Vague 4 — la présentation et la couture graphique
 
@@ -362,6 +395,28 @@ S'arrêter à 4 aurait publié une régression inexistante **et** bloqué un
 changement gratuit. Grouper les passes, ou prendre une pente — jamais conclure
 sur un écart plus petit que sa propre dispersion.
 
+### 7. Prouver la référence AVANT de s'en servir
+
+Une régression a été diagnostiquée puis bissectée sur quatre commits avant
+qu'un contrôle de reproductibilité ne montre que **la référence elle-même
+n'était pas reproductible** : le dossier d'écriture réutilisé contenait un
+fichier de profil de cinq jours plus tôt, absent des runs suivants.
+
+Il n'y avait aucune régression. **Rejouer la référence deux fois et comparer
+les empreintes avant de comparer quoi que ce soit d'autre** — c'est le contrôle
+le moins cher du lot, et celui dont l'absence coûte le plus.
+
+### 8. Un contrôle négatif peut porter sur une faute que le jeu ne voit pas
+
+Pour prouver qu'un oracle coupe, une faute a été injectée dans un allocateur :
+décaler chaque bloc de 16 octets. **Verdict et compteurs inchangés.** L'oracle
+n'était pas aveugle — la faute était réellement bénigne à cette échelle (les
+libérations échouaient en silence, ce qui fuit sans rien casser).
+
+Un contrôle négatif posé là aurait « prouvé » que l'oracle marche alors qu'il
+ne démontrait rien. Si ta faute ne bouge rien, **cherche-en une autre** avant
+de conclure quoi que ce soit — dans un sens comme dans l'autre.
+
 ## Ce qui n'est pas encore dans le moteur
 
 Un guide honnête sur ses manques est utilisable ; un guide qui promet trop fait
@@ -369,9 +424,9 @@ perdre une journée à celui qui le suit.
 
 | manquant | où c'est aujourd'hui | pourquoi |
 |---|---|---|
-| l'émulation DirectSound | côté portage | le moteur ne possède que le **puits** audio (null / WAV / console), pas la couche COM qui l'alimente. Travail en cours. |
+| ~~l'émulation DirectSound~~ | **au moteur** (`runtime/ds_emul`) | livrée depuis. Un portage dont le jeu passe par une autre bibliothèque audio ne la consommera pas, mais le **puits** (null / WAV / console) et l'horloge hôte, eux, sont communs. |
 | le backend GPU de la console | côté portage | volontairement borné aux états que le premier jeu émet. La couture générique existe (`render/render.h`), le backend qui la réalise, non. |
-| la lecture du pad et le curseur | côté portage | catégorie « propre à la console » identifiée mais pas encore déplacée. Travail en cours. |
+| la lecture du pad et le curseur | côté portage | catégorie « propre à la console » identifiée mais pas encore déplacée. Les valeurs par défaut (orbite, sensibilité, zone morte) sont **identiques dans deux jeux sans rapport** : elles tiennent à l'ergonomie du stick, pas au jeu. Travail en cours. |
 | ~176 fonctions `KERNEL32` | côté portage | fichiers et chemins, plan mémoire, chronométrage d'attente, horloge — voir vague 5. |
 | l'ordonnancement | les **deux** existent | le moteur fournit coopératif **et** natif ; un portage choisit. Le premier portage ne cible plus que le natif, le second démarre encore en coopératif. Ce n'est pas une dette, c'est un choix par consommateur. |
 
