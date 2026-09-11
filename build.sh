@@ -135,6 +135,7 @@ $RT/sched_native.cpp
 $RT/prof.cpp
 $RT/audio_sink_host.cpp
 $RT/guest_atomics.cpp
+$RT/guest_sync.cpp
 $RT/guest_thread_ctx.cpp
 $RT/win32_shims_kernel32.cpp
 $RT/win32_shims_shell32.cpp
