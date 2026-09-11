@@ -10,10 +10,10 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 286 |
-| Clés distinctes | 286 |
+| Inscriptions | 297 |
+| Clés distinctes | 297 |
 | DLL couvertes | 14 |
-| Unités d'installation | 10 |
+| Unités d'installation | 11 |
 
 ## ADVAPI32.dll
 
@@ -107,32 +107,36 @@ Décodeur JPEG Intel.
 
 Les quelques entrées d'énumération de modules que KERNEL32 expose en doublon de PSAPI (`K32*`).
 
-65 inscriptions, 65 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`
+76 inscriptions, 76 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`, `src/runtime/win32_shims_sync.cpp`
 
 | | | |
 |---|---|---|
-| `CopyFileA` | `CreateProcessW` | `DecodePointer` |
+| `CopyFileA` | `CreateEventA` | `CreateEventW` |
+| `CreateMutexA` | `CreateMutexW` | `CreateProcessW` |
+| `CreateSemaphoreA` | `CreateSemaphoreW` | `DecodePointer` |
 | `DuplicateHandle` | `EncodePointer` | `EnumProcessModules` |
 | `EnumSystemLocalesA` | `FreeEnvironmentStringsA` | `FreeEnvironmentStringsW` |
 | `FreeLibrary` | `GetCPInfo` | `GetCurrentProcessId` |
-| `GetDriveTypeA` | `GetFileType` | `GetLastError` |
-| `GetModuleInformation` | `GetProcessAffinityMask` | `GetProfileStringA` |
-| `GetStartupInfoA` | `GetStartupInfoW` | `GetSystemDirectoryA` |
-| `GetTempPathA` | `GetThreadPriority` | `GetVersionExA` |
-| `GetWindowsDirectoryA` | `HeapDestroy` | `InterlockedAnd` |
-| `InterlockedDecrement` | `InterlockedExchange` | `InterlockedExchangeAdd` |
-| `InterlockedExchangePointer` | `InterlockedIncrement` | `InterlockedOr` |
-| `InterlockedXor` | `IsBadCodePtr` | `IsBadReadPtr` |
-| `IsBadWritePtr` | `IsDebuggerPresent` | `IsProcessorFeaturePresent` |
-| `IsValidCodePage` | `IsValidLocale` | `K32EnumProcessModules` |
-| `K32GetModuleInformation` | `MemoryBarrier` | `OpenEventA` |
-| `OpenMutexA` | `OpenProcess` | `QueryPerformanceFrequency` |
-| `RemoveDirectoryA` | `RtlUnwind` | `SetCurrentDirectoryA` |
-| `SetEndOfFile` | `SetErrorMode` | `SetFileTime` |
-| `SetHandleCount` | `SetLastError` | `SetPriorityClass` |
-| `SetThreadAffinityMask` | `SetThreadLocale` | `SetThreadPriority` |
-| `SuspendThread` | `TlsFree` | `UnhandledExceptionFilter` |
-| `WriteConsoleW` | `WritePrivateProfileStringA` |  |
+| `GetDriveTypeA` | `GetExitCodeThread` | `GetFileType` |
+| `GetLastError` | `GetModuleInformation` | `GetProcessAffinityMask` |
+| `GetProfileStringA` | `GetStartupInfoA` | `GetStartupInfoW` |
+| `GetSystemDirectoryA` | `GetTempPathA` | `GetThreadPriority` |
+| `GetVersionExA` | `GetWindowsDirectoryA` | `HeapDestroy` |
+| `InterlockedAnd` | `InterlockedDecrement` | `InterlockedExchange` |
+| `InterlockedExchangeAdd` | `InterlockedExchangePointer` | `InterlockedIncrement` |
+| `InterlockedOr` | `InterlockedXor` | `IsBadCodePtr` |
+| `IsBadReadPtr` | `IsBadWritePtr` | `IsDebuggerPresent` |
+| `IsProcessorFeaturePresent` | `IsValidCodePage` | `IsValidLocale` |
+| `K32EnumProcessModules` | `K32GetModuleInformation` | `MemoryBarrier` |
+| `OpenEventA` | `OpenMutexA` | `OpenProcess` |
+| `PulseEvent` | `QueryPerformanceFrequency` | `ReleaseMutex` |
+| `RemoveDirectoryA` | `ResetEvent` | `RtlUnwind` |
+| `SetCurrentDirectoryA` | `SetEndOfFile` | `SetErrorMode` |
+| `SetEvent` | `SetFileTime` | `SetHandleCount` |
+| `SetLastError` | `SetPriorityClass` | `SetThreadAffinityMask` |
+| `SetThreadLocale` | `SetThreadPriority` | `SuspendThread` |
+| `TlsFree` | `UnhandledExceptionFilter` | `WriteConsoleW` |
+| `WritePrivateProfileStringA` |  |  |
 
 ## PSAPI.DLL
 
@@ -252,6 +256,7 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 | `win32_shims_misc_install` | `src/runtime/win32_shims_misc.cpp` | 31 |
 | `win32_shims_psapi_install` | `src/runtime/win32_shims_psapi.cpp` | 5 |
 | `win32_shims_shell32_install` | `src/runtime/win32_shims_shell32.cpp` | 2 |
+| `win32_shims_sync_install` | `src/runtime/win32_shims_sync.cpp` | 11 |
 | `win32_shims_user32_install` | `src/runtime/win32_shims_user32.cpp` | 23 |
 | `win32_shims_version_install` | `src/runtime/win32_shims_version.cpp` | 4 |
 | `win32_shims_window_install` | `src/runtime/win32_shims_window.cpp` | 33 |

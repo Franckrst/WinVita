@@ -26,6 +26,11 @@ void wx86_set_scheduler(d2rt::ThreadScheduler* s);
 
 // TIB du fil courant, ou le TIB principal si aucun fil n'est ordonnance.
 uint32_t wx86_cur_tib();
+// L'ordonnanceur vivant, tel que le consommateur l'a declare. Les shims de
+// synchronisation en ont besoin pour endormir et reveiller ; le declarer une
+// fois evite que chaque portage garde SON pointeur a cote de celui du moteur —
+// c'est exactement le jumeau d'etat qui a coute trois incidents cette semaine.
+d2rt::ThreadScheduler* wx86_sched();
 
 // Derniere erreur Win32 (TEB+0x34) du fil courant.
 void     wx86_set_lasterr(d2rt::Cpu& c, uint32_t v);

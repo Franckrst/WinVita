@@ -12,6 +12,8 @@ static uint32_t         g_wxMainTib = 0;
 void wx86_set_main_tib(uint32_t tib){ g_wxMainTib = tib; }
 void wx86_set_scheduler(ThreadScheduler* s){ g_wxSched = s; }
 
+ThreadScheduler* wx86_sched(){ return g_wxSched; }
+
 uint32_t wx86_cur_tib(){
     return (g_wxSched && g_wxSched->current()) ? g_wxSched->current()->tib
                                               : g_wxMainTib;

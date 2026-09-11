@@ -115,6 +115,7 @@ enum {
     WX86_SYNC_WAIT_DONE,       // une attente vient d'aboutir : obj = l'objet obtenu
     WX86_SYNC_OBJ_CREATE,      // creation : obj = l'objet, handle = son handle
     WX86_SYNC_OBJ_CLOSE,
+    WX86_SYNC_EVENT_PULSE,
 };
 struct WxSyncEvent {
     int               kind;
