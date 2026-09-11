@@ -19,6 +19,7 @@ nav:
   - Démarrage rapide: demarrage.md
   - Architecture: architecture.md
   - "Point d'extension — porter son jeu": extension.md
+  - "Migrer un portage existant": migration.md
   - Shims Win32 fournis (généré): shims.md
   - Outils IA / agents réutilisables: outils-ia.md
   - Historique et provenance: historique.md
