@@ -1,8 +1,50 @@
 # Outils IA / agents réutilisables
 
-Cette page recense l'outillage de développement pensé pour être réutile par
+Cette page recense l'outillage de développement pensé pour être réutilisable par
 n'importe quel portage basé sur winx86 — pas seulement d2vita — et propose
 quelques pistes pour la suite.
+
+## `.claude/skills/` et `.claude/agents/`
+
+Le savoir-faire du moteur est versionné avec lui, et chargé automatiquement par
+Claude Code quand on travaille dans ce dépôt.
+
+Les **skills** décrivent un domaine : les internes du dynarec et de
+l'ordonnanceur, les crochets sur code invité, la méthode d'élimination face à une
+corruption intermittente, la vérification d'un instrument avant d'y croire, le
+protocole de mesure sur vrai matériel, et les bases de la plateforme Vita.
+
+Les **agents** décrivent une procédure complète et rejouable :
+
+- `shim-split` — déplacer des shims entre le moteur et un portage : classer par
+  le **corps** et non par le nom d'API, le filet `shim_seq`, la règle « une seule
+  inscription par clé », et le seuil à partir duquel « trop enchevêtré » est une
+  conclusion acceptable.
+- `doc-update` — remettre la doc en accord avec le code, en vérifiant dans le
+  code plutôt que dans un résumé.
+
+La frontière est la même que pour le code : ce qui ne sert qu'à un seul
+consommateur (lire *ses* archives, piloter *sa* boucle de jeu) reste chez lui.
+
+## `tools/gen_shim_list.py` — la page des shims est générée
+
+[La liste des shims fournis par le moteur](shims.md) n'est pas écrite à la main :
+elle est produite depuis `src/runtime/win32_shims_*.cpp`, en réutilisant le
+parseur déjà éprouvé de `shim_seq.py` plutôt qu'un second analyseur à maintenir
+en parallèle. La CI la régénère et **échoue si elle a divergé**
+(`gen_shim_list.py --check`).
+
+Une liste écrite à la main serait fausse au deuxième commit, et une liste fausse
+est pire qu'une absence de liste : on croit alors savoir ce que le moteur couvre.
+
+Deux choix de fond :
+
+- les **doublons d'inscription sont signalés**, pas dédoublonnés en silence — une
+  page qui les masquerait cacherait précisément ce qu'on veut voir ;
+- les ordinaux Winsock sont **nommés d'après la source** (la lambda `connect_fn`
+  donne `connect`), jamais d'après une table recopiée à la main. C'est ce qui
+  rend visible la divergence réelle entre `WSOCK32.dll` et `WS2_32.dll` sur les
+  ordinaux 10/11/12.
 
 ## `tools/shim_seq.py` / `.sh` / `.allow`
 
@@ -100,6 +142,8 @@ n'existe comme dépôt séparé.
   réel) packagé en `.gitlab-ci.yml` réutilisable, pour qu'un nouveau portage
   n'ait pas à redécouvrir la distinction entre « ça compile », « ça boote
   sous émulation » et « c'est réellement plus rapide sur la vraie console ».
+  La CI actuelle ne fait que publier le site et vérifier la fraîcheur de la
+  page générée.
 - **Un `shim_seq` généralisé au-delà des shims** — le même patron
   (séquence + empreinte + diff entre deux révisions) s'appliquerait à
   n'importe quelle table d'enregistrement « dernière inscription gagne »,

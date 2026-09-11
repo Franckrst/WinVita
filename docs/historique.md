@@ -22,6 +22,24 @@ moteur qui n'avait aucune connaissance du jeu (chargeur PE32, dynarec, `Cpu`/
 Win32 du jeu, ses hooks de performance sur des adresses précises de son
 binaire, son rendu Glide — est resté dans d2vita.
 
+## La frontière a bougé (2026-09-10 / 09-11)
+
+La coupure initiale était prudente : **aucun** shim Win32 n'avait suivi, un
+audit ayant trouvé du contenu propre au jeu caché derrière des noms d'API
+parfaitement génériques. Cette prudence était justifiée sur le constat, mais la
+conclusion « aucun shim n'est générique par nature » s'est révélée trop forte.
+
+En reprenant groupe de DLL par groupe de DLL, et en classant chaque fonction par
+son **corps** plutôt que par son nom, plus de deux cents inscriptions ont rejoint
+le moteur : SHELL32, ADVAPI32, USER32, DirectDraw/Bink/Smacker/ijl11, IMM32,
+GDI32, fenêtre et curseur, VERSION et PSAPI, puis toute la couche socket.
+
+Trois points d'extension neutres sont nés de ce travail, chacun d'une politique
+qu'il fallait sortir d'un shim sans la perdre : l'allocateur de brouillon invité,
+l'observateur passif de la couche socket, et la route de connexion. Le détail est
+dans [Point d'extension](extension.md), la liste exacte dans [Shims
+fournis](shims.md).
+
 ## Pourquoi un historique git neuf, pas hérité de d2vita
 
 winx86 démarre avec un historique git **volontairement neuf**, pas extrait

@@ -97,6 +97,30 @@ Le choix se fait au niveau du portage, pas de winx86.
 `Bridge` (`src/runtime/bridge.h`, `.cpp`) est le mécanisme générique
 d'enregistrement de shims Win32 : `register_shim(dll, name, shim)` associe
 un nom de fonction DLL+symbole à une implémentation native, `shim_trap(dll,
-name)` obtient l'adresse de trap à donner à `set_alternate`. C'est tout —
-winx86 ne fournit **aucun** shim pré-écrit, voir
-[Point d'extension](extension.md).
+name)` obtient l'adresse de trap à donner à `set_alternate`.
+
+Par-dessus ce mécanisme, `src/runtime/win32_shims_*.cpp` fournit une
+bibliothèque de shims dont il a été **prouvé, corps par corps**, qu'ils ne
+portent aucun comportement propre à un jeu — la liste exacte est
+[générée depuis les sources](shims.md). Chacun s'installe par un appel
+explicite du portage (`win32_shims_<groupe>_install(br)`) : le moteur n'en
+inscrit aucun de sa propre initiative, et comme la dernière inscription gagne,
+un portage peut toujours substituer la sienne.
+
+## Services génériques exposés au portage
+
+Quand une fonctionnalité est générique mais que la politique ne l'est pas, le
+moteur expose un point d'extension neutre plutôt que de deviner :
+
+- **`guest_scratch.{h,cpp}`** — l'allocateur de brouillon en mémoire invitée,
+  nécessaire à toute API Win32 qui rend un *pointeur* que l'appelant lira. Le
+  moteur alloue, le portage lui concède une plage (le plan mémoire, lui, n'a
+  rien d'universel).
+- **`win32_shims_wsock32.h`** — la table de poignées de sockets, l'unique
+  magasin de dernière erreur Winsock, un observateur passif de la couche socket
+  (le moteur raconte, il ne demande jamais d'avis) et une route de connexion
+  générique.
+- **`net_nonblock.{h,cpp}`**, **`poll_gil.{h,cpp}`** — résolution de noms et
+  attente compatible avec le verrou global.
+
+Voir [Point d'extension](extension.md).

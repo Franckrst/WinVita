@@ -1,48 +1,71 @@
 # Limites connues / dette technique
 
-Cette page liste honnêtement ce qui n'est pas encore fait, plutôt que de le
-laisser découvrir en silence.
+Cette page liste honnêtement ce qui n'est pas fait, plutôt que de le laisser
+découvrir en silence.
 
-## Namespace des variables d'environnement `D2_*`
+!!! note "Elle se vide aussi"
+    Une page de dette ne fait que grossir si personne n'en retire les entrées
+    payées. Chaque chantier terminé doit en supprimer une — une dette déjà réglée
+    qui traîne fait croire à un travail restant.
 
-Plusieurs variables de réglage entièrement génériques portent encore un
-préfixe `D2_`, héritage du nom du projet d'origine (d2vita) :
-`D2_WAKEPROF` (`sched_native.cpp`), `D2_JITPROFILE`, `D2_CALLRET`,
-`D2_FORWARD`, `D2_BUDGETTAIL`, `D2_NOPEND`, `D2_SIGNTAG`, `D2_MMUFOLD`,
-`D2_MMUSTACK`, `D2_NOLINK` (`src/dynarec86/`). Leur comportement est
-entièrement générique — c'est un problème de nom, pas de couplage réel — mais
-ça peut induire en erreur un nouveau consommateur qui chercherait un lien
-avec Diablo II là où il n'y en a pas. Nettoyage prévu, probablement vers un
-préfixe neutre (`WX86_*`) avec des alias `D2_*` conservés côté d2vita pour
-compatibilité. Pas encore fait.
+## Variables d'environnement : six noms `D2*` sans équivalent
 
-## `src/runtime/ds_emul.{h,cpp}` — reste côté d2vita
+Le gros du renommage est fait (`1e003e2`) : les réglages génériques s'appellent
+`WX86_*`, les anciens noms `D2_*` restent acceptés en repli pour ne pas casser
+les scripts existants.
 
-Émulation DirectSound par fabrication d'une vtable COM à partir d'une table
-de shims. Le *mécanisme* (fabriquer une vtable COM générique depuis une
-table de pointeurs de fonctions) est réutilisable tel quel par n'importe
-quel jeu utilisant DirectSound ; le fichier actuel mélange ce mécanisme avec
-des choix de mixage audio spécifiques au jeu d'origine. Une scission propre
-(mécanisme générique dans winx86, choix de mixage côté portage) est
-identifiée mais pas encore faite.
+Six variables lues par le moteur n'ont **pas** encore de jumeau `WX86_` :
+`D2ARENA`, `D2HI`, `D2LAYOUT`, `D2MEMBASE`, `D2_EIPTRAP_N`, `D2_XFERTRACE`.
+Deux autres n'ont aucun préfixe du tout (`THREADLOG`, `TRAPTAG`), ce qui est un
+risque de collision avec l'environnement d'un consommateur.
 
-## Présentation écran et réseau — restent côté d2vita
+C'est un problème de **nom**, pas de couplage : leur comportement est
+entièrement générique. Mais ça induit en erreur quelqu'un qui chercherait un
+lien avec le jeu d'origine là où il n'y en a pas.
 
-`vita_present.cpp` (présentation à l'écran) n'a pas encore été auditée en
-détail pour en extraire une éventuelle partie générique. `vita_net.{h,cpp}`
-(couche réseau) a un cas plus net : son auto-test embarque des vérifications
-du protocole réseau spécifique au jeu d'origine (poignée de main, serveur
-par défaut) — mélangé au reste du fichier plutôt que proprement séparé.
+## `select` reste inscrit par le portage
 
-## Les ~600 shims Win32 de d2vita ne sont PAS dans winx86, et ne le seront
-## peut-être jamais tels quels
+Toute la couche socket est passée côté moteur ([liste générée](shims.md)) — sauf
+`select` (`WSOCK32.dll!#18`) et le `__WSAFDIsSet` qui l'accompagne.
 
-Voir [Point d'extension](extension.md#pourquoi-winx86-ne-fournit-aucun-shim-meme-generique)
-pour le pourquoi. Ce n'est pas un oubli — c'est une décision de conception :
-même un shim au nom d'API Windows standard peut porter un comportement
-spécifique à un jeu, et il n'existe pas de façon fiable de le détecter en
-bloc sans auditer chaque shim individuellement. Une bibliothèque de shims
-« de base » réellement vérifiés génériques (par exemple via la technique de
-comparaison à deux portages, voir
-[Outils IA](outils-ia.md#une-technique-nommee-la-genericite-par-comparaison))
-reste une direction possible, pas encore entreprise faute d'un audit complet.
+Son cœur — la traduction `fd_set` ↔ `pollfd` — est pourtant générique. Ce qui le
+retient est précis : c'est le site exact d'une famine réseau déjà corrigée, dont
+la signature de régression ne se voit **que sous charge réseau réelle**. La
+validation en ligne faite lors du découplage n'a pas couvert ce cas-là. C'est
+donc un report assumé, avec un critère de levée écrit : un test de charge réel,
+pas une relecture.
+
+## `ds_emul` (DirectSound) — pas extrait
+
+Émulation DirectSound par fabrication d'une vtable COM à partir d'une table de
+shims. Le *mécanisme* — fabriquer une vtable COM générique depuis une table de
+pointeurs de fonctions — est réutilisable tel quel par n'importe quel jeu
+utilisant DirectSound ; le fichier actuel, côté portage, mélange ce mécanisme
+avec des choix de mixage audio propres au jeu.
+
+Une scission propre (mécanisme ici, choix de mixage là-bas) est identifiée mais
+n'a jamais été auditée en détail.
+
+## La présentation écran — jamais auditée
+
+`vita_present.cpp` (présentation à l'écran) n'a jamais été relu pour en extraire
+une éventuelle partie générique. C'est, avec `ds_emul`, le dernier gros morceau
+où personne n'a regardé — l'inconnue n'est donc pas « combien est générique »,
+c'est « on ne sait pas ».
+
+## Chemin personnel en dur dans deux scripts
+
+`tools/regen_box86_patch.sh` et `tools/extract_box86.sh` ont
+`/home/doudou/repos/box86` comme valeur par défaut du dépôt Box86 amont. C'est
+surchargeable en premier argument, donc sans conséquence fonctionnelle, mais
+c'est un chemin personnel dans un dépôt destiné à être lisible par d'autres.
+
+## Une seule preuve d'usage
+
+winx86 n'a qu'un consommateur réel à ce jour. Tout ce qui est déclaré
+« générique » l'est par audit du code, pas par la preuve d'un deuxième portage
+qui s'en sert — à une exception près, la technique de comparaison entre deux
+portages décrite dans [Outils IA](outils-ia.md).
+
+C'est la limite la plus honnête de ce dépôt : la frontière a été tracée avec
+soin, mais elle n'a pas encore été tirée par un second usage.
