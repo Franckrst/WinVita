@@ -123,6 +123,37 @@ gate destroyed it exactly where it was hardest to obtain.
 **When a diagnostic mixes a cumulative counter with an instantaneous state,
 print the counter unconditionally.** Absence of a line must mean one thing only.
 
+## 4 bis. An oracle must observe the OUTPUT of what you changed, not its input
+
+Before trusting any comparator, ask where in the pipeline it samples. A hash
+taken **upstream** of the code under test is blind to that code by construction:
+it will report "identical" no matter what you break, and it will do so
+confidently, forever.
+
+> A port kept a framebuffer hash used as the pixel-exactness oracle for every
+> A/B in the project. Validating a rewrite of the **presentation scaler**, the
+> obvious move was to reuse it. But that hash fingerprints the source bitmap the
+> game writes — the scaler's *input*. Every scaler bug, up to and including
+> rendering pure black, would have passed.
+
+The failure is silent and flattering, which is what makes it dangerous: a
+comparator that always agrees feels like strong evidence. The project has been
+bitten by comparators whose legs were both wrong; this is the same family.
+
+**Checks, in order:**
+1. **Locate the sampling point** relative to your change. Upstream = useless.
+2. **Prove it bites**: inject a deliberate, minimal fault (one bit, one pixel)
+   and confirm the oracle fails. Then remove the fault and confirm it passes.
+   Do this with the **same binary** that will produce the real verdict.
+3. **Prove it ran**: a comparator reporting "0 differences" and one that never
+   executed look identical in a log. Publish the count of comparisons made, and
+   check it is non-zero and plausible.
+
+When the natural oracle samples in the wrong place, the strongest replacement is
+to run **both implementations on the same input inside the same call** and
+compare their outputs directly. That removes run-to-run non-determinism from the
+question entirely — no two runs need to reach the same state.
+
 ## 5. Static sites are not executed calls
 
 Counting occurrences in the source — or even in the disassembly — answers a

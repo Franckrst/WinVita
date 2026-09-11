@@ -122,6 +122,26 @@ window, then a single read. Polling the device perturbs what you are measuring.
 
 **7 — Take a median over windows past the warm-up**, discarding boot and load.
 
+**8 — Enough passes per leg, or the SIGN itself is noise.** Never conclude on a
+gap smaller than the dispersion of a single leg. Two legs of two passes will
+happily produce a clean-looking number that does not exist.
+
+> Presentation scaler, 2026-09-11, same binary, one knob apart.
+> **At 4 passes per leg**: witness 87,43 img/s, candidate 86,19 → **−1,42 %**,
+> Welch t = −2,05. A regression, apparently.
+> **At 6 passes per leg**: witness 86,66 (σ 1,48 %), candidate 86,77 (σ 1,40 %)
+> → **+0,12 %**, Welch t = 0,14. No effect at all.
+>
+> The two extra passes per leg **inverted the sign**. Stopping at four would
+> have published a regression that does not exist — and, worse, it would have
+> blocked a change that was in fact free.
+
+Practical rule: compute the per-leg standard deviation **before** looking at the
+difference of means. If |effect| < σ of the noisier leg, you have measured
+nothing — add passes or report "not measurable", never report the number.
+Interleave the legs (A B A B) rather than running one leg then the other, so
+drift cannot masquerade as effect.
+
 ### Per-leg signature
 
 Distinct binary **sizes** are the cheap per-leg signature: verify the uploaded
