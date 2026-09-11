@@ -47,10 +47,11 @@ void wx86_vita_progress(const char* msg) {
 extern "C" void wx86_vita_progress_c(const char* m) { wx86_vita_progress(m); }
 
 // ===========================================================================
-//  HORLOGE MONOTONE
+//  SOMMEIL REEL
 // ===========================================================================
-uint64_t wx86_vita_now_ms() { return sceKernelGetProcessTimeWide() / 1000ull; }
-uint64_t wx86_vita_now_us() { return sceKernelGetProcessTimeWide(); }
+// L'horloge monotone a sa place dans runtime/host_clock.h : elle a un sens
+// hors console. La garder ici en aurait fait un DEUXIEME exemplaire dans le
+// moteur, ce qui est precisement le defaut que ce chantier traque.
 void wx86_vita_sleep_ms(uint32_t ms) { if (ms) sceKernelDelayThread(ms * 1000u); }
 
 // ===========================================================================

@@ -59,10 +59,11 @@ extern "C" const char* const wx86_vita_progress_path;
 void wx86_vita_progress(const char* msg);
 extern "C" void wx86_vita_progress_c(const char* msg);
 
-// ---- Horloge monotone de la console ---------------------------------------
-uint64_t wx86_vita_now_ms();
-uint64_t wx86_vita_now_us();
-void     wx86_vita_sleep_ms(uint32_t ms);
+// ---- Sommeil reel ----------------------------------------------------------
+// L'HORLOGE monotone n'est PAS ici : elle vit dans runtime/host_clock.h
+// (wx86_now_us / wx86_now_ms), parce qu'elle a un sens hors console aussi.
+// Seul le sommeil reste ici — il passe par l'ordonnanceur Sony.
+void wx86_vita_sleep_ms(uint32_t ms);
 
 // ---- Repartition des fils hotes sur les coeurs user ------------------------
 // WX86_COEURS (repli : D2_COEURS) — trois chiffres 0..3, un par role :
