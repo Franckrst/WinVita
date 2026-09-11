@@ -25,6 +25,8 @@ Waitable* wx86_handle_find(uint32_t h){
     return it==g_handles.end() ? nullptr : it->second;
 }
 void wx86_handle_erase(uint32_t h){ g_handles.erase(h); }
+unsigned wx86_handle_count(){ return (unsigned)g_handles.size(); }
+uint32_t wx86_handle_next_id(){ return g_nextObj++; }
 
 // ---- Sections critiques -----------------------------------------------------
 static std::map<uint32_t,WxCrit*> g_crits;

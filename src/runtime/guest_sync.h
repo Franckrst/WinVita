@@ -70,6 +70,14 @@ bool wx86_is_kind(d2rt::Waitable* w, const char* kind);
 uint32_t          wx86_handle_add(d2rt::Waitable* w);
 d2rt::Waitable*   wx86_handle_find(uint32_t h);
 void              wx86_handle_erase(uint32_t h);
+unsigned          wx86_handle_count();
+
+// Reserve un identifiant SANS rien ranger dans la table. Un portage a
+// forcement des handles a lui qui ne sont pas des objets attendables — un
+// instantane de processus, par exemple. Ils doivent etre numerotes par le MEME
+// compteur, sinon deux handles distincts finissent par porter le meme numero.
+// C'est la raison d'etre de cette fonction : une seule table, un seul compteur.
+uint32_t          wx86_handle_next_id();
 
 // ---- Sections critiques -----------------------------------------------------
 // Cache MRU a une entree : l'acces aux sections critiques est tres repetitif
