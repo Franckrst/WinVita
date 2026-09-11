@@ -144,6 +144,7 @@ $RT/win32_shims_window.cpp
 $RT/win32_shims_wsock32.cpp
 $RT/poll_gil.cpp
 $RT/net_nonblock.cpp
+$RT/guest_scratch.cpp
 $PLAT/vita_audio.cpp
 "
 
