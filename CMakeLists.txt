@@ -43,6 +43,8 @@ add_library(winx86_core STATIC
   src/runtime/guest_scratch.cpp
   src/runtime/guest_region.cpp
   src/runtime/host_clock.cpp
+  src/runtime/guest_str.cpp
+  src/runtime/guest_locale.cpp
   src/runtime/ds_emul.cpp
   src/platform/present_scale.cpp
   src/render/render_null.cpp)

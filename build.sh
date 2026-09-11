@@ -155,6 +155,8 @@ $RT/net_nonblock.cpp
 $RT/guest_scratch.cpp
 $RT/guest_region.cpp
 $RT/host_clock.cpp
+$RT/guest_str.cpp
+$RT/guest_locale.cpp
 $RT/ds_emul.cpp
 $PLAT/vita_audio.cpp
 $PLAT/vita_host.cpp
