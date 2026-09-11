@@ -24,11 +24,28 @@
 #include "win32_shims_kernel32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
+#include "guest_atomics.h"
+#include "guest_thread_ctx.h"
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <string>
 using namespace d2rt;
+
+// Alias locaux : les corps de la vague 2 sont deplaces mot pour mot depuis le
+// portage, ou ces noms courts designaient les memes fonctions. Les definir ici
+// evite de reecrire les corps, donc de les relire a l'aveugle.
+static inline uint32_t* ilk_ptr(Cpu& c, uint32_t va){ return wx86_ilk_ptr(c,va); }
+static inline uint32_t ilk_add_fetch(uint32_t* h, uint32_t v){ return wx86_ilk_add_fetch(h,v); }
+static inline uint32_t ilk_sub_fetch(uint32_t* h, uint32_t v){ return wx86_ilk_sub_fetch(h,v); }
+static inline uint32_t ilk_exchange (uint32_t* h, uint32_t v){ return wx86_ilk_exchange (h,v); }
+static inline uint32_t ilk_fetch_add(uint32_t* h, uint32_t v){ return wx86_ilk_fetch_add(h,v); }
+static inline uint32_t ilk_fetch_or (uint32_t* h, uint32_t v){ return wx86_ilk_fetch_or (h,v); }
+static inline uint32_t ilk_fetch_and(uint32_t* h, uint32_t v){ return wx86_ilk_fetch_and(h,v); }
+static inline uint32_t ilk_fetch_xor(uint32_t* h, uint32_t v){ return wx86_ilk_fetch_xor(h,v); }
+static inline uint32_t ilk_cas(uint32_t* h, uint32_t e, uint32_t d){ return wx86_ilk_cas(h,e,d); }
+static inline void set_lasterr(Cpu& c, uint32_t v){ wx86_set_lasterr(c,v); }
+static inline uint32_t get_lasterr(Cpu& c){ return wx86_get_lasterr(c); }
 
 void win32_shims_kernel32_install(Bridge& br){
     auto K=[&](const char* name,uint32_t ac,std::function<uint32_t(Cpu&)> fn){
@@ -82,4 +99,41 @@ void win32_shims_kernel32_install(Bridge& br){
     K("UnhandledExceptionFilter",1,[](Cpu&){ return 0u; });      // EXCEPTION_CONTINUE_SEARCH
     K("WriteConsoleW",5,[](Cpu&c){ if(c.arg(3)) c.write_u32(c.arg(3),c.arg(2)); return 1u; });
     K("WritePrivateProfileStringA",4,[](Cpu&){ return 1u; });
+
+    // ---- Vague 2 (2026-09-11) : debloquee par les points d'extension --------
+    // Ces corps dependaient de helpers que le portage hebergeait ; ils vivent
+    // desormais dans le moteur (guest_atomics.h, guest_thread_ctx.h). Les noms
+    // courts restent des alias locaux pour que les corps soient deplaces SANS
+    // etre reecrits — un deplacement qu'on peut relire ligne a ligne.
+    K("CreateProcessW",10,[](Cpu&c){ set_lasterr(c,2); return 0u; });          // no child processes (crash reporter)
+    K("GetLastError",0,[](Cpu&c){ return get_lasterr(c); });
+    K("InterlockedAnd",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_fetch_and(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,o&v); return o; });
+    K("InterlockedDecrement",1,[](Cpu&c){ uint32_t p=c.arg(0);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_sub_fetch(h,1u);
+        uint32_t v=c.read_u32(p)-1; c.write_u32(p,v); return v; });
+    K("InterlockedExchange",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_exchange(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,v); return o; });
+    K("InterlockedExchangeAdd",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_fetch_add(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,o+v); return o; });
+    K("InterlockedExchangePointer",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_exchange(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,v); return o; });
+    K("InterlockedIncrement",1,[](Cpu&c){ uint32_t p=c.arg(0);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_add_fetch(h,1u);
+        uint32_t v=c.read_u32(p)+1; c.write_u32(p,v); return v; });
+    K("InterlockedOr",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_fetch_or(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,o|v); return o; });
+    K("InterlockedXor",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);
+        if(uint32_t* h=ilk_ptr(c,p)) return ilk_fetch_xor(h,v);
+        uint32_t o=c.read_u32(p); c.write_u32(p,o^v); return o; });
+    K("MemoryBarrier",0,[](Cpu&){ wx86_ilk_fence(); return 0u; });
+    K("OpenEventA",3,[](Cpu&c){ set_lasterr(c,2); return 0u; });
+    K("OpenMutexA",3,[](Cpu&c){ set_lasterr(c,2); return 0u; });
+    K("OpenProcess",3,[](Cpu&c){ set_lasterr(c,5); return 0u; });            // ERROR_ACCESS_DENIED
+    K("SetLastError",1,[](Cpu&c){ set_lasterr(c,c.arg(0)); return 0u; });
 }

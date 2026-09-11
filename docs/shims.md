@@ -10,8 +10,8 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 271 |
-| Clés distinctes | 271 |
+| Inscriptions | 286 |
+| Clés distinctes | 286 |
 | DLL couvertes | 14 |
 | Unités d'installation | 10 |
 
@@ -107,24 +107,29 @@ Décodeur JPEG Intel.
 
 Les quelques entrées d'énumération de modules que KERNEL32 expose en doublon de PSAPI (`K32*`).
 
-50 inscriptions, 50 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`
+65 inscriptions, 65 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`
 
 | | | |
 |---|---|---|
-| `CopyFileA` | `DecodePointer` | `DuplicateHandle` |
-| `EncodePointer` | `EnumProcessModules` | `EnumSystemLocalesA` |
-| `FreeEnvironmentStringsA` | `FreeEnvironmentStringsW` | `FreeLibrary` |
-| `GetCPInfo` | `GetCurrentProcessId` | `GetDriveTypeA` |
-| `GetFileType` | `GetModuleInformation` | `GetProcessAffinityMask` |
-| `GetProfileStringA` | `GetStartupInfoA` | `GetStartupInfoW` |
-| `GetSystemDirectoryA` | `GetTempPathA` | `GetThreadPriority` |
-| `GetVersionExA` | `GetWindowsDirectoryA` | `HeapDestroy` |
-| `IsBadCodePtr` | `IsBadReadPtr` | `IsBadWritePtr` |
-| `IsDebuggerPresent` | `IsProcessorFeaturePresent` | `IsValidCodePage` |
-| `IsValidLocale` | `K32EnumProcessModules` | `K32GetModuleInformation` |
-| `QueryPerformanceFrequency` | `RemoveDirectoryA` | `RtlUnwind` |
-| `SetCurrentDirectoryA` | `SetEndOfFile` | `SetErrorMode` |
-| `SetFileTime` | `SetHandleCount` | `SetPriorityClass` |
+| `CopyFileA` | `CreateProcessW` | `DecodePointer` |
+| `DuplicateHandle` | `EncodePointer` | `EnumProcessModules` |
+| `EnumSystemLocalesA` | `FreeEnvironmentStringsA` | `FreeEnvironmentStringsW` |
+| `FreeLibrary` | `GetCPInfo` | `GetCurrentProcessId` |
+| `GetDriveTypeA` | `GetFileType` | `GetLastError` |
+| `GetModuleInformation` | `GetProcessAffinityMask` | `GetProfileStringA` |
+| `GetStartupInfoA` | `GetStartupInfoW` | `GetSystemDirectoryA` |
+| `GetTempPathA` | `GetThreadPriority` | `GetVersionExA` |
+| `GetWindowsDirectoryA` | `HeapDestroy` | `InterlockedAnd` |
+| `InterlockedDecrement` | `InterlockedExchange` | `InterlockedExchangeAdd` |
+| `InterlockedExchangePointer` | `InterlockedIncrement` | `InterlockedOr` |
+| `InterlockedXor` | `IsBadCodePtr` | `IsBadReadPtr` |
+| `IsBadWritePtr` | `IsDebuggerPresent` | `IsProcessorFeaturePresent` |
+| `IsValidCodePage` | `IsValidLocale` | `K32EnumProcessModules` |
+| `K32GetModuleInformation` | `MemoryBarrier` | `OpenEventA` |
+| `OpenMutexA` | `OpenProcess` | `QueryPerformanceFrequency` |
+| `RemoveDirectoryA` | `RtlUnwind` | `SetCurrentDirectoryA` |
+| `SetEndOfFile` | `SetErrorMode` | `SetFileTime` |
+| `SetHandleCount` | `SetLastError` | `SetPriorityClass` |
 | `SetThreadAffinityMask` | `SetThreadLocale` | `SetThreadPriority` |
 | `SuspendThread` | `TlsFree` | `UnhandledExceptionFilter` |
 | `WriteConsoleW` | `WritePrivateProfileStringA` |  |
@@ -243,7 +248,7 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 |---|---|---|
 | `win32_shims_advapi32_install` | `src/runtime/win32_shims_advapi32.cpp` | 37 |
 | `win32_shims_gdi32_install` | `src/runtime/win32_shims_gdi32.cpp` | 36 |
-| `win32_shims_kernel32_install` | `src/runtime/win32_shims_kernel32.cpp` | 46 |
+| `win32_shims_kernel32_install` | `src/runtime/win32_shims_kernel32.cpp` | 61 |
 | `win32_shims_misc_install` | `src/runtime/win32_shims_misc.cpp` | 31 |
 | `win32_shims_psapi_install` | `src/runtime/win32_shims_psapi.cpp` | 5 |
 | `win32_shims_shell32_install` | `src/runtime/win32_shims_shell32.cpp` | 2 |
