@@ -3,7 +3,7 @@
 Termes du moteur générique. Pour les termes spécifiques à un portage
 particulier (Diablo II, MPQ, Battle.net...), voir le lexique du portage
 concerné — celui de
-[d2vita](https://claude5564407.gitlab.io/d2-vita/lexique/) par exemple.
+[d2vita](https://d2-vita-bb378b.gitlab.io/lexique/) par exemple.
 
 **PE32** — format binaire des exécutables et DLL Windows 32 bits
 (*Portable Executable*). Ce que `PeImage` charge.
