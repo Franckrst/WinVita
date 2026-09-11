@@ -155,6 +155,7 @@ $RT/guest_region.cpp
 $RT/host_clock.cpp
 $RT/ds_emul.cpp
 $PLAT/vita_audio.cpp
+$PLAT/vita_host.cpp
 $PLAT/present_scale.cpp
 $RENDER/render_null.cpp
 "
