@@ -75,8 +75,30 @@ void              wx86_handle_erase(uint32_t h);
 // Cache MRU a une entree : l'acces aux sections critiques est tres repetitif
 // (la meme section prise et relachee coup sur coup, contention mesuree a
 // 0,0005 %), ce qui evite la descente d'arbre dans le cas courant.
-WxCrit* wx86_crit_for(uint32_t cs_va);
+WxCrit* wx86_crit_for(uint32_t cs_va);      // cree si absent
+WxCrit* wx86_crit_lookup(uint32_t cs_va);   // ne cree pas ; nullptr si inconnue
 void    wx86_crit_forget(uint32_t cs_va);
+// Parcours des sections actuellement DETENUES (diagnostic de fin de run d'un
+// portage). Rappel appele une fois par section detenue.
+void    wx86_crit_each_held(void (*fn)(uint32_t va, uint32_t owner, int count, void* ud), void* ud);
+
+// UN SEUL corps pour la sortie de section critique.
+//
+// Ce point existe a cause d'un piege precis. Ces trois fonctions ont un DOUBLE
+// chemin : le shim normal, et un chemin rapide servi directement dans la
+// repartition de trappes du dynarec. Le chemin rapide n'est pas une copie du
+// shim — il ABANDONNE (et laisse le shim faire) des que le cas sort du
+// nominal : trace active, contention, fil termine. Mais pour le cas non
+// contendu, les deux portaient le MEME code recopie : meme cache MRU, meme
+// decrement, meme reveil. Deux corps qu'il fallait garder identiques a la
+// main, sur le chemin le plus chaud du projet.
+//
+// Ils cessent ici d'etre deux corps. Le moteur porte le coeur ; le shim en est
+// une enveloppe mince, et le chemin rapide, c'est le meme coeur plus son
+// epilogue de trappe. Ils ne PEUVENT plus diverger.
+//
+// Rend true si la section a ete effectivement relachee (compte retombe a zero).
+bool wx86_crit_leave(uint32_t cs_va, d2rt::ThreadScheduler* sched);
 
 // ---- Observateur ------------------------------------------------------------
 enum {

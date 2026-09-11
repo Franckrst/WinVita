@@ -40,6 +40,30 @@ WxCrit* wx86_crit_for(uint32_t cs){
     g_csLastVa = cs; g_csLastK = k;
     return k;
 }
+WxCrit* wx86_crit_lookup(uint32_t cs){
+    if(cs==g_csLastVa && g_csLastK) return g_csLastK;
+    auto it = g_crits.find(cs);
+    if(it==g_crits.end()) return nullptr;
+    g_csLastVa = cs; g_csLastK = it->second;
+    return it->second;
+}
+
+bool wx86_crit_leave(uint32_t cs, ThreadScheduler* sched){
+    WxCrit* k = wx86_crit_lookup(cs);
+    if(!k) return false;
+    if(k->count>0 && --k->count==0){
+        k->owner = 0;
+        if(sched) sched->notify(k);
+        return true;
+    }
+    return false;
+}
+
+void wx86_crit_each_held(void (*fn)(uint32_t,uint32_t,int,void*), void* ud){
+    if(!fn) return;
+    for(auto& p : g_crits) if(p.second->owner) fn(p.first, p.second->owner, p.second->count, ud);
+}
+
 void wx86_crit_forget(uint32_t cs){
     g_crits.erase(cs);
     if(g_csLastVa==cs){ g_csLastVa = 0; g_csLastK = nullptr; }   // MRU invalide
