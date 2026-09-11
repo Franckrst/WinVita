@@ -23,6 +23,7 @@ add_library(winx86_core STATIC
   src/runtime/pe_image.cpp
   src/runtime/bridge.cpp
   src/runtime/guest_atomics.cpp
+  src/runtime/guest_files.cpp
   src/runtime/guest_sync.cpp
   src/runtime/win32_shims_sync.cpp
   src/runtime/guest_thread_ctx.cpp
