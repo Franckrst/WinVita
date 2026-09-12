@@ -45,22 +45,46 @@ namespace d2rt { namespace audio {
 
 namespace {
 
-constexpr int kOutRate = 22050;
+// Frequence de repli, et RIEN DE PLUS. Elle n'est PAS « la » frequence de
+// sortie : c'est celle qu'on demande quand l'appelant n'en donne pas
+// d'utilisable. Le chiffre venait du premier consommateur (tous ses WAV sont a
+// 22050 Hz) et il etait applique a TOUS — open() recevait `freq` et l'ignorait,
+// si bien qu'un flux a une autre frequence aurait joue a la mauvaise hauteur
+// sans un mot. Le second consommateur est a 22050 lui aussi, ce qui rendait le
+// defaut encore plus difficile a voir.
+constexpr int kFallbackRate = 22050;
+
+// Les frequences que l'en-tete du SDK (psp2/audioout.h) declare acceptables
+// pour un port BGM. Demander autre chose est un echec garanti : autant le
+// savoir avant d'appeler, et retomber sur le chemin qui reechantillonne.
+inline bool rate_supported(int hz) {
+    switch (hz) {
+        case 8000: case 11025: case 12000: case 16000: case 22050:
+        case 24000: case 32000: case 44100: case 48000: return true;
+        default: return false;
+    }
+}
 
 class VitaSink : public Sink {
 public:
     bool open(int freq, int ch, int grain) override {
         srcRate_ = freq; ch_ = ch; grain_ = grain;
         const char* pw = getenv("WX86_SON_PORT"); if (!pw) pw = getenv("D2_SON_PORT");
-        // Le port BGM accepte 22050 : AUCUN reechantillonnage sur le chemin par
-        // defaut. Le repli MAIN impose 48000 par l'en-tete du SDK, donc une
-        // interpolation lineaire x2,177 — il existe parce que « le port BGM
-        // est-il attenue quand le lecteur de musique systeme tourne » n'est PAS
-        // dans l'en-tete et ne se tranche que sur materiel.
+        // Le port BGM accepte neuf frequences (voir rate_supported) : sur le
+        // chemin par defaut il n'y a donc AUCUN reechantillonnage, quelle que
+        // soit celle du portage. Le repli MAIN, lui, impose 48000 par l'en-tete
+        // du SDK, donc une interpolation lineaire — il existe parce que « le
+        // port BGM est-il attenue quand le lecteur de musique systeme tourne »
+        // n'est PAS dans l'en-tete et ne se tranche que sur materiel.
         main_ = (pw && !std::strcmp(pw, "main"));
-        outRate_ = main_ ? 48000 : kOutRate;
+        // LA FREQUENCE DE L'APPELANT EST LA FREQUENCE DE SORTIE quand la
+        // console l'accepte : aucun reechantillonnage, aucune derive de
+        // hauteur, aucun cout. Elle ne l'etait pas — la constante gagnait.
+        outRate_ = main_ ? 48000
+                 : rate_supported(srcRate_) ? srcRate_
+                                            : kFallbackRate;
         int len = grain;
-        if (main_) { len = (int)((int64_t)grain * outRate_ / srcRate_); len = (len + 63) & ~63; }
+        if (outRate_ != srcRate_) { len = (int)((int64_t)grain * outRate_ / srcRate_); len = (len + 63) & ~63; }
         if (len < SCE_AUDIO_MIN_LEN) len = SCE_AUDIO_MIN_LEN;
         port_ = sceAudioOutOpenPort(main_ ? SCE_AUDIO_OUT_PORT_TYPE_MAIN : SCE_AUDIO_OUT_PORT_TYPE_BGM,
                                     len, outRate_, SCE_AUDIO_OUT_MODE_STEREO);
@@ -85,7 +109,7 @@ public:
         sceAudioOutSetVolume(port_, (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH), vol);
         std::snprintf(m, sizeof m, "audio: port %s ouvert (port=%d len=%d %d Hz stereo%s)",
                       main_ ? "MAIN" : "BGM", port_, outLen_, outRate_,
-                      main_ ? ", reechantillonnage 22050->48000" : ", sans reechantillonnage");
+                      outRate_ == srcRate_ ? ", sans reechantillonnage" : ", AVEC reechantillonnage");
         wx86_progress(m);
         return true;
     }
@@ -99,7 +123,10 @@ public:
     // c'est le chemin qu'on ne peut pas rejouer sous qemu.
     void write(const int16_t* pcm, int frames) override {
         if (port_ < 0 || !pcm) return;
-        if (!main_) {
+        // LE CRITERE EST L'EGALITE DES FREQUENCES, pas le type de port : c'est
+        // `main_` qui servait de critere, ce qui liait le reechantillonnage a
+        // un knob au lieu de le lier au fait qui le commande.
+        if (outRate_ == srcRate_) {
             if (frames == outLen_) { wrote_ = true; sceAudioOutOutput(port_, pcm); return; }
             if (frames < 0) frames = 0;
             if (frames > outLen_) frames = outLen_;
@@ -109,7 +136,7 @@ public:
             sceAudioOutOutput(port_, rs_);
             return;
         }
-        // Interpolation lineaire vers 48000, jambe de REPLI seulement.
+        // Interpolation lineaire vers outRate_, jambe de REPLI seulement.
         const int n = outLen_;
         for (int i = 0; i < n; i++) {
             const int64_t sp = (int64_t)i * srcRate_;
@@ -139,11 +166,12 @@ public:
                                : "audio: port relache sans drainage (rien n'a ete ecrit)");
     }
     const char* name() const override { return main_ ? "vita-main" : "vita-bgm"; }
+
     int  rest_samples() override { return port_ < 0 ? -1 : sceAudioOutGetRestSample(port_); }
     bool self_paced() const override { return true; }
 
 private:
-    int port_ = -1, srcRate_ = kOutRate, outRate_ = kOutRate, ch_ = 2, grain_ = 512, outLen_ = 512;
+    int port_ = -1, srcRate_ = kFallbackRate, outRate_ = kFallbackRate, ch_ = 2, grain_ = 512, outLen_ = 512;
     bool main_ = false, wrote_ = false;
     int16_t rs_[4096];      // 2048 trames stereo au plus (grain 512 -> 1115 a 48000)
 };
