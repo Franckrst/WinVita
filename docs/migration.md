@@ -286,6 +286,71 @@ migration est une adaptation de types, pas une suppression. Son redimensionneur,
 en revanche, est le **sur-ensemble** dont le moteur a tiré `fit_rect` : son
 cadrage proportionnel est déjà ce que la fonction générique implémente.
 
+#### Ce que la vague 4 a réellement donné sur le second portage (2026-09-12)
+
+La présentation a migré ; la couture graphique, non. Les deux moitiés sont
+également instructives.
+
+**Trois défauts du moteur, tous corrigés en amont, aucun visible depuis le
+premier consommateur seul :**
+
+1. **`present_scale` ne connaissait que deux formats de pixel** — et son
+   en-tête affirmait que c'étaient « les deux seuls que les DIB Windows des
+   portages présentent aujourd'hui ». Le second portage présente du **16 bits
+   5-5-5**, sur son chemin par **défaut**. Une liste écrite depuis un seul
+   appelant décrit cet appelant, pas le domaine.
+2. **`platform/vita_audio.cpp` appelait trois symboles FAIBLES du premier
+   portage** (`d2vita_progress_c`, `d2vita_pin_self_c`,
+   `d2vita_core_register_c`) pour trois services que `platform/vita_host.h`
+   possède désormais. Un portage dont les symboles ne portent pas ce préfixe
+   obtenait un journal muet et un fil non épinglé, **sans erreur de lien**.
+3. **`VitaSink::open(freq, …)` recevait la fréquence et l'ignorait** au profit
+   d'une constante de 22050 Hz — le chiffre du premier jeu. Un flux à une autre
+   fréquence aurait joué à la mauvaise hauteur, en silence.
+
+**Et deux preuves qui manquaient à leur objet :**
+
+4. **`vita_kb.h` citait `tools/tests/kb_test.cpp`** comme justification d'être
+   prouvable sur l'hôte, et ce fichier n'existait **que chez le premier
+   consommateur**. C'est exactement le défaut de la vague 3, répété : l'objet
+   déménage, la preuve reste. L'oracle vit maintenant ici (1 297 vérifications).
+5. **`present_scale_selftest.cpp` n'avait aucune ligne de commande écrite**, et
+   son sous-rectangle n'était vérifié que par des **invariants de bornes** —
+   jamais comparé à une sortie de référence, alors que c'est le cadrage par
+   défaut du second portage. `tools/selftest.sh` rejoue les deux, 320 cas.
+
+!!! warning "Migrer un chemin MORT ne valide rien"
+    Le second portage présente **par la GPU** : `do_scale_and_flip` et son fil
+    de présentation n'ont, chez lui, **aucun appelant**. Y brancher
+    `scale_blit` supprime une duplication réelle et ne prouve strictement rien
+    — aucun run ne l'exerce.
+
+    Vérifier QUI APPELLE avant de migrer change ce qu'on a le droit de
+    revendiquer, et parfois ce qu'on choisit de migrer : c'est la conversion
+    1:1 du chemin GPU (destination = source, cas dégénéré de `scale_blit`) qui
+    fait réellement entrer le moteur dans l'image de ce jeu.
+
+!!! tip "Le sous-rectangle, c'est là que les deux portages divergent"
+    Le premier consommateur n'appelle `scale_blit` qu'en **plein écran**
+    (`DstRect{0,0,SCR_W,SCR_H}`). Le second l'appelle avec un
+    **sous-rectangle** (bandes noires) et en 1:1. Trois usages, un seul corps —
+    et c'est en écrivant la référence des deux autres qu'on découvre ce que le
+    premier n'exerçait pas.
+
+**La couture graphique, elle, reste au portage, et avec une preuve :** le
+moteur n'a **aucun vocabulaire pour la présentation 2D**, alors que le second
+portage a deux pipelines sur **un seul contexte GL** — les triangles, et un
+chemin qui présente une image hôte en quad plein écran avec ses runs de texte
+et ses incrustations. Brancher le moteur pour le seul chemin 3D partagerait la
+propriété du contexte entre deux interfaces. Danger concret, pas difficulté.
+
+Et le constat qui remet la couture à sa place : **`render/render.h` n'a
+aujourd'hui AUCUN consommateur** — vérifié par `grep` dans les deux portages.
+Elle a été déduite de deux backends existants et adoptée par zéro. Selon le
+principe directeur de ce document, c'est de la généralité spéculative tant
+qu'un portage réel ne s'en sert pas ; la présentation 2D manquante est ce qui
+l'en sortirait.
+
 ### Vague 5 — les points d'extension à concevoir
 
 Tout le reste. Et il faut le dire nettement : **le filon mécanique s'épuise.**
