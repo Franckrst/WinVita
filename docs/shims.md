@@ -10,10 +10,10 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 297 |
-| Clés distinctes | 297 |
+| Inscriptions | 358 |
+| Clés distinctes | 358 |
 | DLL couvertes | 14 |
-| Unités d'installation | 11 |
+| Unités d'installation | 14 |
 
 ## ADVAPI32.dll
 
@@ -107,36 +107,56 @@ Décodeur JPEG Intel.
 
 Les quelques entrées d'énumération de modules que KERNEL32 expose en doublon de PSAPI (`K32*`).
 
-76 inscriptions, 76 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_psapi.cpp`, `src/runtime/win32_shims_sync.cpp`
+137 inscriptions, 137 clés distinctes — `src/runtime/win32_shims_kernel32.cpp`, `src/runtime/win32_shims_locale.cpp`, `src/runtime/win32_shims_memory.cpp`, `src/runtime/win32_shims_psapi.cpp`, `src/runtime/win32_shims_sync.cpp`, `src/runtime/win32_shims_wait.cpp`
 
 | | | |
 |---|---|---|
-| `CopyFileA` | `CreateEventA` | `CreateEventW` |
+| `CompareStringA` | `CompareStringW` | `CopyFileA` |
+| `CreateEventA` | `CreateEventW` | `CreateIoCompletionPort` |
 | `CreateMutexA` | `CreateMutexW` | `CreateProcessW` |
 | `CreateSemaphoreA` | `CreateSemaphoreW` | `DecodePointer` |
 | `DuplicateHandle` | `EncodePointer` | `EnumProcessModules` |
-| `EnumSystemLocalesA` | `FreeEnvironmentStringsA` | `FreeEnvironmentStringsW` |
-| `FreeLibrary` | `GetCPInfo` | `GetCurrentProcessId` |
-| `GetDriveTypeA` | `GetExitCodeThread` | `GetFileType` |
-| `GetLastError` | `GetModuleInformation` | `GetProcessAffinityMask` |
-| `GetProfileStringA` | `GetStartupInfoA` | `GetStartupInfoW` |
-| `GetSystemDirectoryA` | `GetTempPathA` | `GetThreadPriority` |
-| `GetVersionExA` | `GetWindowsDirectoryA` | `HeapDestroy` |
-| `InterlockedAnd` | `InterlockedDecrement` | `InterlockedExchange` |
-| `InterlockedExchangeAdd` | `InterlockedExchangePointer` | `InterlockedIncrement` |
-| `InterlockedOr` | `InterlockedXor` | `IsBadCodePtr` |
-| `IsBadReadPtr` | `IsBadWritePtr` | `IsDebuggerPresent` |
-| `IsProcessorFeaturePresent` | `IsValidCodePage` | `IsValidLocale` |
-| `K32EnumProcessModules` | `K32GetModuleInformation` | `MemoryBarrier` |
-| `OpenEventA` | `OpenMutexA` | `OpenProcess` |
-| `PulseEvent` | `QueryPerformanceFrequency` | `ReleaseMutex` |
+| `EnumSystemLocalesA` | `FlushInstructionCache` | `FreeEnvironmentStringsA` |
+| `FreeEnvironmentStringsW` | `FreeLibrary` | `GetACP` |
+| `GetConsoleCP` | `GetConsoleMode` | `GetConsoleOutputCP` |
+| `GetCPInfo` | `GetCurrentProcessId` | `GetDateFormatA` |
+| `GetDriveTypeA` | `GetEnvironmentStrings` | `GetEnvironmentStringsA` |
+| `GetEnvironmentStringsW` | `GetEnvironmentVariableA` | `GetExitCodeThread` |
+| `GetFileType` | `GetLastError` | `GetLocaleInfoA` |
+| `GetLocaleInfoW` | `GetModuleInformation` | `GetOEMCP` |
+| `GetProcessAffinityMask` | `GetProcessHeap` | `GetProfileStringA` |
+| `GetQueuedCompletionStatus` | `GetStartupInfoA` | `GetStartupInfoW` |
+| `GetStdHandle` | `GetStringTypeA` | `GetStringTypeW` |
+| `GetSystemDefaultLangID` | `GetSystemDefaultLCID` | `GetSystemDefaultUILanguage` |
+| `GetSystemDirectoryA` | `GetSystemInfo` | `GetTempPathA` |
+| `GetThreadLocale` | `GetThreadPriority` | `GetTimeFormatA` |
+| `GetUserDefaultLangID` | `GetUserDefaultLCID` | `GetUserDefaultUILanguage` |
+| `GetVersionExA` | `GetWindowsDirectoryA` | `GlobalAlloc` |
+| `GlobalFree` | `GlobalMemoryStatus` | `HeapAlloc` |
+| `HeapCreate` | `HeapDestroy` | `HeapFree` |
+| `HeapReAlloc` | `HeapSize` | `InterlockedAnd` |
+| `InterlockedDecrement` | `InterlockedExchange` | `InterlockedExchangeAdd` |
+| `InterlockedExchangePointer` | `InterlockedIncrement` | `InterlockedOr` |
+| `InterlockedXor` | `IsBadCodePtr` | `IsBadReadPtr` |
+| `IsBadWritePtr` | `IsDebuggerPresent` | `IsProcessorFeaturePresent` |
+| `IsValidCodePage` | `IsValidLocale` | `K32EnumProcessModules` |
+| `K32GetModuleInformation` | `LCMapStringA` | `LCMapStringW` |
+| `LocalAlloc` | `LocalFree` | `lstrcmpA` |
+| `lstrcpyA` | `lstrlenA` | `MemoryBarrier` |
+| `MultiByteToWideChar` | `OpenEventA` | `OpenMutexA` |
+| `OpenProcess` | `PostQueuedCompletionStatus` | `PulseEvent` |
+| `QueryPerformanceFrequency` | `ReleaseMutex` | `ReleaseSemaphore` |
 | `RemoveDirectoryA` | `ResetEvent` | `RtlUnwind` |
-| `SetCurrentDirectoryA` | `SetEndOfFile` | `SetErrorMode` |
-| `SetEvent` | `SetFileTime` | `SetHandleCount` |
-| `SetLastError` | `SetPriorityClass` | `SetThreadAffinityMask` |
-| `SetThreadLocale` | `SetThreadPriority` | `SuspendThread` |
-| `TlsFree` | `UnhandledExceptionFilter` | `WriteConsoleW` |
-| `WritePrivateProfileStringA` |  |  |
+| `SetConsoleCtrlHandler` | `SetCurrentDirectoryA` | `SetEndOfFile` |
+| `SetEnvironmentVariableA` | `SetErrorMode` | `SetEvent` |
+| `SetFileTime` | `SetHandleCount` | `SetLastError` |
+| `SetPriorityClass` | `SetStdHandle` | `SetThreadAffinityMask` |
+| `SetThreadLocale` | `SetThreadPriority` | `SleepEx` |
+| `SuspendThread` | `SwitchToThread` | `TlsFree` |
+| `UnhandledExceptionFilter` | `VirtualAlloc` | `VirtualFree` |
+| `VirtualProtect` | `VirtualQuery` | `WaitForMultipleObjects` |
+| `WaitForSingleObject` | `WideCharToMultiByte` | `WriteConsoleA` |
+| `WriteConsoleW` | `WritePrivateProfileStringA` |  |
 
 ## PSAPI.DLL
 
@@ -253,12 +273,15 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 | `win32_shims_advapi32_install` | `src/runtime/win32_shims_advapi32.cpp` | 37 |
 | `win32_shims_gdi32_install` | `src/runtime/win32_shims_gdi32.cpp` | 36 |
 | `win32_shims_kernel32_install` | `src/runtime/win32_shims_kernel32.cpp` | 61 |
+| `win32_shims_locale_install` | `src/runtime/win32_shims_locale.cpp` | 36 |
+| `win32_shims_memory_install` | `src/runtime/win32_shims_memory.cpp` | 17 |
 | `win32_shims_misc_install` | `src/runtime/win32_shims_misc.cpp` | 31 |
 | `win32_shims_psapi_install` | `src/runtime/win32_shims_psapi.cpp` | 5 |
 | `win32_shims_shell32_install` | `src/runtime/win32_shims_shell32.cpp` | 2 |
-| `win32_shims_sync_install` | `src/runtime/win32_shims_sync.cpp` | 11 |
+| `win32_shims_sync_install` | `src/runtime/win32_shims_sync.cpp` | 12 |
 | `win32_shims_user32_install` | `src/runtime/win32_shims_user32.cpp` | 23 |
 | `win32_shims_version_install` | `src/runtime/win32_shims_version.cpp` | 4 |
+| `win32_shims_wait_install` | `src/runtime/win32_shims_wait.cpp` | 7 |
 | `win32_shims_window_install` | `src/runtime/win32_shims_window.cpp` | 33 |
 | `win32_shims_wsock32_install` | `src/runtime/win32_shims_wsock32.cpp` | 54 |
 
