@@ -77,6 +77,34 @@ pas juste un raccourci. Un portage l'utilise pour ses fonctions les plus
 chaudes (voir comment d2vita l'utilise pour son décodeur de sprites DCC,
 côté d2vita).
 
+## La piscine JIT sur PS Vita — segments de 16 Mio
+
+Le code ARM traduit par le dynarec est stocké dans de la mémoire exécutable
+(`sceKernelAllocMemBlockForVM`, domaine noyau VM — distinct des blocs RW
+classiques `sceKernelAllocMemBlock`). `src/dynarec86/shim/vita/mman_vita.c`
+implémente cette « piscine JIT » côté portage Vita.
+
+Découverte le 2026-09-13 (jamais testée avant sur ce projet) : le noyau Vita
+plafonne **chaque bloc VM à 16 Mio (0x1000000)**, refusé au-delà avec
+`SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW` (sce=0x80024B0B) — vérifié en demandant
+17 Mio puis 29 Mio d'un seul tenant, refusés tous les deux. C'est une limite
+noyau, pas un choix de dimensionnement du projet.
+
+La piscine grandit donc par **segments** de 16 Mio ouverts paresseusement
+(`jitpool_grow()`), et non comme un unique bloc agrandi : `WX86_JITPOOL_SEGS`
+(alias `D2_JITPOOL_SEGS`) fixe le nombre de segments visés (2 par défaut →
+32 Mio), `WX86_JITPOOL_MB`/`D2_JITPOOL_MB` la taille de chacun (plafonnée à
+16 Mio par segment). Un échec d'ouverture est suivi par segment, pas par un
+drapeau global unique — un segment déjà ouvert reste utilisable même si
+l'ouverture du suivant échoue.
+
+Le découpage en segments ne coûte rien en performance : la liaison entre
+blocs traduits est **toujours** un branchement indirect à adresse absolue
+(`CreateJmpNext` dans `box86-dynarec` : `LDR_literal`+`BX` ; retour d'appel
+via `BXcond`/`BX` après vérification de pile ou table de sauts), jamais un
+`B`/`BL` ARM direct à portée limitée — l'éloignement entre segments n'a donc
+aucun impact d'adressage.
+
 ## Ordonnanceurs
 
 Deux stratégies pour les fils invités (`CreateThread`, etc.) :

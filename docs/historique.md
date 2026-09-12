@@ -52,6 +52,23 @@ contenu que des commits plus récents ont retiré de l'état courant mais pas
 de l'historique. Repartir d'un historique neuf pour winx86 évite la question
 plutôt que de la gérer au cas par cas.
 
+## La piscine JIT plafonnée par le noyau, pas par choix (2026-09-13)
+
+Une tentative de réserver la piscine JIT *avant* l'arène invitée (pour
+absorber le gâchis d'alignement, 16+13=29 Mio en un seul bloc) a révélé que
+le noyau Vita refuse tout bloc `sceKernelAllocMemBlockForVM` au-delà de
+16 Mio (`SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW`) — jamais testé avant sur ce
+projet. La tentative a été abandonnée (code revenu à l'état d'avant), et la
+piscine réécrite pour grandir par segments de 16 Mio plutôt qu'un bloc
+unique. Détail technique dans [Architecture](architecture.md).
+
+Au passage, un bug latent préexistant a été corrigé : l'ancien code posait
+son drapeau « essai déjà tenté » **avant** de connaître le résultat de
+l'allocation — un unique échec (pression mémoire, fragmentation) désarmait
+la piscine pour le reste de la session, sans retentative ni second signal
+que la ligne de log « REFUSÉE ». Le nouveau suivi par segment évite ça : un
+segment déjà ouvert reste utilisable même si le suivant échoue.
+
 ## Évolution
 
 Voir `git log` pour le détail commit par commit. Les grandes étapes
