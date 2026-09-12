@@ -87,6 +87,10 @@ extern "C" int wx86_vita_pin_self(int mask, unsigned* relu);
 
 // Inscrit un fil au tableau publie par wx86_vita_core_window_line().
 void wx86_vita_core_register(const char* nom, int uid, unsigned wanted, int pin_rc);
+// Nombre de fils hotes deja inscrits (contexte des diagnostics de creation de
+// fil : un quota d'UID epuise et une memoire epuisee ne se separent pas avec le
+// seul rc).
+int  wx86_vita_core_count();
 
 // Ligne « coeurs: » de la fenetre de 10 s, publiee dans le journal. Joue la
 // sonde du 4e coeur a la premiere invocation.

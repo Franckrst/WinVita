@@ -59,7 +59,11 @@ void wx86_vita_sleep_ms(uint32_t ms) { if (ms) sceKernelDelayThread(ms * 1000u);
 // ===========================================================================
 namespace {
 struct CoreEnt { char nom[14]; int uid; unsigned wanted; int rc; };
-CoreEnt g_core[10];
+// 16 et non 10 : chez le consommateur de reference, presentateur, tube de
+// presentation, chien de garde, battement anti-famine, trois fils de cellules,
+// rejeu 60 Hz, chien GXM et fil audio SATURAIENT la table — et un fil non
+// inscrit disparait de la seule ligne qui dit quel fil vit sur quel coeur.
+CoreEnt g_core[16];
 int     g_coreN = 0;
 
 // Schema lu UNE FOIS. Defaut « 222 » = la repartition historique a l'octet pres.
@@ -114,6 +118,11 @@ void wx86_vita_core_register(const char* nom, int uid, unsigned wanted, int pin_
     std::snprintf(e.nom, sizeof e.nom, "%s", nom ? nom : "?");
     e.uid = uid; e.wanted = wanted; e.rc = pin_rc;
 }
+
+// Nombre de fils hotes DEJA inscrits. Sert au contexte imprime avant la
+// creation d'un fil : « quota de fils epuise » et « memoire epuisee » ne se
+// separent pas avec le seul rc de sceKernelCreateThread.
+int wx86_vita_core_count() { return g_coreN; }
 
 extern "C" int wx86_vita_pin_self(int mask, unsigned* relu) {
     const SceUID me = sceKernelGetThreadId();

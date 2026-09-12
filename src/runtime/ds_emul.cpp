@@ -68,6 +68,12 @@ struct Voice {
     bool     ownsBuf = true;
     uint32_t shares = 0;         // PROPRIETAIRE : duplicatas vivants sur ce tampon
     size_t   owner = (size_t)-1; // DUPLICATA : creneau du proprietaire
+    // Kio VERROUILLES PAR CETTE VOIX. Le total global ne pouvait pas repondre a
+    // « la pompe de flux alimente-t-elle les anneaux de 256 Kio ? », qui est la
+    // seule question qui separe « la musique ne sort pas » de « la musique n'est
+    // jamais ecrite ». Publie par le champ flux=.
+    uint64_t lockKio = 0;
+    bool     volSaid = false;    // premiere SetVolume journalisee (journal verbeux)
 };
 
 // Reglage du moteur, avec repli sur l'ancien nom du portage (cf. install()).
@@ -78,6 +84,7 @@ inline const char* env2(const char* neuf, const char* ancien) {
 // Journal : formate ici, l'embarqueur decide ou ca va (cf. set_logger).
 LogFn g_logger = nullptr;
 ExtraStatFn g_extra = nullptr;
+CapsObserverFn g_capsObs = nullptr;
 void jpline(const char* fmt, ...) {
     char line[512];
     va_list ap; va_start(ap, fmt);
@@ -129,12 +136,34 @@ std::atomic<unsigned long long> c_created{0}, c_grains{0}, c_famine{0}, c_play{0
     // --- les trois modes de panne que la relecture a nommes ------------------
     c_playnl{0},     // Play SANS DSBPLAY_LOOKING : voix a UN COUP (§ boucle)
     c_endnl{0},      // voix a un coup arrivee au bout et ARRETEE par le melangeur
-    c_resamp{0};     // grains melanges pour une voix dont rate != 22050 Hz
+    c_resamp{0},     // grains melanges pour une voix dont rate != 22050 Hz
+    // --- L'AMPLITUDE REELLEMENT ENVOYEE AU PUITS -----------------------------
+    // Tous les compteurs precedents restaient PARFAITS avec un g_out
+    // INTEGRALEMENT NUL : « le melangeur produit du silence » et « le port ne
+    // joue pas » etaient indiscernables sur console. Ces quatre-la ferment le
+    // trou, et ils sont publies par crete= / rms= de la ligne de compteurs.
+    c_peak{0}, c_peakall{0}, c_sqsum{0}, c_sqn{0},
+    c_gain0{0};      // voix melangees dont gL == gR == 0 (volume au plancher)
 
 // tampons de sortie/accumulation (fil audio OU tick d'image, jamais les deux :
 // le puits auto-cadencé désarme le tirage par image)
-int32_t  g_acc[kGrain * kOutCh];
-int16_t  g_out[kGrain * kOutCh];
+// alignas(64) : g_out part TEL QUEL dans l'appel de sortie du pilote, qui fait
+// du DMA. Rien dans l'en-tete du SDK ne promet qu'un alignement de 2 octets
+// suffit, et un refus a cet endroit serait silencieux. Ligne de cache ARM =
+// 64 o. NON MESURE : aucune preuve que le pilote l'exigeait.
+alignas(64) int32_t  g_acc[kGrain * kOutCh];
+alignas(64) int16_t  g_out[kGrain * kOutCh];
+
+// REPLI DIFFERE du fil audio. Quand la cascade en ligne de audio::thread_start()
+// est allee au bout, le puits temps reel est ferme et remplace par le puits NUL
+// (le jeu reste jouable et muet). Ces trois variables permettent de REESSAYER
+// plus tard, hors du chemin d'init : la cascade se joue pendant la creation du
+// peripherique son, au creux de la courbe memoire. Elles ne sont touchees que
+// depuis le fil INVITE (open_sink et frame_pump), jamais depuis le fil audio —
+// qui, dans ce cas, n'existe pas.
+bool     g_deferArmed = false;      // le puits temps reel voulu a echoue
+int      g_deferLeft  = 0;          // essais differes restants
+uint32_t g_deferNext  = 0;          // prochaine echeance, en ms invitees
 
 // horloge du tirage par image
 bool     g_pumpStarted = false;
@@ -244,6 +273,19 @@ void mix_grain(Cpu* c, int frames) {
             }
         }
         nmix = (int)g_snap.size();
+        int n0 = 0;
+        for (const Snap& sn : g_snap) if (!sn.gL && !sn.gR) n0++;
+        c_gain0.store((unsigned long long)n0, std::memory_order_relaxed);
+        // L'ETAT INVISIBLE : tout marche, et TOUTES les voix sont a gain 0.
+        // grains=, voix=, rest= et famine= seraient parfaits. Le gain rend
+        // EXACTEMENT 0 au plancher, donc un silence NUMERIQUE total. Ce cri est
+        // le seul moyen de le distinguer d'un port muet.
+        if (nmix > 0 && n0 == nmix) {
+            static bool cried = false;
+            if (!cried) { cried = true;
+                jpline("[son] TOUTES les voix melangees (%d) sont a GAIN NUL."
+                       " Le melangeur produit un silence NUMERIQUE : ce n'est pas le port.", nmix); }
+        }
     }
     c_mixed.store((unsigned long long)nmix, std::memory_order_relaxed);
 
@@ -290,6 +332,24 @@ void mix_grain(Cpu* c, int frames) {
     // GRAIN PARTIEL, deuxième verrou : le puits console consomme TOUJOURS son
     // outLen_ (512 trames), quel que soit `frames`. La queue de g_out doit donc
     // être MUETTE, sinon le pilote rejoue la fin du grain PRÉCÉDENT.
+    // CRETE ET ENERGIE DU GRAIN, mesurees sur ce qui part VRAIMENT au puits.
+    // Sans cette mesure, la console ne peut pas distinguer un melangeur muet
+    // d'un port muet. Le cout (1024 valeurs absolues 43 fois par seconde) est
+    // sous le bruit.
+    { int pk = 0; uint64_t sq = 0;
+      for (int k = 0; k < ns; k++) { const int v = g_out[k]; const int a = v < 0 ? -v : v;
+                                     if (a > pk) pk = a; sq += (uint64_t)((int64_t)v * (int64_t)v); }
+      unsigned long long cur = c_peak.load(std::memory_order_relaxed);
+      while ((unsigned long long)pk > cur
+             && !c_peak.compare_exchange_weak(cur, (unsigned long long)pk)) {}
+      // c_peak est remis a zero a chaque fenetre ; c_peakall ne l'est JAMAIS —
+      // c'est lui que lit la ligne de fin, sinon « crete » n'y vaudrait que les
+      // dernieres secondes du run.
+      cur = c_peakall.load(std::memory_order_relaxed);
+      while ((unsigned long long)pk > cur
+             && !c_peakall.compare_exchange_weak(cur, (unsigned long long)pk)) {}
+      c_sqsum.fetch_add(sq, std::memory_order_relaxed);
+      c_sqn.fetch_add((unsigned long long)ns, std::memory_order_relaxed); }
     if (ns < kGrain * kOutCh)
         std::memset(g_out + ns, 0, sizeof(int16_t) * (size_t)(kGrain * kOutCh - ns));
     const uint64_t t1 = wx86_now_us();
@@ -313,7 +373,17 @@ void mix_grain(Cpu* c, int frames) {
                    " (aucun appel bloquant ne s'execute sous le GIL)"); }
         sk = nullptr;
     }
-    if (sk && (!g_maxFrames || c_frames.load() < g_maxFrames)) {
+    // LA BORNE DE DUREE AVALAIT LE SON SANS UNE LIGNE : passe le seuil, le
+    // melange continuait, les curseurs avancaient, et plus un octet ne sortait.
+    // Elle n'existe que pour borner la taille du WAV de preuve sous horloge
+    // virtuelle ; sur un puits TEMPS REEL elle n'a aucun sens et elle est
+    // desormais INERTE. Sur les autres, son entree en vigueur est CRIEE une fois.
+    const bool capped = g_maxFrames && sk && !sk->self_paced() && c_frames.load() >= g_maxFrames;
+    if (capped) { static bool cried = false;
+        if (!cried) { cried = true;
+            jpline("[son] borne de duree atteinte (%llu trames) : le puits n'est PLUS alimente"
+                   " (le melange continue, les curseurs avancent)", (unsigned long long)g_maxFrames); } }
+    if (sk && !capped) {
         const int rest = sk->rest_samples();
         if (rest == 0) c_famine.fetch_add(1, std::memory_order_relaxed);
         if (rest >= 0) { unsigned long long r = (unsigned long long)rest, cur = c_restmin.load();
@@ -460,7 +530,13 @@ uint32_t m_ds_duplicate(Cpu& c) {
     d.primary = false; d.alive = true;
     // État de LECTURE indépendant : c'est tout l'intérêt d'un duplicata.
     d.cursor = 0; d.posAcc = 0; d.playing = false; d.looping = false;
-    d.volmB = o->volmB; d.panmB = o->panmB; d.refs = 1; recompute_gains(d);
+    d.volmB = o->volmB; d.panmB = o->panmB; d.refs = 1;
+    // Kio verrouilles : compteur PROPRE au duplicata. Il ne verrouille pas le
+    // meme tampon que son original — le contrat DirectSound veut qu'ils ecrivent
+    // chacun pour soi — donc heriter du compte de l'original ferait croire que
+    // son anneau est alimente alors que personne ne l'a touche.
+    d.lockKio = 0; d.volSaid = false;
+    recompute_gains(d);
     c.write_u32(obj + 12, 1);
     c.write_u32(ppdup, obj);
     c_created.fetch_add(1, std::memory_order_relaxed);
@@ -485,6 +561,14 @@ uint32_t m_ds_getcaps(Cpu& c) {
     // (test >= 16 en 0x5140D0) et retomber le jeu sur le 2D stéréo — le mode le
     // moins coûteux et le seul qu'on implémente.
     c.write(p, caps, (uint32_t)sizeof caps);
+    // Dit UNE FOIS, au moment ou la cause est posee. Le moteur enonce le fait
+    // generique ; l'embarqueur, s'il en a un, nomme ce que cela change dans le
+    // menu de SON jeu.
+    static bool said = false;
+    if (!said) { said = true;
+        jpline("[son] GetCaps: dwMaxHw3DAllBuffers=0 (VOULU) -> le jeu retombera sur son chemin"
+               " 2D stereo, et ses options 3D materielles seront inactives.");
+        if (g_capsObs) g_capsObs(); }
     return DS_OK;
 }
 
@@ -534,7 +618,7 @@ uint32_t m_ds_createbuffer(Cpu& c) {
     v.len = bytes; v.cursor = 0; v.posAcc = 0; v.flags = flags;
     v.ch = ch; v.bits = bits; v.rate = rate; v.blockAlign = blockAlign;
     v.primary = primary; v.playing = false; v.looping = false; v.alive = true;
-    v.volmB = 0; v.panmB = 0; v.refs = 1; recompute_gains(v);
+    v.volmB = 0; v.panmB = 0; v.refs = 1; v.lockKio = 0; v.volSaid = false; recompute_gains(v);
     // Un creneau repris vient toujours de g_freeVoices, donc d'un proprietaire
     // sans part vivante ; on le redit quand meme, pour que l'etat de partage
     // ne puisse pas survivre a un reemploi.
@@ -665,6 +749,7 @@ uint32_t m_buf_lock(Cpu& c) {
     if (pp2) c.write_u32(pp2, b2 ? v->buf : 0);
     if (pb2) c.write_u32(pb2, b2);
     c_lockKio.fetch_add((b1 + b2) >> 10, std::memory_order_relaxed);
+    v->lockKio += (uint64_t)((b1 + b2) >> 10);
     return DS_OK;
 }
 uint32_t m_buf_unlock(Cpu&) { return DS_OK; }   // écriture directe : rien à recopier
@@ -718,6 +803,15 @@ uint32_t m_buf_setvolume(Cpu& c) {
     int32_t mb = (int32_t)c.arg(1);
     if (mb > 0) mb = 0; if (mb < -10000) mb = -10000;           // DSBVOLUME_MIN
     v->volmB = mb; recompute_gains(*v);
+    // Le seul chemin « reglage applicatif -> son » est cet appel. Il n'etait
+    // journalise NULLE PART, meme en mode verbeux : l'etat « tout marche, tout
+    // est a gain 0 » etait rigoureusement invisible. Une ligne par voix a sa
+    // PREMIERE SetVolume, plus toutes celles qui atteignent le plancher.
+    if (g_log && (!v->volSaid || mb <= -10000)) {
+        v->volSaid = true;
+        jpline("[son] SetVolume obj=0x%08x %d mB -> gL=%u gR=%u%s", c.arg(0), (int)mb, v->gL, v->gR,
+               (!v->gL && !v->gR) ? "  (SILENCE NUMERIQUE)" : "");
+    }
     return DS_OK;
 }
 uint32_t m_buf_setpan(Cpu& c) {
@@ -727,6 +821,8 @@ uint32_t m_buf_setpan(Cpu& c) {
     int32_t mb = (int32_t)c.arg(1);
     if (mb > 10000) mb = 10000; if (mb < -10000) mb = -10000;
     v->panmB = mb; recompute_gains(*v);
+    if (g_log && (!v->gL || !v->gR))
+        jpline("[son] SetPan obj=0x%08x %d mB -> gL=%u gR=%u (une voie eteinte)", c.arg(0), (int)mb, v->gL, v->gR);
     return DS_OK;
 }
 uint32_t m_buf_setfreq(Cpu& c) {                                 // jamais appelé en 1.14d
@@ -782,6 +878,12 @@ void open_sink() {
             s = audio::make_null_sink();
             s->open(kRate, kOutCh, kGrain);
             g_sink.store(s, std::memory_order_release);
+            // DERNIER BARREAU DE LA CASCADE, et le seul qui ne soit PAS dans le
+            // chemin d'init : trois nouvelles tentatives, une toutes les 5 s de
+            // temps invite, depuis frame_pump.
+            g_deferArmed = true; g_deferLeft = 3; g_deferNext = 0;
+            jpline("[son] repli differe ARME : %d nouvelles tentatives de fil audio,"
+                   " une toutes les 5 s, hors du chemin d'init", g_deferLeft);
         }
     } else {
         g_sink.store(s, std::memory_order_release);
@@ -820,6 +922,7 @@ uint32_t ds_capture(Cpu&) { return DSERR_NODRIVER; }
 // ---------------------------------------------------------------------------
 void set_logger(LogFn cb) { g_logger = cb; }
 void set_extra_stat(ExtraStatFn cb) { g_extra = cb; }
+void set_caps_observer(CapsObserverFn cb) { g_capsObs = cb; }
 
 void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
     if (g_installed) return;
@@ -937,12 +1040,57 @@ void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
 bool enabled() { return g_on; }
 const char* sink_name() { audio::Sink* s = g_sink.load(); return s ? s->name() : "-"; }
 
+// LE REPLI DIFFERE, joue sur le FIL INVITE depuis frame_pump. Le puits en place
+// est le puits NUL (personne d'autre ne le lit : le fil audio n'existe pas), on
+// peut donc l'echanger sans precaution particuliere. En cas d'echec on remet
+// EXACTEMENT l'etat d'avant. Aucun appel bloquant : ouvrir un port et creer un
+// fil rendent la main tout de suite ; la seule fonction bloquante du puits est
+// write(), qui n'est jamais atteinte ici (le troisieme verrou de mix_grain
+// interdit d'ecrire dans un puits temps reel depuis le fil invite, et frame_pump
+// se desarme des que le puits l'est).
+static void try_deferred_sink(Cpu& cpu) {
+    const uint32_t now = g_ops.tick_ms ? g_ops.tick_ms(cpu) : 0u;
+    if (!g_deferNext) { g_deferNext = now + 5000u; return; }
+    if ((int32_t)(now - g_deferNext) < 0) return;
+    g_deferNext = now + 5000u;
+    if (g_deferLeft <= 0) {
+        g_deferArmed = false;
+        jpline("[son] repli differe EPUISE : le fil audio n'a jamais demarre, le jeu reste MUET"
+               " (les rc de chaque essai sont dans le journal)");
+        return;
+    }
+    const int no = 4 - g_deferLeft;   // 1, 2, 3
+    --g_deferLeft;
+    audio::Sink* ns = audio::make_vita_sink();
+    if (!ns) { g_deferArmed = false; return; }          // pas de puits console dans ce binaire
+    if (!ns->open(kRate, kOutCh, kGrain)) {
+        jpline("[son] essai differe %d : ouverture du puits %s REFUSEE", no, ns->name());
+        ns->close(); delete ns; return;
+    }
+    audio::Sink* old = g_sink.load(std::memory_order_acquire);
+    g_sink.store(ns, std::memory_order_release);
+    g_threadRun.store(1);
+    if (audio::thread_retry()) {
+        g_selfPaced = true;
+        if (old) { old->close(); delete old; }          // le puits NUL, que plus personne ne lit
+        jpline("[son] essai differe %d : FIL AUDIO PARTI — puits=%s cadence=temps-reel", no, ns->name());
+        g_deferArmed = false;
+        return;
+    }
+    // Echec : on remet le puits nul, a l'identique.
+    g_threadRun.store(0);
+    g_sink.store(old, std::memory_order_release);
+    ns->close(); delete ns;
+    jpline("[son] essai differe %d : fil audio toujours refuse (%d restant(s))", no, g_deferLeft);
+}
+
 void frame_pump(Cpu& cpu) {
     // LE TEST QUI COMPTE est `s->self_paced()`, PAS le drapeau g_selfPaced :
     // un drapeau peut être remis à faux par un chemin d'erreur alors que le
     // puits, lui, est resté temps réel — et le tirage par image enchaînerait
     // alors des écritures BLOQUANTES sur le fil du jeu, GIL tenu. On interroge
     // l'objet, jamais la copie.
+    if (g_on && g_deferArmed) try_deferred_sink(cpu);
     audio::Sink* s = g_sink.load(std::memory_order_acquire);
     if (!g_on || !s || s->self_paced()) return;
     const uint32_t now = g_ops.tick_ms ? g_ops.tick_ms(cpu) : 0u;
@@ -983,12 +1131,13 @@ void shutdown() {
     audio::Sink* s = g_sink.exchange(nullptr, std::memory_order_acq_rel);
     if (!s) return;
     jpline("[son] arret: grains=%llu trames=%llu (%.1f s) voix creees=%llu famine=%llu"
-           " sansvue=%llu uncoup=%llu/%llu resamp=%llu",
+           " sansvue=%llu uncoup=%llu/%llu resamp=%llu crete=%llu errsortie=%llu",
            (unsigned long long)c_grains.load(), (unsigned long long)c_frames.load(),
            (double)c_frames.load() / (double)kRate,
            (unsigned long long)c_created.load(), (unsigned long long)c_famine.load(),
            (unsigned long long)c_nohost.load(), (unsigned long long)c_endnl.load(),
-           (unsigned long long)c_playnl.load(), (unsigned long long)c_resamp.load());
+           (unsigned long long)c_playnl.load(), (unsigned long long)c_resamp.load(),
+           (unsigned long long)c_peakall.load(), s->write_errors());
     if (joined) { s->close(); delete s; }
     else jpline("[son] le fil audio n'a PAS joint : puits NI ferme NI detruit"
                 " (le port reste au noyau, le processus sort juste apres) — VOLONTAIRE");
@@ -1006,14 +1155,34 @@ int stat_line(char* out, unsigned n) {
     char rbuf[24];
     if (rmin == 0xffffffffull) std::snprintf(rbuf, sizeof rbuf, "-");
     else                       std::snprintf(rbuf, sizeof rbuf, "%llu", rmin);
+    // AMPLITUDE DE LA FENETRE. crete = |echantillon| max envoye au puits (0 = le
+    // melangeur produit un silence NUMERIQUE, ce qui n'accuse PAS le port) ;
+    // rms = racine de l'energie moyenne. Les deux sont remis a zero ici : ce
+    // sont des mesures de FENETRE, pas des cumuls.
+    const unsigned long long pk = c_peak.exchange(0, std::memory_order_relaxed);
+    const unsigned long long sq = c_sqsum.exchange(0, std::memory_order_relaxed);
+    const unsigned long long sn = c_sqn.exchange(0, std::memory_order_relaxed);
+    const double rms = sn ? std::sqrt((double)sq / (double)sn) : 0.0;
+    // ANNEAUX DE FLUX ALIMENTES. Un tampon >= 64 Kio a la forme d'un anneau de
+    // musique/flux ; s'ils sont tous a zero Kio verrouille, la pompe du jeu ne
+    // tourne pas et la musique n'est PAS un probleme de SORTIE.
+    unsigned nflux = 0, nfluxOk = 0;
+    { std::lock_guard<std::mutex> lk(g_mx);
+      for (const Voice& v : g_voices) {
+          if (!v.alive || v.primary || v.len < 64u * 1024u) continue;
+          nflux++; if (v.lockKio) nfluxOk++; } }
+    audio::Sink* sk = g_sink.load(std::memory_order_acquire);
     int r = std::snprintf(out, n,
         "audio(10s): voix=%llu/%llu creees=%llu grains=%llu famine=%llu us/grain=%llu sortie=%llu"
-        " rest=%s verrou=%lluKio play=%llu stop=%llu s=%.1f sansvue=%llu"
+        " rest=%s crete=%llu rms=%.0f gain0=%llu errsortie=%llu flux=%u/%u"
+        " verrou=%lluKio play=%llu stop=%llu s=%.1f sansvue=%llu"
         " uncoup=%llu/%llu resamp=%llu puits=%s",
         (unsigned long long)c_mixed.load(), (unsigned long long)g_voices.size(),
         (unsigned long long)c_created.load(), dgr, dfa,
         dgr ? dmu / dgr : 0ull, dgr ? dou / dgr : 0ull,
-        rbuf,
+        rbuf, pk, rms,
+        (unsigned long long)c_gain0.load(),
+        sk ? sk->write_errors() : 0ull, nfluxOk, nflux,
         (unsigned long long)c_lockKio.load(), (unsigned long long)c_play.load(),
         (unsigned long long)c_stop.load(), (double)dfr / (double)kRate,
         (unsigned long long)c_nohost.load(),

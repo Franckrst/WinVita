@@ -52,6 +52,17 @@ void set_logger(LogFn cb);
 typedef int (*ExtraStatFn)(char* out, unsigned n);
 void set_extra_stat(ExtraStatFn cb);
 
+// LE MOMENT OU LA CAPACITE EST ANNONCEE. Le socle rend dwMaxHw3DAllBuffers = 0,
+// donc AUCUN tampon 3D materiel : tout jeu qui teste cette capacite retombera
+// sur son chemin 2D, et les options 3D de son menu seront inactives. C'est
+// VOULU, et c'est exactement ce qu'un PC sans carte 3D materielle produit —
+// mais vu du joueur, cela ressemble a une panne. Le moteur ne sait pas comment
+// s'appellent ces options dans le menu du jeu, ni lesquelles doivent rester
+// actives : il se contente de DIRE quand la cause est posee, une fois, et
+// l'embarqueur nomme les consequences pour SON jeu. Un seul observateur.
+typedef void (*CapsObserverFn)();
+void set_caps_observer(CapsObserverFn cb);
+
 // Enregistre les deux exports DSOUND + les 32 méthodes COM et FORCE l'allocation
 // de leurs créneaux. À appeler une fois, avant Bridge::link().
 void install(Bridge& br, Cpu& cpu, const HostOps& ops);

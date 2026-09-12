@@ -32,6 +32,13 @@ struct Sink {
     // 0 sur un puits temps réel = SOUS-ALIMENTATION (le seul détecteur offert
     // par le SDK Vita, sceAudioOutGetRestSample).
     virtual int rest_samples() { return -1; }
+    // ECRITURES REFUSEES PAR LE PILOTE. Le rc de l'appel de sortie etait JETE :
+    // un port qui refuse rend la main tout de suite, la boucle du fil audio
+    // perd sa SEULE horloge (cet appel bloquant), elle brule un coeur en
+    // attente active, les curseurs de lecture s'emballent, toutes les voix
+    // « finissent » aussitot — et le son disparait sans une ligne de journal.
+    // Publie par le champ errsortie= de la ligne de compteurs.
+    virtual unsigned long long write_errors() const { return 0; }
     // Le puits impose-t-il sa propre cadence (temps réel) ? Faux pour wav/null :
     // ceux-là sont TIRÉS par le tick d'image du jeu, donc la durée produite
     // colle à la chronologie invitée même quand qemu tourne au dixième du temps
@@ -45,7 +52,19 @@ struct Sink {
 // console du 05/09). Partout ailleurs : rend false, et le socle retombe sur le
 // puits TIRÉ par le tick d'image — donc AUCUN fil sous qemu, ce qui est
 // exactement ce qu'on veut pour une preuve déterministe.
+// LA CASCADE. thread_start essaie plusieurs couples (priorite, pile) — le
+// patron PROUVE d'abord, puis des piles plus petites, puis la priorite relative
+// la plus haute LEGALE — et JOURNALISE le rc de chaque barreau, plus la memoire
+// libre et le nombre de fils hotes avant et apres. Le journal dit donc soit
+// « FIL AUDIO PARTI (essai N, priorite X, pile Y) », soit « FIL AUDIO NON
+// DEMARRE apres N essais — rc: [1]=... [2]=... », jamais « ECHEC » tout court :
+// sans les rc, huit hypotheses restent vivantes et aucune n'est departageable.
 bool thread_start(void (*body)(void));
+// REPLI HORS DU CHEMIN D'INIT : rejoue la cascade complete, une fois par appel.
+// thread_start s'execute pendant la creation du peripherique son, au creux de
+// la courbe memoire ; quelques secondes plus tard le tas a respire. Rend true
+// si le fil tourne (y compris s'il tournait deja).
+bool thread_retry(void);
 // Rend true si le fil a REELLEMENT joint. Faux => il tourne peut-etre encore, et
 // detruire le puits sous lui serait un usage-apres-liberation pendant le
 // demontage — exactement la famille de plantages « a la fermeture » deja vue.

@@ -35,6 +35,7 @@
 static inline void wx86_progress(const char* msg) { wx86_vita_progress(msg); }
 
 #include <psp2/audioout.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 
 #include <cstdio>
@@ -105,11 +106,14 @@ public:
             return false;
         }
         outLen_ = len;
-        int vol[2] = { SCE_AUDIO_VOLUME_0DB, SCE_AUDIO_VOLUME_0DB };
-        sceAudioOutSetVolume(port_, (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH), vol);
-        std::snprintf(m, sizeof m, "audio: port %s ouvert (port=%d len=%d %d Hz stereo%s)",
+        // Le rc du VOLUME DU PORT est RELU et publie. Un port ouvert mais laisse
+        // a 0 dB « par supposition » est un des points de la chaine qui avalent
+        // le son sans une ligne de journal.
+        volRc_ = set_port_volume();
+        std::snprintf(m, sizeof m, "audio: port %s ouvert (port=%d len=%d %d Hz stereo%s) volume 0dB rc=0x%08x",
                       main_ ? "MAIN" : "BGM", port_, outLen_, outRate_,
-                      outRate_ == srcRate_ ? ", sans reechantillonnage" : ", AVEC reechantillonnage");
+                      outRate_ == srcRate_ ? ", sans reechantillonnage" : ", AVEC reechantillonnage",
+                      (unsigned)volRc_);
         wx86_progress(m);
         return true;
     }
@@ -123,17 +127,21 @@ public:
     // c'est le chemin qu'on ne peut pas rejouer sous qemu.
     void write(const int16_t* pcm, int frames) override {
         if (port_ < 0 || !pcm) return;
+        // REAFFIRMATION DU VOLUME DU PORT, toutes les ~10 s. Il n'etait pose
+        // qu'a l'ouverture et jamais relu : si le systeme ou un autre composant
+        // le baisse, personne ne le saurait. L'appel est idempotent et coute
+        // moins qu'un grain sur 430.
+        if (++sinceVol_ >= 430) { sinceVol_ = 0; set_port_volume(); }
         // LE CRITERE EST L'EGALITE DES FREQUENCES, pas le type de port : c'est
         // `main_` qui servait de critere, ce qui liait le reechantillonnage a
         // un knob au lieu de le lier au fait qui le commande.
         if (outRate_ == srcRate_) {
-            if (frames == outLen_) { wrote_ = true; sceAudioOutOutput(port_, pcm); return; }
+            if (frames == outLen_) { out(pcm); return; }
             if (frames < 0) frames = 0;
             if (frames > outLen_) frames = outLen_;
             std::memcpy(rs_, pcm, (size_t)frames * 2u * sizeof(int16_t));
             std::memset(rs_ + 2 * frames, 0, (size_t)(outLen_ - frames) * 2u * sizeof(int16_t));
-            wrote_ = true;
-            sceAudioOutOutput(port_, rs_);
+            out(rs_);
             return;
         }
         // Interpolation lineaire vers outRate_, jambe de REPLI seulement.
@@ -147,8 +155,7 @@ public:
             rs_[2*i]   = (int16_t)(pcm[2*s0]   + (((pcm[2*s1]   - pcm[2*s0])   * fr) >> 12));
             rs_[2*i+1] = (int16_t)(pcm[2*s0+1] + (((pcm[2*s1+1] - pcm[2*s0+1]) * fr) >> 12));
         }
-        wrote_ = true;
-        sceAudioOutOutput(port_, rs_);
+        out(rs_);
     }
 
     void close() override {
@@ -162,18 +169,60 @@ public:
         if (wrote_) sceAudioOutOutput(port_, nullptr);
         sceAudioOutReleasePort(port_);
         port_ = -1;
-        wx86_progress(wrote_ ? "audio: port draine et relache"
-                               : "audio: port relache sans drainage (rien n'a ete ecrit)");
+        char mc[160];
+        std::snprintf(mc, sizeof mc, "audio: port %s (ecrit=%llu erreurs=%llu derniere rc=0x%08x)",
+                      wrote_ ? "draine et relache"
+                             : "relache sans drainage (rien n'a ete ecrit)",
+                      (unsigned long long)nout_, (unsigned long long)nerr_, (unsigned)lastRc_);
+        wx86_progress(mc);
     }
     const char* name() const override { return main_ ? "vita-main" : "vita-bgm"; }
 
     int  rest_samples() override { return port_ < 0 ? -1 : sceAudioOutGetRestSample(port_); }
     bool self_paced() const override { return true; }
+    unsigned long long write_errors() const override { return nerr_; }
 
 private:
+    int set_port_volume() {
+        int vol[2] = { SCE_AUDIO_VOLUME_0DB, SCE_AUDIO_VOLUME_0DB };
+        return sceAudioOutSetVolume(port_,
+            (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH), vol);
+    }
+    // LE rc DE LA SORTIE, TESTE. sceAudioOutOutput rend le nombre d'octets mis
+    // en file, ou un code negatif. Un rc negatif ignore rend l'appel IMMEDIAT :
+    // la boucle du fil audio, qui n'a pas d'autre horloge que cet appel
+    // bloquant, devient une attente active a 100 % d'un coeur, les curseurs de
+    // lecture avancent des dizaines de fois trop vite, toutes les voix
+    // « finissent » aussitot — et le son disparait SANS UNE LIGNE.
+    void out(const int16_t* p) {
+        const int rc = sceAudioOutOutput(port_, p);
+        lastRc_ = rc;
+        if (rc >= 0) { wrote_ = true; nout_++; consec_ = 0; return; }
+        nerr_++;
+        if (consec_ < 1000000) consec_++;
+        if (nerr_ == 1 || (nerr_ % 256) == 0) {
+            char m[160];
+            std::snprintf(m, sizeof m, "audio: sceAudioOutOutput rc=0x%08x (erreur %llu, %llu d'affilee)",
+                          (unsigned)rc, (unsigned long long)nerr_, (unsigned long long)consec_);
+            wx86_progress(m);
+        }
+        // ANTI-ATTENTE-ACTIVE. Le puits est l'horloge du fil ; s'il rend la main
+        // sans attendre, on remet l'horloge a la main (23 ms = un grain) plutot
+        // que de bruler un coeur. Le fil reste sortable : le drapeau d'arret est
+        // relu a chaque tour de boucle.
+        if (consec_ >= 4) sceKernelDelayThread(23000);
+    }
+
     int port_ = -1, srcRate_ = kFallbackRate, outRate_ = kFallbackRate, ch_ = 2, grain_ = 512, outLen_ = 512;
     bool main_ = false, wrote_ = false;
-    int16_t rs_[4096];      // 2048 trames stereo au plus (grain 512 -> 1115 a 48000)
+    int  volRc_ = 0, lastRc_ = 0, sinceVol_ = 0;
+    unsigned long long nout_ = 0, nerr_ = 0, consec_ = 0;
+    // ALIGNEMENT. int16_t[] a un alignement naturel de 2 octets ; le pilote
+    // audio fait du DMA et rien dans l'en-tete ne promet qu'il accepte moins de
+    // 4. Un refus a cet endroit serait silencieux (le rc etait jete avant ce
+    // correctif) : alignas(64) — la ligne de cache ARM — coute zero et ferme la
+    // question. NON MESURE : aucune preuve que le pilote l'exigeait.
+    alignas(64) int16_t rs_[4096];   // 2048 trames stereo au plus (grain 512 -> 1115 a 48000)
 };
 
 void (*g_body)(void) = nullptr;
@@ -224,35 +273,108 @@ int audio_thread(SceSize, void*) {
 
 Sink* make_vita_sink() { return new VitaSink(); }
 
+// LA CASCADE. Chaque barreau dit ce qu'il TENTE et ce qu'il OBTIENT ; le verdict
+// final donne les rc de tous. « Le fil n'a pas demarre » sans chiffre a coute
+// une soiree entiere : cela ne peut plus se reproduire.
+//
+// ⚠️ 06/09, console : ce fil ne se creait PAS et le jeu restait muet. La
+// priorite demandee etait 0x100000A0. Le bit 0x10000000 veut dire « RELATIVE au
+// defaut du processus », et le defaut est 0x10000100 : la fenetre legale va de
+// DEFAUT-32 (0x100000E0) a DEFAUT+31 (0x1000011F). 0xA0 = DEFAUT-96, soit
+// 64 crans HORS fenetre — le noyau refuse. Le commentaire d'origine raisonnait
+// comme si 0xA0 etait une priorite ABSOLUE (legale, 64..191) en gardant le
+// drapeau relatif : deux encodages melanges. Ce SDK ne definit AUCUNE constante
+// de priorite, donc rien ne l'a signale a la compilation.
+namespace {
+struct Rung { int prio; int stackKio; const char* why; };
+const Rung kRungs[] = {
+    { 0x10000100, 64, "patron prouve (les autres fils hotes du depot)" },
+    { 0x10000100, 16, "pile reduite (patron du chien de garde) — hypothese MEMOIRE" },
+    { 0x10000100,  4, "pile minimale (patron des sondes) — hypothese MEMOIRE" },
+    { 0x100000E0, 16, "priorite relative la plus haute LEGALE (DEFAUT-32)" },
+};
+constexpr int kRungs_n = (int)(sizeof kRungs / sizeof kRungs[0]);
+int  g_rungRc[kRungs_n] = {0};
+bool g_exhausted = false;
+
+void log_context(const char* quand) {
+    SceKernelFreeMemorySizeInfo fi; std::memset(&fi, 0, sizeof fi); fi.size = sizeof fi;
+    const int rcm = sceKernelGetFreeMemorySize(&fi);
+    char m[192];
+    std::snprintf(m, sizeof m,
+        "audio: %s — libre user=%d Kio cdram=%d Kio phycont=%d Kio (rc=0x%08x), fils hotes recenses=%d",
+        quand, rcm < 0 ? -1 : (int)(fi.size_user / 1024), rcm < 0 ? -1 : (int)(fi.size_cdram / 1024),
+        rcm < 0 ? -1 : (int)(fi.size_phycont / 1024), (unsigned)rcm,
+        wx86_vita_core_count());
+    wx86_progress(m);
+}
+} // namespace
+
 bool thread_start(void (*body)(void)) {
     if (g_th >= 0) return true;
+    if (g_exhausted) return false;          // la cascade est deja allee au bout
     g_body = body;
-    // ⚠️ 06/09, console : ce fil ne se creait PAS et le jeu restait muet.
-    // La priorite demandee etait 0x100000A0. Le bit 0x10000000 veut dire
-    // « RELATIVE au defaut du processus », et le defaut est 0x10000100 : la
-    // fenetre legale va de DEFAUT-32 a DEFAUT+31. 0xA0 = DEFAUT-96, soit
-    // 64 crans HORS fenetre — le noyau refuse. Le commentaire d'origine
-    // raisonnait comme si 0xA0 etait une priorite ABSOLUE (legale, 64..191) en
-    // gardant le drapeau relatif : deux encodages melanges. Les 19 autres fils
-    // hotes du depot passent tous 0x10000100 et se creent.
-    // On prend donc le patron prouve, et on DIT le rc : jeter le code d'erreur
-    // etait la vraie faute, elle a coute une soiree de suppositions.
-    int prio = 0x10000100;
-    if (const char* pe = getenv("WX86_SONPRIO") ? getenv("WX86_SONPRIO") : getenv("D2_SONPRIO")) { long v = strtol(pe, nullptr, 0); if (v) prio = (int)v; }
-    g_th = sceKernelCreateThread("d2_audio", audio_thread, prio, 64 * 1024, 0, 0, nullptr);
-    if (g_th < 0) {
-        char m[160]; std::snprintf(m, sizeof m, "audio: CreateThread(prio=0x%08x pile=64Ko) ECHEC rc=0x%08x",
-                                   (unsigned)prio, (unsigned)g_th);
-        wx86_progress(m); g_th = -1; return false; }
-    { char m[96]; std::snprintf(m, sizeof m, "audio: fil cree (prio=0x%08x pile=64Ko)", (unsigned)prio);
-      wx86_progress(m); }
-    const int src = sceKernelStartThread(g_th, 0, nullptr);
-    if (src < 0) {
-        char m[128]; std::snprintf(m, sizeof m, "audio: StartThread ECHEC rc=0x%08x", (unsigned)src);
+
+    // LE CONTEXTE D'ABORD. Memoire libre et nombre de fils hotes : les deux
+    // seules hypotheses que le rc seul ne separe pas.
+    log_context("avant creation du fil");
+
+    // Deux knobs pour l'A/B console, DERRIERE le defaut : ils remplacent le
+    // PREMIER barreau seulement, les replis restent le patron prouve.
+    int p0 = kRungs[0].prio, s0 = kRungs[0].stackKio;
+    if (const char* e = getenv("WX86_SONPRIO")  ? getenv("WX86_SONPRIO")  : getenv("D2_SONPRIO"))
+        { long v = strtol(e, nullptr, 0); if (v) p0 = (int)v; }
+    if (const char* e = getenv("WX86_SONSTACK") ? getenv("WX86_SONSTACK") : getenv("D2_SONSTACK"))
+        { long v = strtol(e, nullptr, 0); if (v > 0) s0 = (int)v; }
+
+    char m[192];
+    for (int i = 0; i < kRungs_n; i++) {
+        const int prio  = (i == 0) ? p0 : kRungs[i].prio;
+        const int stack = (i == 0) ? s0 : kRungs[i].stackKio;
+        SceUID th = sceKernelCreateThread("d2_audio", audio_thread, prio, stack * 1024, 0, 0, nullptr);
+        g_rungRc[i] = (int)th;
+        std::snprintf(m, sizeof m, "audio: essai %d/%d CreateThread(prio=0x%08x pile=%d Kio) rc=0x%08x — %s",
+                      i + 1, kRungs_n, (unsigned)prio, stack, (unsigned)th, kRungs[i].why);
         wx86_progress(m);
-        sceKernelDeleteThread(g_th); g_th = -1; return false;
+        if (th < 0) continue;
+        g_th = th;                                   // audio_thread lit g_th pour son inscription
+        const int rs = sceKernelStartThread(th, 0, nullptr);
+        std::snprintf(m, sizeof m, "audio: essai %d/%d StartThread(uid=0x%08x) rc=0x%08x",
+                      i + 1, kRungs_n, (unsigned)th, (unsigned)rs);
+        wx86_progress(m);
+        if (rs >= 0) {
+            std::snprintf(m, sizeof m, "audio: FIL AUDIO PARTI (essai %d, priorite 0x%08x, pile %d Kio, uid=0x%08x)",
+                          i + 1, (unsigned)prio, stack, (unsigned)th);
+            wx86_progress(m);
+            return true;
+        }
+        g_rungRc[i] = rs;
+        sceKernelDeleteThread(th);
+        g_th = -1;
     }
-    return true;
+    // VERDICT. Les rc des quatre barreaux sur UNE ligne : c'est elle, et elle
+    // seule, qui separe une priorite illegale d'un manque de memoire et d'un
+    // epuisement d'UID.
+    int n = std::snprintf(m, sizeof m, "audio: FIL AUDIO NON DEMARRE apres %d essais — rc:", kRungs_n);
+    for (int i = 0; i < kRungs_n && n > 0 && n < (int)sizeof m; i++)
+        n += std::snprintf(m + n, sizeof m - (size_t)n, " [%d]=0x%08x", i + 1, (unsigned)g_rungRc[i]);
+    wx86_progress(m);
+    log_context("apres l'echec de la cascade");
+    g_exhausted = true;
+    return false;
+}
+
+// REPLI N+1 : LA CREATION DIFFEREE. Appele hors du chemin d'init (voir
+// ds_emul::frame_pump). La cascade en ligne se joue pendant la creation du
+// peripherique son, c'est-a-dire au creux de la courbe memoire ; quelques
+// secondes plus tard le tas a respire. Ce point d'entree REJOUE la cascade
+// complete, une fois par appel, et n'est atteint que si la premiere est allee
+// au bout.
+bool thread_retry(void) {
+    if (g_th >= 0) return true;
+    g_exhausted = false;
+    for (int i = 0; i < kRungs_n; i++) g_rungRc[i] = 0;
+    return thread_start(g_body);
 }
 
 bool thread_stop(void) {

@@ -93,6 +93,7 @@ Sink* make_null_sink() { return new NullSink(); }
 // d'image du jeu. C'est voulu — sous qemu, un fil temps reel sous-alimenterait
 // le puits et la preuve WAV serait pleine de trous.
 bool thread_start(void (*)(void)) { return false; }
+bool thread_retry(void) { return false; }
 bool thread_stop(void) { return true; }
 
 // Hors console il n'y a pas de sceAudioOut : la fabrique existe pour que
