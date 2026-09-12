@@ -304,6 +304,8 @@ premier consommateur seul :**
    `d2vita_core_register_c`) pour trois services que `platform/vita_host.h`
    possède désormais. Un portage dont les symboles ne portent pas ce préfixe
    obtenait un journal muet et un fil non épinglé, **sans erreur de lien**.
+   *La correction n'a traité que l'audio : **six autres unités** portaient le
+   même défaut — voir le piège 9.*
 3. **`VitaSink::open(freq, …)` recevait la fréquence et l'ignorait** au profit
    d'une constante de 22050 Hz — le chiffre du premier jeu. Un flux à une autre
    fréquence aurait joué à la mauvaise hauteur, en silence.
@@ -481,6 +483,63 @@ libérations échouaient en silence, ce qui fuit sans rien casser).
 Un contrôle négatif posé là aurait « prouvé » que l'oracle marche alors qu'il
 ne démontrait rien. Si ta faute ne bouge rien, **cherche-en une autre** avant
 de conclure quoi que ce soit — dans un sens comme dans l'autre.
+
+### 9. Un lien FAIBLE au nom d'un consommateur est un défaut SILENCIEUX
+
+C'est le piège 1 dans sa forme la plus discrète, et il a survécu à sa propre
+correction.
+
+Corriger `platform/vita_audio.cpp` (§ vague 4, point 2) a réglé **une** unité.
+Le relevé `nm` sur les objets Vita du moteur en montrait **sept** :
+
+| unité | symboles faibles au préfixe du premier portage |
+|---|---|
+| `runtime/bridge.cpp` | `d2vita_progress_c` |
+| `runtime/cpu_box86.cpp` | `d2vita_progress_c` |
+| `runtime/sched_cooperative.cpp` | `d2vita_progress_c` |
+| `runtime/sched_native.cpp` | `d2vita_progress_c`, `d2vita_core_mask_c`, `d2vita_pin_self_c`, `d2vita_core_register_c` |
+| `dynarec86/shim/vita/mman_vita.c` | `d2vita_progress_c` |
+| `third_party/box86-dynarec/dynarec/dynarec.c` | `d2vita_progress_c` |
+| ~~`platform/vita_audio.cpp`~~ | corrigée à la vague 4 |
+
+`sched_native.cpp` était le pire cas : c'est l'ordonnanceur **par défaut**, il
+épingle et recense les fils ouvriers, et un commentaire y nommait
+`vita_present.cpp` — un fichier qui appartient au premier consommateur.
+
+!!! danger "Ce que « ça compile » ne prouve pas"
+    Un lien faible non résolu vaut `NULL`. Pas d'erreur, pas d'avertissement,
+    **rien**. Les quatre cibles restent vertes pendant que le journal est muet
+    et que les fils ne sont pas épinglés. La seule preuve possible est à la
+    **table des symboles** : un `w` dans la sortie de `nm` sur un objet du
+    moteur est un défaut, pas un détail.
+
+**Le point dur : la portabilité hors console.** Trois de ces unités se
+compilent aussi pour le harnais qemu/bureau, où il n'y a pas de console. C'est
+ce qui avait fait choisir le lien faible à l'origine. La solution est plus
+ennuyeuse et strictement meilleure : hors `__vita__`, `platform/vita_host.cpp`
+définit le journal comme un **no-op**. Le corps générique appelle donc en lien
+**FORT** partout, sans test de nullité, et le comportement hors console est
+identique à ce que produisait la référence faible non résolue — le silence. Un
+portage n'a **rien** à fournir hors console : le no-op ne lit même pas
+`wx86_vita_progress_path`.
+
+Les services de cœurs (`wx86_vita_core_mask`, `wx86_vita_pin_self`,
+`wx86_vita_core_register`) restent **console-seulement** : tous leurs appels
+vivent déjà sous `#ifdef __vita__`. Ne rends portable que ce qui doit l'être.
+
+!!! tip "L'alternative écartée, et pourquoi"
+    Renommer le symbole faible en `wx86_vita_progress_c` en le gardant faible
+    aurait fait disparaître le préfixe fautif **sans** supprimer le mode de
+    panne : un portage qui ne fournit rien serait resté muet sans le savoir.
+    Un renommage n'est pas une correction.
+
+!!! warning "Le second portage ne prouvait pas le défaut, il le masquait"
+    Le second portage **définissait** les quatre enveloppes `d2vita_*_c` : il
+    descend du premier par copie et en a hérité les noms. Son journal n'était
+    donc **pas** muet, et ses fils **étaient** épinglés. Le défaut était réel
+    et à venir — il attendait le troisième portage, celui qui n'aurait pas
+    recopié le préfixe. Un défaut de généricité peut rester invisible avec
+    *deux* consommateurs quand le second est né du premier.
 
 ## Ce qui n'est pas encore dans le moteur
 
