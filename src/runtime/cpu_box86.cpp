@@ -570,6 +570,21 @@ public:
                                  "E() resolu a chaque acces, t_fault_addr reecrit par trap");
         const char* as = getenv("WX86_ARENA"); if (!as) as = getenv("D2ARENA");
         if (as) {
+            // ⚡ 12/09 : VOIE 5.2 (jit_budget_20260908.md §5.2) TENTEE ET
+            // REFUTEE. L'idee — reserver la piscine JIT avant l'arene,
+            // agrandie du rabiot d'alignement mesure (16+13=29 Mo) — supposait
+            // qu'un bloc ForVM pouvait depasser 16 Mio. FAUX : verifie sur
+            // console, 17 Mo ET 29 Mo sont TOUS DEUX refuses
+            // (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio
+            // (0x1000000) est un PLAFOND NOYAU par bloc VM, pas un choix de ce
+            // projet. Pire : la tentative precoce, meme refusee, marquait
+            // g_jitpool_tried=1, desarmant ensuite la reservation paresseuse
+            // de 16 Mio qui marchait depuis toujours — la partie tournait donc
+            // SANS piscine du tout (repli bloc-par-bloc permanent). Voir
+            // docs/audit/repartition_ram_20260912.md pour la mesure complete.
+            // Le rabiot d'alignement de l'arene (13 Mio ce soir) reste donc
+            // un gachis REEL mais SANS solution a cout nul : le recuperer
+            // demanderait de rogner une autre marge deja calibree (voie 5.1).
             uint64_t sz = strtoull(as, nullptr, 16);
             // Page-granular size: only the guest->host DELTA needs 16 MiB
             // alignment, and D2ARENA already carries the 16 MiB slack for that.

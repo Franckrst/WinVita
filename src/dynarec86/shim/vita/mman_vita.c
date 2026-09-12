@@ -201,6 +201,36 @@ static int    g_jitpool_tried = 0;
 unsigned int  dyn86_jitpool_size = 0, dyn86_jitpool_used = 0;   /* pour la jauge */
 unsigned int dyn86_rw_cur  = 0;   /* bytes in plain RW blocks */
 
+/* Reservation de la piscine, au premier mmap PROT_EXEC (defaut 16 Mo,
+ * WX86_JITPOOL_MB/D2_JITPOOL_MB pour changer). ⚡ 12/09 : un bloc ForVM plus
+ * grand (teste a 17 et 29 Mo, voie 5.2 de jit_budget_20260908.md) est refuse
+ * par le noyau (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio
+ * est un PLAFOND NOYAU par bloc VM, pas un choix de ce projet. Voir
+ * docs/audit/repartition_ram_20260912.md. */
+static void jitpool_reserve(unsigned default_mb) {
+    if (g_jitpool_tried) return;
+    g_jitpool_tried = 1;
+    const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
+    size_t want = (size_t)((e ? (unsigned)atoi(e) : default_mb)) << 20;
+    if (!want) return;
+    SceUID u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
+    void* pb = 0;
+    if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) {
+        g_jitpool = pb; g_jitpool_size = want; g_jitpool_uid = u;
+        dyn86_jitpool_size = (unsigned int)want;
+    } else if (u >= 0) { sceKernelFreeMemBlock(u); }
+    { char m[176];
+        if (g_jitpool)
+            snprintf(m, sizeof m,
+                "JIT: piscine de %u Mo reservee (sous-allocation ; le tas ne peut plus l'affamer)",
+                (unsigned)(want >> 20));
+        else
+            snprintf(m, sizeof m,
+                "JIT: piscine de %u Mo REFUSEE (sce=0x%08x) — repli bloc-par-bloc (ancien comportement)",
+                (unsigned)(want >> 20), (unsigned)u);
+        wx86_vita_progress_c(m); }
+}
+
 static Blk* blk_find(const void* p) {
     for (int i = 0; i < DYN86_MAXBLK; ++i)
         if (g_blk[i].base && (const char*)p >= (const char*)g_blk[i].base
@@ -290,25 +320,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
             }
         }
         /* --- piscine : reserver une fois, puis sous-allouer --- */
-        if (!g_jitpool_tried) {
-            g_jitpool_tried = 1;
-            const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
-            size_t want = (size_t)((e ? (unsigned)atoi(e) : 16u)) << 20;
-            if (want) {
-                SceUID u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
-                void* pb = 0;
-                if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) {
-                    g_jitpool = pb; g_jitpool_size = want; g_jitpool_uid = u;
-                    dyn86_jitpool_size = (unsigned int)want;
-                } else if (u >= 0) { sceKernelFreeMemBlock(u); }
-                { char m[144];
-                    snprintf(m, sizeof m, g_jitpool
-                        ? "JIT: piscine de %u Mo reservee (sous-allocation ; le tas ne peut plus l'affamer)"
-                        : "JIT: piscine de %u Mo REFUSEE — repli bloc-par-bloc (ancien comportement)",
-                        (unsigned)(want >> 20));
-                    wx86_vita_progress_c(m); }
-            }
-        }
+        if (!g_jitpool_tried) jitpool_reserve(16u);
         if (g_jitpool && g_jitpool_used + size <= g_jitpool_size) {
             void* p = (char*)g_jitpool + g_jitpool_used;
             g_jitpool_used += size;

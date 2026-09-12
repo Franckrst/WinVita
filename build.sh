@@ -170,23 +170,111 @@ $PLAT/present_scale.cpp
 $RENDER/render_null.cpp
 "
 
-# Sequential on purpose: a backgrounded (`&`) compile's failure does not trip
-# `set -e` in the parent shell, so a parallel version of this loop can silently
-# drop a failed object from the archive instead of aborting the build. Extra
-# flags are passed via ${4:-} (unquoted, so an unset/empty value word-splits
-# to nothing instead of becoming a stray empty argument that gcc/g++
-# misparses as an input filename).
-compile_c()  { echo "  CC  $(basename "$2")";  $CC  $CFLAGS   ${4:-} -c "$1" -o "$2"; }
-compile_cxx(){ echo "  CXX $(basename "$2")";  $CXX $CXXFLAGS ${4:-} -c "$1" -o "$2"; }
+# ---------------------------------------------------------------------------
+# Incrementale et parallele. AVANT ce mecanisme, les 163 unites (18 CORE +
+# 4 ASM + 41 RT + 25 PASS x4 STEP) etaient recompilees a CHAQUE appel, meme
+# quand rien n'avait change — la moitie du temps d'un build_rt_boot_vpk.sh
+# complet (qui, lui, met en cache ses 19 unites depuis le 12/09). Meme
+# mecanisme, deja eprouve la-bas : empreinte de commande (.cmd) + dependances
+# .d de gcc (-MMD -MP), un fichier .rc PAR unite pour le code de retour — un
+# echec derriere un `&` ne doit pas se perdre silencieusement sous `set -e`,
+# contrairement a une simple commande en arriere-plan (c'etait la raison
+# d'etre du mode sequentiel avant ce commit).
+CXX_BANNER="$($CC --version | head -1) | $($CXX --version | head -1)"
+DEPFLAGS="-MMD -MP"
 
-for s in $CORE_SRC; do compile_c "$s" "$OBJ/core/$(basename "${s%.*}").o"; done
-for s in $ASM_SRC;  do compile_c "$s" "$OBJ/core/$(basename "${s%.*}").o"; done
-for s in $RT_SRC;   do compile_cxx "$s" "$OBJ/rt/$(basename "${s%.*}").o"; done
+need_rebuild() { # $1=obj $2=cmd -> imprime la raison, code 0 si recompilation requise
+  local o="$1" cmd="$2" d="${1%.o}.d" c="${1%.o}.cmd" dep
+  [ -f "$o" ] || { echo "objet absent"; return 0; }
+  [ -f "$c" ] || { echo "empreinte absente"; return 0; }
+  [ "$(cat "$c")" = "$cmd" ] || { echo "commande modifiee"; return 0; }
+  [ -f "$d" ] || { echo "fichier .d absent"; return 0; }
+  while read -r dep; do
+    [ -n "$dep" ] || continue
+    if [ ! -e "$dep" ]; then echo "dependance disparue: $dep"; return 0; fi
+    if [ "$dep" -nt "$o" ]; then echo "plus recent: $dep"; return 0; fi
+  done < <(tr -s ' \\\t' '\n\n\n' < "$d" | sed -e '/:$/d' -e '/^$/d')
+  return 1
+}
+
+# id() disambigue deux objets de meme basename dans des dossiers differents —
+# le cas des 25 PASS_SRC, compiles une fois par STEP dans pass0/../pass3/.
+id() { printf '%s_%s' "$(basename "$(dirname "$1")")" "$(basename "${1%.o}")"; }
+
+TODO_SRC=(); TODO_OBJ=(); TODO_CMD=(); TODO_KIND=(); TODO_EXTRA=(); TODO_WHY=(); SKIPPED=0
+add_unit() { # $1=src $2=obj $3=kind(c|cxx) $4=extraflags
+  local s="$1" o="$2" k="$3" extra="${4:-}" cmd why
+  if [ "$k" = cxx ]; then cmd="[$CXX_BANNER] $CXX $CXXFLAGS $extra $DEPFLAGS -c $s -o $o"
+  else                    cmd="[$CXX_BANNER] $CC $CFLAGS $extra $DEPFLAGS -c $s -o $o"; fi
+  if why="$(need_rebuild "$o" "$cmd")"; then
+    TODO_SRC+=("$s"); TODO_OBJ+=("$o"); TODO_CMD+=("$cmd"); TODO_KIND+=("$k"); TODO_EXTRA+=("$extra"); TODO_WHY+=("$why")
+  else
+    SKIPPED=$((SKIPPED+1))
+  fi
+}
+
+for s in $CORE_SRC; do add_unit "$s" "$OBJ/core/$(basename "${s%.*}").o" c; done
+for s in $ASM_SRC;  do add_unit "$s" "$OBJ/core/$(basename "${s%.*}").o" c; done
+for s in $RT_SRC;   do add_unit "$s" "$OBJ/rt/$(basename "${s%.*}").o" cxx; done
 for step in 0 1 2 3; do
     for s in $PASS_SRC; do
-        compile_c "$s" "$OBJ/pass$step/$(basename "${s%.*}").o" "" "-DSTEP=$step"
+        add_unit "$s" "$OBJ/pass$step/$(basename "${s%.*}").o" c "-DSTEP=$step"
     done
 done
+
+echo "== ${#TODO_OBJ[@]} unite(s) a (re)compiler, $SKIPPED a jour =="
+for i in "${!TODO_OBJ[@]}"; do
+  case "${TODO_KIND[$i]}" in cxx) t=CXX;; *) t=CC;; esac
+  echo "  $t  $(basename "${TODO_OBJ[$i]}")  [${TODO_WHY[$i]}]"
+done
+
+JOBS="${WINX86_JOBS:-$(( $(nproc) - 1 ))}"
+[ "$JOBS" -ge 1 ] 2>/dev/null || JOBS=1
+STATE="$OUT/.fastbuild${LIBTAG:-}"; rm -rf "$STATE"; mkdir -p "$STATE"
+
+# Extra ${TODO_EXTRA[$i]:-} non protege par des guillemets : un define vide se
+# dissout au lieu de devenir un argument fantome que gcc/g++ prendrait pour un
+# fichier d'entree (meme raison que dans l'ancien compile_c/compile_cxx).
+compile_one() { # $1=index
+  local i="$1" s="${TODO_SRC[$i]}" o="${TODO_OBJ[$i]}" k="${TODO_KIND[$i]}" extra="${TODO_EXTRA[$i]}"
+  local base; base="$(id "$o")"
+  local rc=0
+  if [ "$k" = cxx ]; then
+    $CXX $CXXFLAGS $extra $DEPFLAGS -c "$s" -o "$o" > "$STATE/$base.log" 2>&1 || rc=$?
+  else
+    $CC $CFLAGS $extra $DEPFLAGS -c "$s" -o "$o" > "$STATE/$base.log" 2>&1 || rc=$?
+  fi
+  if [ "$rc" = 0 ]; then
+    printf '%s' "${TODO_CMD[$i]}" > "${o%.o}.cmd"
+    echo 0 > "$STATE/$base.rc"
+  else
+    rm -f "$o" "${o%.o}.cmd" "${o%.o}.d"
+    echo "$rc" > "$STATE/$base.rc"
+  fi
+}
+
+if [ "${#TODO_OBJ[@]}" -gt 0 ]; then
+  running=0
+  for i in "${!TODO_OBJ[@]}"; do
+    while [ "$running" -ge "$JOBS" ]; do wait -n || true; running=$((running-1)); done
+    compile_one "$i" &
+    running=$((running+1))
+  done
+  wait
+  fails=0
+  for i in "${!TODO_OBJ[@]}"; do
+    base="$(id "${TODO_OBJ[$i]}")"
+    rc="$(cat "$STATE/$base.rc" 2>/dev/null || echo 127)"
+    if [ "$rc" != "0" ]; then
+      fails=$((fails+1))
+      echo "---- ECHEC: ${TODO_SRC[$i]} (rc=$rc) ----" >&2
+      cat "$STATE/$base.log" >&2 2>/dev/null || true
+    else
+      [ -s "$STATE/$base.log" ] && { echo "---- $(basename "${TODO_SRC[$i]}") ----"; cat "$STATE/$base.log"; } || true
+    fi
+  done
+  [ "$fails" -eq 0 ] || { echo "FATAL: $fails unite(s) en echec" >&2; exit 1; }
+fi
 
 AR="${CC%-gcc}-ar"
 rm -f "$LIB"
