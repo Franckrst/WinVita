@@ -8,16 +8,21 @@ découvrir en silence.
     payées. Chaque chantier terminé doit en supprimer une — une dette déjà réglée
     qui traîne fait croire à un travail restant.
 
-## Variables d'environnement : six noms `D2*` sans équivalent
+## Variables d'environnement : deux noms `D2_*` sans équivalent
 
-Le gros du renommage est fait (`1e003e2`) : les réglages génériques s'appellent
-`WX86_*`, les anciens noms `D2_*` restent acceptés en repli pour ne pas casser
-les scripts existants.
+Le gros du renommage est fait (`1e003e2`, complété par `bc41daf` pour le plan
+mémoire invité) : les réglages génériques s'appellent `WX86_*`, les anciens
+noms `D2_*` (dont `D2ARENA`, `D2HI`, `D2LAYOUT`, `D2MEMBASE`, désormais
+`WX86_ARENA`/`WX86_HI`/`WX86_LAYOUT`/`WX86_MEMBASE`) restent acceptés en
+repli pour ne pas casser les scripts existants.
 
-Six variables lues par le moteur n'ont **pas** encore de jumeau `WX86_` :
-`D2ARENA`, `D2HI`, `D2LAYOUT`, `D2MEMBASE`, `D2_EIPTRAP_N`, `D2_XFERTRACE`.
-Deux autres n'ont aucun préfixe du tout (`THREADLOG`, `TRAPTAG`), ce qui est un
-risque de collision avec l'environnement d'un consommateur.
+Deux variables lues par le moteur n'ont **pas** de jumeau `WX86_` :
+`D2_EIPTRAP_N`, `D2_XFERTRACE` — toutes deux dans
+`third_party/box86-dynarec/dynarec/dynarec.c`, du code Box86 vendored et
+patché mécaniquement (voir [Architecture](architecture.md)), volontairement
+laissé intact. Deux autres n'ont aucun préfixe du tout (`THREADLOG`,
+`TRAPTAG`), ce qui est un risque de collision avec l'environnement d'un
+consommateur.
 
 C'est un problème de **nom**, pas de couplage : leur comportement est
 entièrement générique. Mais ça induit en erreur quelqu'un qui chercherait un
@@ -35,23 +40,12 @@ validation en ligne faite lors du découplage n'a pas couvert ce cas-là. C'est
 donc un report assumé, avec un critère de levée écrit : un test de charge réel,
 pas une relecture.
 
-## `ds_emul` (DirectSound) — pas extrait
-
-Émulation DirectSound par fabrication d'une vtable COM à partir d'une table de
-shims. Le *mécanisme* — fabriquer une vtable COM générique depuis une table de
-pointeurs de fonctions — est réutilisable tel quel par n'importe quel jeu
-utilisant DirectSound ; le fichier actuel, côté portage, mélange ce mécanisme
-avec des choix de mixage audio propres au jeu.
-
-Une scission propre (mécanisme ici, choix de mixage là-bas) est identifiée mais
-n'a jamais été auditée en détail.
-
 ## La présentation écran — jamais auditée
 
 `vita_present.cpp` (présentation à l'écran) n'a jamais été relu pour en extraire
-une éventuelle partie générique. C'est, avec `ds_emul`, le dernier gros morceau
-où personne n'a regardé — l'inconnue n'est donc pas « combien est générique »,
-c'est « on ne sait pas ».
+une éventuelle partie générique. C'est le dernier gros morceau où personne n'a
+regardé — l'inconnue n'est donc pas « combien est générique », c'est « on ne
+sait pas ».
 
 ## Chemin personnel en dur dans deux scripts
 

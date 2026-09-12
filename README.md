@@ -81,17 +81,11 @@ cmake -B build && cmake --build build
 
 ## Défauts connus, dette assumée
 
-- Plusieurs variables d'environnement de réglage (`D2_WAKEPROF` dans
-  `sched_native.cpp` ; `D2_JITPROFILE`, `D2_CALLRET`, `D2_FORWARD`,
-  `D2_BUDGETTAIL`, `D2_NOPEND`, `D2_SIGNTAG`, `D2_MMUFOLD`, `D2_MMUSTACK`,
-  `D2_NOLINK` dans `src/dynarec86/`) sont préfixées `D2_` bien que leur
-  comportement soit entièrement générique — c'est un héritage du nom du
-  projet d'origine, pas un couplage réel. Nettoyage prévu (probablement
-  `WX86_*` avec alias `D2_*` conservés côté d2vita), pas encore fait.
-- `src/runtime/ds_emul.{h,cpp}` (émulation DirectSound par table de vtable
-  COM) mélange un mécanisme générique (fabriquer une vtable COM à partir
-  d'une table de shims) avec des choix de mixage spécifiques à un jeu — reste
-  côté d2vita pour l'instant, scission à faire.
+- Le renommage générique des variables d'environnement (`D2_*` → `WX86_*`,
+  ancien nom conservé en repli) est **fait pour l'essentiel** — voir
+  [Dette technique](docs/dette.md) pour la liste à jour des rares exceptions
+  restantes (deux variables du code Box86 vendored, deux sans préfixe du
+  tout).
 - `src/platform/vita_present.cpp` (présentation à l'écran) et
   `src/platform/vita_net.{h,cpp}` (couche réseau — son auto-test intègre des
   vérifications spécifiques au protocole Battle.net) restent côté d2vita :

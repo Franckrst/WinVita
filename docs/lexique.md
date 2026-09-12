@@ -50,6 +50,6 @@ déjà traduits pour cette plage d'adresses (`Cpu::invalidate_code`/
 `discard_code`).
 
 **COM (vtable)** — modèle de composants Windows où un objet est exposé par
-une table de pointeurs de fonctions (*vtable*). `ds_emul.cpp` (côté d2vita)
-fabrique une vtable COM DirectSound entièrement à partir d'une table de
-shims, sans vraie classe C++ sous-jacente.
+une table de pointeurs de fonctions (*vtable*). `src/runtime/ds_emul.cpp`
+(au moteur) fabrique une vtable COM DirectSound entièrement à partir d'une
+table de shims, sans vraie classe C++ sous-jacente.
