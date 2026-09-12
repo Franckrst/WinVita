@@ -153,8 +153,15 @@ int dyn86_protectdb(void);
 
 /* Translation-time GUEST->GUEST redirect for a known function (pristine mode):
  * the translator sends call/jmp targets equal to `from` to `to`, with NO
- * modification of guest memory. See bridge.h getAlternate. */
+ * modification of guest memory. See bridge.h getAlternate, and
+ * src/dynarec86/alt_table.c for the table's contract. */
 void dyn86_set_alternate(uintptr_t from, uintptr_t to);
+/* Combien d'alternates sont POSES, et combien ont ete PERDUS. La table n'a plus
+ * de borne depuis le 2026-09-12 : `lost` ne peut monter que si une allocation
+ * echoue, et il existe pour qu'un echec ne soit JAMAIS silencieux — il l'etait
+ * jusque-la, ou toute pose au-dela de la 52e etait avalee sans un mot. */
+int dyn86_alt_count(void);
+int dyn86_alt_lost(void);
 
 /* D2Vita 03/09 : journal des acces x87 64 bits non alignes (sites parity). 0 total, 1 non-alignes, 2 derniere adresse hote, 3 site */
 uint32_t dyn86_unal_stat(int k);

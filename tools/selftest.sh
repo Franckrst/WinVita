@@ -77,5 +77,24 @@ run ds_rate "$ROOT/tools/ds_rate_selftest.cpp" \
             "$ROOT/src/runtime/gil.cpp" \
             "$ROOT/src/platform/vita_host.cpp"
 
+# La table des alternates : unite FEUILLE (src/dynarec86/alt_table.c), donc
+# compilable ici. -Dmalloc=wx86_selftest_malloc n'est pose QUE sur elle :
+# l'injection de faute porte sur l'allocateur, le corps teste est celui de la
+# bibliotheque. Voir l'en-tete de tools/alt_table_selftest.cpp.
+# Compilee en C (comme dans la bibliotheque) : en C++, -Dmalloc casserait le
+# `using std::malloc` de <stdlib.h>.
+echo "== alt_table =="
+if ! ${CC:-gcc} -std=gnu17 -O2 -Wall -Wextra -Werror -I"$ROOT/src/dynarec86/shim" \
+      -Dmalloc=wx86_selftest_malloc -c "$ROOT/src/dynarec86/alt_table.c" \
+      -o "$OUT/alt_table.o" 2>"$OUT/alt_table.build.log"; then
+  echo "ECHEC de compilation :"; cat "$OUT/alt_table.build.log"; fail=1
+elif ! $CXX -std=gnu++17 -O2 -Wall -Wextra -Werror \
+      "$ROOT/tools/alt_table_selftest.cpp" "$OUT/alt_table.o" -o "$OUT/alt_table" \
+      2>>"$OUT/alt_table.build.log"; then
+  echo "ECHEC de compilation :"; cat "$OUT/alt_table.build.log"; fail=1
+elif ! "$OUT/alt_table"; then
+  echo "ECHEC a l'execution"; fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi
 exit "$fail"

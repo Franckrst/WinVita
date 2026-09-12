@@ -6,7 +6,7 @@
 #include <time.h>
 
 #include "dyn86.h"
-#include "bridge.h"          /* DYN86_MAX_ALT + hasAlternate/getAlternate table */
+#include "bridge.h"          /* table hasAlternate/getAlternate (alt_table.c) */
 
 static volatile int g_stop = 0;
 static uint32_t g_quantum = 0;      /* chains per slice; 0 = periodic break off */
@@ -197,17 +197,10 @@ static int g_protectdb = 0;     /* see dyn86.h: OFF until a segv handler exists 
 void dyn86_set_protectdb(int on) { g_protectdb = on; }
 int dyn86_protectdb(void) { return g_protectdb; }
 
-/* Translation-time redirect table (see bridge.h hasAlternate/getAlternate).
- * Registers a GUEST addr -> GUEST addr redirect the translator applies to
- * call/jmp targets, so a known function can run a native shim WITHOUT patching
- * the guest .text. Used by the pristine-mode native blit. */
-uintptr_t dyn86_alt_from[DYN86_MAX_ALT] = {0};
-uintptr_t dyn86_alt_to[DYN86_MAX_ALT] = {0};
-int dyn86_alt_n = 0;
-void dyn86_set_alternate(uintptr_t from, uintptr_t to) {
-    for (int i = 0; i < dyn86_alt_n; i++) if (dyn86_alt_from[i] == from) { dyn86_alt_to[i] = to; return; }
-    if (dyn86_alt_n < DYN86_MAX_ALT) { dyn86_alt_from[dyn86_alt_n] = from; dyn86_alt_to[dyn86_alt_n] = to; dyn86_alt_n++; }
-}
+/* La table des alternates (redirection INVITE -> INVITE appliquee a la
+ * traduction) vit dans src/dynarec86/alt_table.c depuis le 2026-09-12 : unite
+ * FEUILLE, sans dependance au dynarec, donc exercable par un oracle sur
+ * bureau. Ses declarations restent dans bridge.h. */
 
 /* ---- D2Vita 03/09 : acces 64 bits x87 sur memoire INVITEE aux sites « parity » ----
  * getedparity() croit l adresse 8-alignee et box86 emet LDRD/STRD. Si la croyance

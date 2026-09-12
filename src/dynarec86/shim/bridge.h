@@ -18,14 +18,18 @@ static inline void* GetNativeFncOrFnc(uintptr_t fnc) { return (void*)fnc; }
  * il s'exécute à CHAQUE recherche de dynablock, pas seulement quand on traduit.
  * L'effet reste petit (au plus 24 comparaisons sur un pointeur deja chaud), mais
  * un commentaire qui dit « jamais a l'execution » fait ecarter a tort ce site
- * quand on cherche ou part le temps — et DBGetBlock pese 4,8 % du budget. Set via dyn86_set_alternate (dyn86.c).
- * 24 places : 6 étaient prises (blit, scomp, roomguard, poolcap, dcc, fog) et
- * les portages « points chauds » du 2026-08-26 en ajoutent 4 ; la table était
- * pleine à 8. */
-#define DYN86_MAX_ALT 52   /* 2026-09-06 : +5 (D2_PHASEPROF : 3 dessins, tour ; sim partage celui de LOOPWATCH) +8 (D2_PHASEPROF_X) ; +12 (D2_REPLAY60 : unite, camera, 9 phases) */
-extern uintptr_t dyn86_alt_from[DYN86_MAX_ALT];
-extern uintptr_t dyn86_alt_to[DYN86_MAX_ALT];
-extern int dyn86_alt_n;
+ * quand on cherche ou part le temps — et DBGetBlock pese 4,8 % du budget.
+ * Set via dyn86_set_alternate (src/dynarec86/alt_table.c, qui porte le contrat
+ * complet et son oracle).
+ *
+ * PLUS AUCUNE BORNE (2026-09-12). La table a vecu bornee a 24 puis 52 places,
+ * et tout enregistrement au-dela etait AVALE SANS UN MOT. Elle croit par
+ * doublement ; le seul echec restant (allocation refusee) se compte dans
+ * dyn86_alt_refus et s'ecrit dans le journal. */
+extern uintptr_t *dyn86_alt_from;
+extern uintptr_t *dyn86_alt_to;
+extern int dyn86_alt_n;       /* alternates POSES ; publie APRES l'entree */
+extern int dyn86_alt_refus;   /* alternates PERDUS (allocation refusee) */
 static inline int hasAlternate(void* addr) {
     for(int i=0;i<dyn86_alt_n;i++) if(dyn86_alt_from[i]==(uintptr_t)addr) return 1;
     return 0;

@@ -81,6 +81,7 @@ $B86/emu/x86compstrings.c
 $SHIM/shim_impl.c
 $SHIM/x86run_flags.c
 $DYN86/dyn86.c
+$DYN86/alt_table.c
 $DYN86/dyn86_emitprof.c
 $DYN86/dyn86_memintrin.c
 $DYN86/dyn86_intrin.c
