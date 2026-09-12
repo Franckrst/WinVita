@@ -591,14 +591,17 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
 }
 
 // ---- coeur2 : knobs (lus UNE fois) et epinglage par le fil lui-meme ---------
-// D2_COEUR_SERVEUR=<c> : 0/absent = OFF (topologie d'avant a l'octet pres) ;
+// WX86_COEUR_SERVEUR=<c> : 0/absent = OFF (topologie d'avant a l'octet pres) ;
 // 1..3 = le fil serveur sur USER_c (3 = 4e coeur, CapUnlocker). Les autres
-// fils invites restent sur USER_0. Identification : D2_COEUR_SERVEUR_ID=<id>
-// (prioritaire), sinon D2_COEUR_SERVEUR_RVA=<hex> (entree relative a Game.exe,
-// defaut kCoeur2ServerRva). Sous qemu : D2_QEMU_MONOCOEUR=<cpu> emule la
-// topologie console par sched_setaffinity (main + runners sur <cpu>, serveur
-// sur <cpu>+c) — sans lui, qemu garde ses fils libres sur tous les coeurs hote
-// (c'est deja le regime des portes et bancs natifs qemu depuis l'etape 1).
+// fils invites restent sur USER_0. Identification : WX86_COEUR_SERVEUR_ID=<id>
+// (prioritaire), sinon l'ADRESSE D'ENTREE invitee que le consommateur a donnee
+// par set_server_thread_entry() — le moteur ne resout aucun nom de module et
+// n'a donc plus de knob d'adresse RELATIVE : une RVA n'a de sens que rapportee
+// a un module, et c'est le portage qui sait lequel. Sous qemu :
+// WX86_QEMU_MONOCOEUR=<cpu> emule la topologie console par sched_setaffinity
+// (main + runners sur <cpu>, serveur sur <cpu>+c) — sans lui, qemu garde ses
+// fils libres sur tous les coeurs hote (c'est deja le regime des portes et
+// bancs natifs qemu depuis l'etape 1).
 static int coeur2_core() {
     static int c = -1;
     if (c < 0) { const char* e = getenv("WX86_COEUR_SERVEUR"); if (!e) e = getenv("D2_COEUR_SERVEUR"); c = (e && *e) ? atoi(e) : 0; if (c < 0 || c > 3) c = 0; }
@@ -607,12 +610,6 @@ static int coeur2_core() {
 static uint32_t coeur2_id() {
     static int v = -1;
     if (v < 0) { const char* e = getenv("WX86_COEUR_SERVEUR_ID"); if (!e) e = getenv("D2_COEUR_SERVEUR_ID"); v = (e && *e) ? atoi(e) : 0; if (v < 0) v = 0; }
-    return (uint32_t)v;
-}
-static uint32_t coeur2_rva() {
-    static long long v = -1;
-    if (v < 0) { const char* e = getenv("WX86_COEUR_SERVEUR_RVA"); if (!e) e = getenv("D2_COEUR_SERVEUR_RVA");
-                 v = (e && *e) ? (long long)strtoul(e, nullptr, 16) : (long long)NativeScheduler::kCoeur2ServerRva; }
     return (uint32_t)v;
 }
 static int qemu_monocoeur() {           // -1 = knob absent (aucune affinite hote)
@@ -624,10 +621,10 @@ static int qemu_monocoeur() {           // -1 = knob absent (aucune affinite hot
 bool NativeScheduler::is_server_thread(GuestThread* t) {
     if (!t) return false;
     if (const uint32_t id = coeur2_id()) return t->id == id;
-    const uint32_t rva = coeur2_rva();
-    if (!rva || !br_) return false;
-    const uint32_t base = br_->module_base("Game.exe");
-    return base && t->entry == base + rva;
+    // server_entry_ est une adresse invitee ABSOLUE, posee par le consommateur.
+    // 0 = il n'en a pose aucune : personne n'est le serveur, et la topologie
+    // reste celle d'avant. Le moteur ne cherche pas a deviner.
+    return server_entry_ && t->entry == server_entry_;
 }
 
 void NativeScheduler::pin_runner(GuestThread* t, bool is_main) {
@@ -660,7 +657,7 @@ void NativeScheduler::pin_runner(GuestThread* t, bool is_main) {
         // sur ce firmware, t12 §10.1).
         wx86_vita_core_register("serveur", (int)self, (unsigned)mask, rc);
         char m[160];
-        std::snprintf(m, sizeof m, "coeur2: fil %u (entree=%08x) epingle sur USER_%d masque=0x%x rc=0x%08x — serveur D2Game sur son coeur",
+        std::snprintf(m, sizeof m, "coeur2: fil %u (entree=%08x) epingle sur USER_%d masque=0x%x rc=0x%08x — fil serveur sur son coeur",
                       t->id, t->entry, c, (unsigned)mask, (unsigned)rc);
         progress(m); std::printf("  %s\n", m);
     }
@@ -681,10 +678,10 @@ void NativeScheduler::pin_runner(GuestThread* t, bool is_main) {
         char m[160];
         std::snprintf(m, sizeof m, "coeur2: fil %u (entree=%08x) affinite hote cpu=%d rc=%d%s%s",
                       t->id, t->entry, cpu, rc, rc ? " (ECHEC : fil libre)" : "",
-                      srv ? " — serveur D2Game sur son coeur" : "");
+                      srv ? " — fil serveur sur son coeur" : "");
         std::printf("  %s\n", m); std::fflush(stdout);
     } else if (srv) {
-        std::printf("  coeur2: fil %u (entree=%08x) reconnu SERVEUR — sans D2_QEMU_MONOCOEUR aucune affinite hote (qemu : fils deja libres)\n",
+        std::printf("  coeur2: fil %u (entree=%08x) reconnu SERVEUR — sans WX86_QEMU_MONOCOEUR aucune affinite hote (qemu : fils deja libres)\n",
                     t->id, t->entry);
     }
 #endif
@@ -921,7 +918,7 @@ void NativeScheduler::fam_beat() {
         // ---- « fils: » (06/09) : BLOCS TRADUITS PAR FIL INVITE, par fenetre de 10 s.
         // Les chutes de fps en jeu reel montrent le fil principal en attente
         // (WFSO 11-14/img, libre 30-54 ms/pas) pendant que le pas de simulation
-        // tombe a 12-15/s : c'est un AUTRE fil invite (le serveur D2Game en
+        // tombe a 12-15/s : c'est un AUTRE fil invite (le fil serveur du jeu, en
         // processus) qui tient le coeur. Aucun relevé ne le disait : voici le
         // proxy CPU par fil — le delta des blocs executes (thread_emu_blocks),
         // le meme compteur que le champ run= des detections, mais periodique.

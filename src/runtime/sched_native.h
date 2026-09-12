@@ -89,6 +89,22 @@ public:
     void set_time_sink(std::function<void(uint64_t)> f) override { time_sink_ = std::move(f); }
     const char* stop_reason() const override { return stop_reason_; }
 
+    // ---- coeur2 : QUEL fil invite a le droit de partir sur un autre coeur ---
+    // Le moteur ne connait AUCUN nom de module et ne sait pas comment
+    // s'appelle le fil « serveur » du jeu : il ne sait qu'une chose, l'adresse
+    // d'ENTREE invitee de ce fil, que le consommateur lui donne a
+    // l'installation. 0 (defaut) = personne, donc topologie d'avant a l'octet
+    // pres. Table configuree a l'installation, jamais une question posee au
+    // portage : le moteur compare `t->entry` et se tait.
+    //
+    // Avant le 2026-09-12 cette adresse etait calculee ICI, par
+    // `br_->module_base("Game.exe") + kCoeur2ServerRva` — le nom du module du
+    // PREMIER consommateur, en dur dans l'ordonnanceur generique. Un portage
+    // dont l'executable ne s'appelle pas ainsi obtenait base=0, donc un
+    // WX86_COEUR_SERVEUR inerte SANS UN MOT.
+    void set_server_thread_entry(uint32_t guest_entry_va) { server_entry_ = guest_entry_va; }
+    uint32_t server_thread_entry() const { return server_entry_; }
+
     // Watchdog heartbeat: total wake deliveries (the native "switches").
     const uint64_t* wakes_ptr() const { return &wakes_total_; }
     // ---- Filet anti-famine : armement + observabilité (Tâche 3, §3.2/§3.4) --
@@ -227,13 +243,14 @@ private:
     };
     static void* runner_tramp(void* guest_thread);
     void runner(GuestThread* t);            // worker body (GIL taken inside)
-    // ---- coeur2 (06/09/2026) : le fil SERVEUR (D2Game en processus) sur un
-    // AUTRE coeur que le client — D2_COEUR_SERVEUR=<c> (1..3 = USER_c ; absent
-    // ou 0 = topologie d'avant, tout sur USER_0). Identification du fil : par
-    // ADRESSE D'ENTREE (D2_COEUR_SERVEUR_RVA=<hex> relative a Game.exe, defaut
-    // kCoeur2ServerRva) ou par id invite (D2_COEUR_SERVEUR_ID=<n>, prioritaire
-    // s'il est donne). Sous qemu il n'y a pas de coeurs USER : la meme decision
-    // devient une affinite HOTE quand D2_QEMU_MONOCOEUR=<cpu> emule la
+    // ---- coeur2 (06/09/2026) : le fil SERVEUR du jeu (un fil invite comme un
+    // autre) sur un AUTRE coeur — WX86_COEUR_SERVEUR=<c> (1..3 = USER_c ;
+    // absent ou 0 = topologie d'avant, tout sur USER_0). Identification du
+    // fil : par ADRESSE D'ENTREE invitee, que le CONSOMMATEUR fournit via
+    // set_server_thread_entry() (le moteur ne connait aucun module), ou par id
+    // invite (WX86_COEUR_SERVEUR_ID=<n>, prioritaire s'il est donne).
+    // Sous qemu il n'y a pas de coeurs USER : la meme decision
+    // devient une affinite HOTE quand WX86_QEMU_MONOCOEUR=<cpu> emule la
     // topologie console (tous les runners + main sur <cpu>, le serveur sur
     // <cpu>+c). Sans ces knobs, AUCUN appel d'affinite n'est ajoute.
     bool is_server_thread(GuestThread* t);
@@ -252,6 +269,7 @@ private:
     uint64_t now_ms() const;
 
     Cpu* cpu_; Bridge* br_;
+    uint32_t server_entry_ = 0;             // coeur2 : entree invitee du fil serveur (0 = aucun)
     uint32_t stack_region_, stack_each_, stack_next_;
     uint32_t tib_region_, tib_next_;
     std::vector<std::unique_ptr<GuestThread>> threads_;   // mutated under GIL only
