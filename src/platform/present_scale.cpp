@@ -57,6 +57,19 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
                 out[x + 3] = pal32[row[xacc >> 16]]; xacc += sx;
             }
             for (; x < r.w; ++x, xacc += sx) out[x] = pal32[row[xacc >> 16]];
+        } else if (fmt == SrcFormat::Rgb555) {
+            // Transcription de la boucle deja en service chez le second
+            // consommateur. Le DIB est de haut en bas (biHeight negatif) :
+            // aucun retournement ici non plus.
+            const uint16_t* r16 = (const uint16_t*)row;
+            for (int x = 0; x < r.w; ++x, xacc += sx) {
+                const uint32_t p = r16[xacc >> 16];
+                const uint32_t rr = (p >> 10) & 31, gg = (p >> 5) & 31, bb = p & 31;
+                out[x] = 0xFF000000u
+                       | (((bb << 3) | (bb >> 2)) << 16)
+                       | (((gg << 3) | (gg >> 2)) << 8)
+                       |  ((rr << 3) | (rr >> 2));
+            }
         } else {
             const uint32_t* r32 = (const uint32_t*)row;
             for (int x = 0; x < r.w; ++x, xacc += sx) {

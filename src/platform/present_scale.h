@@ -34,11 +34,28 @@
 
 namespace wx86 {
 
-// Format des pixels SOURCE. Ce sont les deux seuls formats que les DIB Windows
-// des portages presentent aujourd'hui ; en ajouter un se fait ici, pas chez eux.
+// Format des pixels SOURCE. Ajouter un format se fait ICI, pas chez le portage.
+//
+// !! LA LISTE A ETE ECRITE SUR LE SEUL PREMIER CONSOMMATEUR, ET ELLE ETAIT
+// INCOMPLETE. Elle affirmait « les deux seuls formats que les DIB Windows des
+// portages presentent aujourd'hui » — et c'etait faux au moment ou c'etait
+// ecrit : le second consommateur presente un DIB 16 bits, et c'est son chemin
+// PAR DEFAUT, pas un cas de repli. Mesure du 2026-09-12 sur son banc qemu :
+//     [ddraw] SetDisplayMode 800x600x16
+//     [gdi]   blit: ... DIB 1024x768@16 — surface PRESENTEE
+// La generalite d'un moteur ne se decrete pas depuis un seul appelant ; elle se
+// constate sur le second. Cette enumeration est la trace de la correction.
 enum class SrcFormat {
     Pal8,    // 8 bits indexes + palette B,G,R,0 (l'ordre des DIB Windows)
     Bgra32,  // 32 bits 0x00RRGGBB en memoire, soit B,G,R,X
+    // 16 bits 5-5-5, bit 15 ignore. « biBitCount = 16 avec biCompression =
+    // BI_RGB » vaut 555 PAR DEFINITION Win32 — et c'est MESURE sur le DIB du
+    // second consommateur : sur les 209 valeurs 16 bits distinctes d'une image
+    // de jeu, le bit 15 n'est JAMAIS pose, ce qu'une lecture en 565
+    // n'expliquerait pas. L'elargissement de 5 a 8 bits est « x<<3 | x>>2 »,
+    // qui envoie 31 sur 255 ; un simple « <<3 » plafonnerait a 248 et delaverait
+    // toute l'image. Ce n'est pas un detail de gout : c'est un ecart visible.
+    Rgb555,
 };
 
 // Rectangle de DESTINATION dans le tampon de l'hote, en pixels.
