@@ -57,5 +57,10 @@ if grep -nE '\b(printf|fprintf|sprintf|snprintf|puts|fputs|fwrite|d2vita_progres
   echo "   ECHEC: vita_kb.h contient un appel de sortie"; fail=1
 else echo "   OK: vita_kb.h sans appel de sortie"; fi
 
+# La carte des familles du profil : en-tete AUTONOME, donc prouvable ici. Le
+# classement vivait dans cpu_box86.cpp, qui ne se compile que pour ARM/Vita —
+# aucun oracle ne pouvait l'exercer.
+run prof_map "$ROOT/tools/prof_map_selftest.cpp"
+
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi
 exit "$fail"

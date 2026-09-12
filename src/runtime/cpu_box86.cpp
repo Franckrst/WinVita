@@ -40,6 +40,7 @@
 
 #include <cstdint>
 #include "runtime/guest_thread.h"   // X86Context (per-thread FPU blob)
+#include "runtime/prof_map.h" // la carte des familles du profil (fournie par le portage)
 #include "runtime/cpu.h"    // MUST be included before the Box86 headers:
                             // Box86's regs.h #defines R_EAX & friends.
 #include "runtime/gil.h"    // GIL Guard at the trap dispatch (spec D3; inert coop)
@@ -206,6 +207,29 @@ extern "C" {
     unsigned int       d2rt_b5_index_on = 0; // jambe armee : 1 = index direct
     unsigned int       d2rt_b5_direct_n = 0; // creneaux couverts par l'index direct
     unsigned int       d2rt_b5_direct_lo = 0;// VA du creneau d'indice 0
+}
+
+// ---- LA CARTE DES FAMILLES du profil d'adresses (runtime/prof_map.h) -------
+// Au SCOPE GLOBAL, pour la meme raison que les compteurs ci-dessus : ces deux
+// accesseurs sont des symboles du moteur, et les aides en ligne doivent etre
+// visibles depuis le namespace anonyme plus bas.
+static Wx86ProfMap g_profMap;
+void wx86_prof_set_map(const Wx86ProfMap& m) { g_profMap = m; }
+const Wx86ProfMap& wx86_prof_map() { return g_profMap; }
+
+// La CLASSIFICATION elle-meme vit dans prof_map.h (fonctions en ligne), pour
+// qu'un oracle de bureau puisse l'exercer : cette unite-ci ne se compile que
+// pour ARM/Vita. Ici, seules les trois fenetres de detail sont cablees a leurs
+// compteurs. Elles ne dependent PLUS de la famille trouvee : le code d'avant
+// testait `b == 4`, puis `b == 6 && rva dans [0x0d0000,0x0f0000)`, ce qui etait
+// exactement « rva dans la fenetre » pour la carte d'alors — deux fenetres qui
+// ne se recouvrent pas donnent les memes comptes qu'un if/else-if.
+static inline void wx86_prof_zooms(uint32_t rva) {
+    const Wx86ProfMap& m = g_profMap;
+    int k;
+    if ((k = wx86_prof_zoom(m.zoom_4k_a, 12, 32, rva)) >= 0) ++d2rt_eipprof_sub[k];
+    if ((k = wx86_prof_zoom(m.zoom_4k_b, 12, 32, rva)) >= 0) ++d2rt_eipprof_sub2[k];
+    if ((k = wx86_prof_zoom(m.zoom_256,   8, 16, rva)) >= 0) ++d2rt_eipprof_fn[k];
 }
 
 namespace d2rt {
@@ -1153,23 +1177,12 @@ public:
     // (PeekMessage/Sleep), qui ne brûle pourtant aucun CPU.
     void eipprof_sample(uint32_t ip) {
         uint32_t rva = ip - g_eipProfBase;
-        int b;
-        if      (rva >= 0x20b200 && rva < 0x20d040) b = 0;   // Codec.cpp (DCC)
-        else if (rva >= 0x1fe000 && rva < 0x204000) b = 1;   // SpriteCache.cpp
-        else if (rva >= 0x2094b0 && rva < 0x20ab00) b = 2;   // Tilecmp.cpp
-        else if (rva >= 0x242000 && rva < 0x280000) b = 3;   // DRLG (level gen)
-        else if (rva >= 0x0f0000 && rva < 0x110000) b = 4;   // Gfx / blit family
-        else if (rva <  0x030000)                   b = 5;   // Storm (alloc/MPQ/IO)
-        else                                        b = 6;   // reste
-        ++g_eipProfBuckets[b];
-        if (b == 4) ++d2rt_eipprof_sub[(rva - 0x0f0000u) >> 12];
-        else if (b == 6 && rva >= 0x0d0000u && rva < 0x0f0000u)
-            ++d2rt_eipprof_sub2[(rva - 0x0d0000u) >> 12];
+        ++g_eipProfBuckets[wx86_prof_family(g_profMap, rva)];
+        wx86_prof_zooms(rva);
         // Histogramme PLEINE PORTÉE : 96 cases de 32 KiB couvrant tout le .text
         // (0..0x300000). Les zones nommées ci-dessus ne couvraient que 8 % du
         // temps réel — il faut chercher sans a priori.
         if ((rva >> 15) < 96) ++d2rt_eipprof_all[rva >> 15];
-        if (rva >= 0x0fa000u && rva < 0x0fb000u) ++d2rt_eipprof_fn[(rva - 0x0fa000u) >> 8];
         { uint32_t h = (ip * 2654435761u) >> 19;           // 13 bits -> 8192 cases
           for (int p = 0; p < 24; ++p) {
               uint32_t s = (h + p) & 8191u;
@@ -1219,15 +1232,7 @@ public:
         d2rt_tp_blocks += (uint64_t)(consumed > 0 ? consumed : 0);
 
         const uint32_t rva = ip - d2rt_timeprof_base;
-        int b;
-        if      (rva >= 0x20b200 && rva < 0x20d040) b = 0;   // Codec.cpp (DCC)
-        else if (rva >= 0x1fe000 && rva < 0x204000) b = 1;   // SpriteCache.cpp
-        else if (rva >= 0x2094b0 && rva < 0x20ab00) b = 2;   // Tilecmp.cpp
-        else if (rva >= 0x242000 && rva < 0x280000) b = 3;   // DRLG
-        else if (rva >= 0x0f0000 && rva < 0x110000) b = 4;   // Gfx / blit
-        else if (rva <  0x030000)                   b = 5;   // Storm
-        else                                        b = 6;
-        ++d2rt_tp_bucket[b];
+        ++d2rt_tp_bucket[wx86_prof_family(g_profMap, rva)];
         if(d2rt_lag_on) {                 // anneau d'attribution des gels
             const uint32_t w = d2rt_lag_w;
             d2rt_lag_t[w % D2RT_LAG_RING] = now;
