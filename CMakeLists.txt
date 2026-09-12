@@ -57,6 +57,17 @@ add_library(winx86_core STATIC
   src/platform/vita_host.cpp
   src/render/render_null.cpp)
 target_include_directories(winx86_core PUBLIC src)
+# src/dynarec86/shim en PRIVE, pour la seule DECLARATION de my_cpuid.h.
+# win32_shims_kernel32.cpp (IsProcessorFeaturePresent) DERIVE ses reponses de
+# wx86_cpuid_features() au lieu d'en choisir de nouvelles, pour que les bits
+# annonces par le shim Win32 et ceux annonces par notre propre cpuid ne
+# puissent pas diverger. C'est une bonne dependance, et l'en-tete ne contient
+# que des declarations — rien d'ARM, rien des internes du dynarec : la tranche
+# portable hote decrite en tete de ce fichier reste portable.
+# Sans cette ligne, cette cible ne bâtissait plus du tout (my_cpuid.h
+# introuvable) alors que build.sh, lui, avait le chemin : les deux systemes de
+# bati avaient diverge.
+target_include_directories(winx86_core PRIVATE src/dynarec86/shim)
 
 # -- Host-side PE inspection tool (standalone, project-agnostic) --------------
 add_executable(pe_analyze tools/pe_analyze.cpp)
