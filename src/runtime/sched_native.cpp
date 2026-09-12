@@ -15,6 +15,8 @@ extern "C" {
 #include "runtime/prof.h"
 
 #include <cstdio>
+#include <vector>
+#include <utility>
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
@@ -565,13 +567,25 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
                     t->id, stop_reason_, cpu_->reg(R_EIP), cpu_->fault_addr(),
                     cpu_->reg(R_ESP), cpu_->reg(R_EAX));
         dyn86_dump_xfer();
-        { uint32_t esp = cpu_->reg(R_ESP);          // stack chain: module-range values
+        // CHAINE DE PILE : on releve les mots de la pile qui pointent DANS un
+        // module charge — l'amorce d'une trace d'appels quand le cadre est
+        // perdu. Jusqu'au 2026-09-12 les trois plages etaient ecrites en dur
+        // (0x400000-0xA00000, 0x1900000-0x2100000, 0x30000000-0x31000000) :
+        // c'etait le plan memoire du PREMIER consommateur, et sur un portage
+        // dont les modules vivent ailleurs le dump sortait VIDE — un
+        // diagnostic qui se tait au moment ou on en a le plus besoin. Le pont
+        // connait la base et la taille de chaque module charge : on lui
+        // demande, et le dump dit lequel.
+        { uint32_t esp = cpu_->reg(R_ESP);
+          const std::vector<std::pair<uint32_t,uint32_t>> mods =
+              br_ ? br_->loaded_modules() : std::vector<std::pair<uint32_t,uint32_t>>();
           for (uint32_t off = 0; off < 0x100; off += 4) {
               uint32_t v = cpu_->read_u32(esp + off);
-              if ((v >= 0x400000 && v < 0x00A00000) ||
-                  (v >= 0x01900000 && v < 0x02100000) ||   // compact module window (forced-reloc layout)
-                  (v >= 0x30000000 && v < 0x31000000))
-                  std::printf("      [esp+0x%02x] 0x%08x\n", off, v); } }
+              for (size_t k = 0; k < mods.size(); ++k)
+                  if (v >= mods[k].first && v - mods[k].first < mods[k].second) {
+                      std::printf("      [esp+0x%02x] 0x%08x  (module @%08x +0x%x)\n",
+                                  off, v, mods[k].first, (unsigned)(v - mods[k].first));
+                      break; } } }
         char m[128]; std::snprintf(m, sizeof m, "NATIVE FAULT thr %u eip=%08x addr=%08x",
                                    t->id, cpu_->reg(R_EIP), cpu_->fault_addr());
         progress(m);
