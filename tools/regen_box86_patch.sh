@@ -17,7 +17,16 @@
 # Usage: tools/regen_box86_patch.sh [path-to-box86-checkout]
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BOX86="${1:-/home/doudou/repos/box86}"
+# Pas de chemin machine par defaut : un moteur generique ne connait pas
+# l'arborescence de la machine qui l'a construit. Sans argument, on
+# cherche un checkout Box86 fraternel du depot (../box86), et sinon on
+# demande explicitement le chemin plutot que de deviner un compte utilisateur.
+BOX86="${1:-}"
+if [ -z "$BOX86" ]; then
+  CAND="$(cd "$ROOT/.." 2>/dev/null && pwd)/box86"
+  [ -f "$CAND/src/dynarec/dynarec_arm.c" ] && BOX86="$CAND"
+fi
+[ -n "$BOX86" ] || { echo "Chemin Box86 introuvable : passe-le en argument ($0 <chemin>)"; exit 1; }
 B="$BOX86/src"
 D="$ROOT/third_party/box86-dynarec"
 OUT="$ROOT/tools/box86_local_patches.diff"
