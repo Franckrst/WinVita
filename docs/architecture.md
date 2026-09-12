@@ -94,9 +94,13 @@ La piscine grandit donc par **segments** de 16 Mio ouverts paresseusement
 (`jitpool_grow()`), et non comme un unique bloc agrandi : `WX86_JITPOOL_SEGS`
 (alias `D2_JITPOOL_SEGS`) fixe le nombre de segments visés (2 par défaut →
 32 Mio), `WX86_JITPOOL_MB`/`D2_JITPOOL_MB` la taille de chacun (plafonnée à
-16 Mio par segment). Un échec d'ouverture est suivi par segment, pas par un
-drapeau global unique — un segment déjà ouvert reste utilisable même si
-l'ouverture du suivant échoue.
+16 Mio par segment). Un échec d'ouverture arme un drapeau global unique
+(`g_jitseg_refused`, posé seulement après un refus RÉEL du noyau, jamais par
+anticipation) qui arrête toute nouvelle tentative pour le reste de la
+session — pas de martèlement du noyau à chaque bloc `PROT_EXEC` suivant. Ce
+drapeau ne bloque que la **croissance** : les segments déjà ouverts avant
+l'échec restent pleinement utilisables, chacun étant une entrée séparée du
+tableau de segments.
 
 Le découpage en segments ne coûte rien en performance : la liaison entre
 blocs traduits est **toujours** un branchement indirect à adresse absolue

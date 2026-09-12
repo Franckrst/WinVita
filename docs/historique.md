@@ -66,8 +66,11 @@ Au passage, un bug latent préexistant a été corrigé : l'ancien code posait
 son drapeau « essai déjà tenté » **avant** de connaître le résultat de
 l'allocation — un unique échec (pression mémoire, fragmentation) désarmait
 la piscine pour le reste de la session, sans retentative ni second signal
-que la ligne de log « REFUSÉE ». Le nouveau suivi par segment évite ça : un
-segment déjà ouvert reste utilisable même si le suivant échoue.
+que la ligne de log « REFUSÉE ». Le nouveau code pose ce drapeau seulement
+**après** un refus réel du noyau, jamais par anticipation — et comme les
+segments vivent dans un tableau séparé, un segment déjà ouvert avant l'échec
+reste pleinement utilisable : seule la croissance future est bloquée, pas ce
+qui a déjà été alloué.
 
 ## Évolution
 
