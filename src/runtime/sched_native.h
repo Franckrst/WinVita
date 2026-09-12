@@ -95,8 +95,10 @@ public:
     // Appelé AVANT run() par la branche native de rt_boot. Mémorise la config
     // et arme fam_on_ ; le pthread du battement est démarré par run() et
     // arrêté (drapeau + join) AVANT le join borné des runners (§3.5). frames =
-    // compteur d'images du jeu (g_frame de rt_boot), lu volatile — même
-    // famille de pointeurs que d2vita_watchdog_start. 0 => défauts.
+    // compteur d'images du jeu, fourni par l'appelant, lu volatile. 0 =>
+    // défauts. (L'ancienne rédaction nommait `g_frame de rt_boot` et
+    // `d2vita_watchdog_start` : deux objets d'un portage, dans le contrat d'une
+    // méthode publique du moteur.)
     void arm_famine(const volatile int* frames, uint32_t window_ms, uint32_t nap_us);
     bool     fam_armed()      const { return fam_on_.load(std::memory_order_relaxed); }
     uint32_t fam_detections() const { return fam_detections_.load(std::memory_order_relaxed); }

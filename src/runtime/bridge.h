@@ -137,9 +137,9 @@ public:
     // Top-N des creneaux par NOMBRE DE PRISES (voir runtime/trapcnt.h). Rien a
     // voir avec dump_prof : ce compte-la est dans le binaire LIVRE et il
     // comptabilise aussi les creneaux servis en intrinseque, que le Bridge ne
-    // voit jamais passer. Publie par d2vita_progress (sur console, printf
-    // n'atteint aucun journal) ET par printf (qemu/host, ou d2vita_progress
-    // est un no-op inline).
+    // voit jamais passer. Publie par wx86_vita_progress_c (sur console, printf
+    // n'atteint aucun journal) ET par printf (qemu/host, ou le journal est un
+    // no-op).
     void dump_trap_counts(int topn) const;
     // D2_NATPROF=1 : TEMPS par creneau (us cumulees dans le corps de shim),
     // publie par fenetre de 10 s. C'est l'instrument qui manquait : les
