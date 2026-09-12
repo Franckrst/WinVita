@@ -17,24 +17,21 @@
 // compteur, « aucune requete n'est sortie » et « la fonction n'a jamais ete
 // appelee » rendraient le meme silence, et un zero ne prouverait rien.
 //
-// CE QUI N'EST PAS TESTE ICI
-// --------------------------
-// Le predicat wx86_net_private_only() lui-meme : son unite de traduction
-// (win32_shims_wsock32.cpp) tire tout le pont et le processeur, et n'est pas
-// batissable dans ce filet-ci. Il est donc fourni ici par une definition de
-// test. C'est l'ENTREE de la decision, pas sa sortie : ce filet prouve que
-// wx86_net_resolve honore le verrou, pas que le verrou s'arme correctement —
-// ce dernier point est couvert par les portes reseau du portage.
+// LE VRAI VERROU, DEPUIS LE 2026-09-12
+// ------------------------------------
+// Ce filet fournissait AUTREFOIS sa propre definition de
+// wx86_net_private_only(), parce que l'unite qui l'hebergeait
+// (win32_shims_wsock32.cpp) tire tout le pont et le processeur. Il testait
+// donc une reecriture du verrou, pas le verrou. Le drapeau vit desormais dans
+// runtime/net_guard.cpp, une unite FEUILLE qui ne depend de rien : ce filet
+// lie le VRAI verrou et l'arme par sa vraie fonction d'armement.
 //
 // AUCUN NOM PUBLIC N'EST RESOLU PAR CE FILET. La seule resolution reelle
 // porte sur « localhost », qui ne quitte pas la machine.
 #include "runtime/net_nonblock.h"
+#include "runtime/net_guard.h"
 #include <arpa/inet.h>
 #include <cstdio>
-
-// --- entree de la decision, fournie par le test (voir en-tete) -------------
-static bool g_privateOnly = false;
-bool wx86_net_private_only() { return g_privateOnly; }
 
 static int fails = 0;
 static void check(bool ok, const char* quoi) {
@@ -46,7 +43,7 @@ int main() {
     const uint32_t attendu10 = inet_addr("10.0.0.1");
 
     // 1. Desarme : un litteral prive repond, et ne compte pour aucun refus.
-    g_privateOnly = false;
+    wx86_net_set_private_only(false);
     unsigned long long r0 = wx86_net_resolves_refused();
     check(wx86_net_resolve("10.0.0.1") == attendu10, "litteral prive, desarme");
     check(wx86_net_resolves_refused() == r0, "un litteral ne compte pas comme refus");
@@ -57,7 +54,7 @@ int main() {
     check(wx86_net_resolves_refused() == r0, "aucun refus tant que le verrou dort");
 
     // 3. Arme : le litteral repond TOUJOURS — il ne consulte personne.
-    g_privateOnly = true;
+    wx86_net_set_private_only(true);
     check(wx86_net_resolve("10.0.0.1") == attendu10, "litteral prive, arme");
     check(wx86_net_resolves_refused() == r0, "le litteral ne declenche pas le verrou");
 
@@ -68,7 +65,7 @@ int main() {
     check(wx86_net_resolves_refused() == r0 + 1, "le refus est compte (temoin positif)");
 
     // 5. Le refus n'est pas un etat collant : desarme, le nom repond a nouveau.
-    g_privateOnly = false;
+    wx86_net_set_private_only(false);
     check(wx86_net_resolve("localhost") == lo, "le verrou leve rend le meme resultat qu'avant");
     check(wx86_net_resolves_refused() == r0 + 1, "et ne compte pas un refus de plus");
 

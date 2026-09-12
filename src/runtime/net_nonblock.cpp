@@ -5,7 +5,7 @@
 // (g_nbMethod/g_resolveRc, now exposed via getters instead of d2vita
 // reaching into a d2vita-local static) changed.
 #include "runtime/net_nonblock.h"
-#include "runtime/win32_shims_wsock32.h"   // wx86_net_private_only()
+#include "runtime/net_guard.h"   // wx86_net_private_only() — unite FEUILLE, voir cet en-tete
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>

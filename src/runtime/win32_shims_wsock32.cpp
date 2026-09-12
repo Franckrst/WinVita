@@ -141,33 +141,11 @@ void wx86_net_set_enabled(bool on) { g_netEnabled = on; }
 
 static uint32_t        g_routeIp = 0;
 static WsockObserverFn g_observer = nullptr;
-static bool            g_privOnly = false;
-static unsigned long long g_refused = 0, g_allowed = 0;
 
 void wx86_net_set_redirect(uint32_t ip) { g_routeIp = ip; }
 uint32_t wx86_net_redirect() { return g_routeIp; }
 void wx86_net_set_observer(WsockObserverFn cb) { g_observer = cb; }
 
-void wx86_net_set_private_only(bool on) { g_privOnly = on; }
-bool wx86_net_private_only() { return g_privOnly; }
-unsigned long long wx86_net_refused() { return g_refused; }
-unsigned long long wx86_net_allowed() { return g_allowed; }
-
-// « Cette adresse peut-elle atteindre l'internet public ? » — une question de
-// la couche socket, sans un mot sur le protocole ou le produit qui tourne
-// dessus. ip est en ordre RESEAU, tel qu'il est dans le sockaddr.
-bool wx86_net_addr_is_private(uint32_t ip_be) {
-    const uint8_t a = (uint8_t)(ip_be & 0xff), b = (uint8_t)((ip_be >> 8) & 0xff);
-    if (a == 127) return true;                       // boucle locale
-    if (ip_be == 0) return true;                     // non specifie
-    if (ip_be == 0xFFFFFFFFu) return true;           // diffusion LAN
-    if (a == 10) return true;                        // 10/8
-    if (a == 172 && b >= 16 && b <= 31) return true; // 172.16/12
-    if (a == 192 && b == 168) return true;           // 192.168/16
-    if (a == 169 && b == 254) return true;           // 169.254/16 lien-local
-    if (a >= 224 && a <= 239) return true;           // multicast
-    return false;
-}
 
 // Lecture d'une chaine C invitee, octet par octet — les shims d'adresse
 // recoivent un char* invite. Bornee (1 Kio) : un pointeur errant ne doit pas
@@ -202,8 +180,10 @@ static void wx86_net_notify(int kind, Cpu* c, uint32_t handle, int fd,
 // par WX86_NET_REFUSED, et l'embarqueur ecrit ou il veut.
 static bool wx86_net_allow(Cpu* c, uint32_t handle, int fd,
                            uint32_t ip_be, uint16_t port, int kindRefus) {
-    if (!g_privOnly || wx86_net_addr_is_private(ip_be)) { g_allowed++; return true; }
-    g_refused++;
+    // La DECISION et ses compteurs vivent dans net_guard.cpp (unite feuille) ;
+    // ici on ne garde que la maniere de DIRE le refus, qui elle a besoin de
+    // cet etage-ci : le code Winsock et l'observateur.
+    if (wx86_net_addr_allowed(ip_be)) return true;
     wx86_net_set_last_error(10013);   // WSAEACCES — le code Winsock d'un envoi interdit
     wx86_net_notify(WX86_NET_REFUSED, c, handle, fd, ip_be, ip_be, port,
                     kindRefus, 10013, nullptr, 0);

@@ -47,7 +47,8 @@ EXTRA="-O1 -g -fsanitize=address,undefined" \
 # filet n'interroge aucun hote public : sa seule resolution reelle porte sur
 # « localhost ».
 run net_resolve_guard "$ROOT/tools/net_resolve_guard_selftest.cpp" \
-                      "$ROOT/src/runtime/net_nonblock.cpp"
+                      "$ROOT/src/runtime/net_nonblock.cpp" \
+                      "$ROOT/src/runtime/net_guard.cpp"
 
 # GARDE DE SECRET : le texte tape ne doit atteindre AUCUNE sortie.
 echo "== garde de secret du clavier =="

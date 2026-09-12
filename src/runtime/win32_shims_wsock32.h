@@ -10,6 +10,7 @@
 // registers itself.
 #pragma once
 #include <cstdint>
+#include "runtime/net_guard.h"   // le verrou de sortie, unite feuille
 namespace d2rt { class Bridge; class Cpu; }
 
 // --- socket-handle table -------------------------------------------------
@@ -95,13 +96,14 @@ uint32_t wx86_net_redirect();
 // conditions il la leve. Le verdict est applique EN AVAL de la route, donc sur
 // la destination reellement composee. Le moteur n'imprime rien : il signale le
 // refus par WX86_NET_REFUSED a l'observateur, qui journalise ou il veut.
-void wx86_net_set_private_only(bool on);
-bool wx86_net_private_only();
-unsigned long long wx86_net_refused();   // destinations refusees depuis le demarrage
-unsigned long long wx86_net_allowed();   // destinations laissees passer (temoin d'echelle)
-// Predicat nu, expose pour qu'un embarqueur puisse poser la meme question
-// ailleurs (une resolution de nom, par exemple) sans re-ecrire la table.
-bool wx86_net_addr_is_private(uint32_t ip_be);   // ip en ordre RESEAU
+//
+// Les declarations elles-memes vivent dans runtime/net_guard.h, une unite
+// FEUILLE : le drapeau est interroge par deux etages (ici, et la resolution
+// de nom dans net_nonblock.cpp), et ce fichier-ci tire tout le pont et le
+// processeur. Une feuille qui l'aurait interroge a travers cet en-tete aurait
+// du lier la moitie du moteur — ce qui avait deja casse un banc et force un
+// filet a redefinir le predicat. Inclus ici pour que les consommateurs
+// existants de cet en-tete gardent les memes symboles sous la main.
 
 // --- generic socket-layer observer ---------------------------------------
 // ONE passive observation point over the whole socket layer. The engine

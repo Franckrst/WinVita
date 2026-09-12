@@ -43,6 +43,7 @@ add_library(winx86_core STATIC
   src/runtime/win32_shims_wsock32.cpp
   src/runtime/poll_gil.cpp
   src/runtime/net_nonblock.cpp
+  src/runtime/net_guard.cpp
   src/runtime/guest_scratch.cpp
   src/runtime/guest_region.cpp
   src/runtime/host_clock.cpp
