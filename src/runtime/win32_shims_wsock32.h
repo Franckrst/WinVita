@@ -80,6 +80,29 @@ int wx86_send_simple(int fd, const void* buf, uint32_t len, uint32_t* outWsaErr)
 void     wx86_net_set_redirect(uint32_t ip);   // 0 = disabled
 uint32_t wx86_net_redirect();
 
+// --- verrou de sortie : « rien ne part vers l'internet public » ------------
+// Un bac a sable de la couche socket, au meme titre que la route ci-dessus, et
+// tout aussi ignorant du protocole : la seule question posee est « cette
+// adresse peut-elle atteindre l'internet public ? ». Arme, toute destination
+// NON privee (hors 127/8, 0.0.0.0, 10/8, 172.16/12, 192.168/16, 169.254/16,
+// multicast 224/4 et diffusion 255.255.255.255) est refusee avec WSAEACCES
+// (10013) sur connect et sendto, et tout datagramme venant d'une telle adresse
+// est jete par recvfrom. Un refus ne touche AUCUNE socket hote : aucune poignee
+// TCP entamee, aucun octet emis.
+//
+// DEFAUT : DESARME. Le moteur n'a pas d'avis sur la politique reseau de son
+// consommateur ; c'est l'embarqueur qui l'arme, et qui decide a quelles
+// conditions il la leve. Le verdict est applique EN AVAL de la route, donc sur
+// la destination reellement composee. Le moteur n'imprime rien : il signale le
+// refus par WX86_NET_REFUSED a l'observateur, qui journalise ou il veut.
+void wx86_net_set_private_only(bool on);
+bool wx86_net_private_only();
+unsigned long long wx86_net_refused();   // destinations refusees depuis le demarrage
+unsigned long long wx86_net_allowed();   // destinations laissees passer (temoin d'echelle)
+// Predicat nu, expose pour qu'un embarqueur puisse poser la meme question
+// ailleurs (une resolution de nom, par exemple) sans re-ecrire la table.
+bool wx86_net_addr_is_private(uint32_t ip_be);   // ip en ordre RESEAU
+
 // --- generic socket-layer observer ---------------------------------------
 // ONE passive observation point over the whole socket layer. The engine
 // reports what happened; it never asks the observer for a decision and never
@@ -104,6 +127,14 @@ enum {
                              // apprend qu'un nom n'a pas pu etre resolu —
                              // premier echec attendu sur une plateforme
                              // embarquee, il ne doit pas rester invisible.
+    WX86_NET_REFUSED,        // le verrou de sortie (wx86_net_set_private_only)
+                             // a REFUSE une destination : ip/port = celle qui
+                             // etait visee, result = l'operation refusee
+                             // (WX86_NET_CONNECT / _SEND / _RECV), wsa_err =
+                             // 10013. AUCUNE socket hote n'a ete touchee. Le
+                             // moteur etant muet, c'est la seule facon pour
+                             // l'embarqueur d'apprendre qu'un paquet a ete
+                             // retenu — et de le crier ou il faut.
 };
 struct WsockEvent {
     int         kind;

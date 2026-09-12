@@ -36,6 +36,15 @@
 // entree locale, AUCUNE redirection activee -> le client se connecte tout seul
 // au serveur local et son transfert de fichier se deroule normalement.
 //
+// Cinquieme passe (2026-09-12) — sendto (#20) et recvfrom (#17) rejoignent la
+// table : ils n'avaient JAMAIS ete inscrits, ni ici ni chez le consommateur, et
+// tombaient donc sur le shim par defaut (arret controle + derive ESP). Et avec
+// eux le VERROU DE SORTIE (wx86_net_set_private_only) : « cette adresse peut-
+// elle atteindre l'internet public ? » est une question de la couche socket,
+// au meme titre que la route ci-dessus, et pas une question de protocole. Le
+// moteur fournit le mecanisme et reste MUET ; l'embarqueur l'arme, decide a
+// quelles conditions il le leve, et journalise les refus via WX86_NET_REFUSED.
+//
 // Ce qui reste cote consommateur, avec une vraie raison a chaque fois :
 //   - select (WSOCK32.dll!#18) : son coeur (traduction fd_set <-> pollfd) est
 //     generique, mais c'est aussi le site exact d'une famine reseau reelle
@@ -132,10 +141,33 @@ void wx86_net_set_enabled(bool on) { g_netEnabled = on; }
 
 static uint32_t        g_routeIp = 0;
 static WsockObserverFn g_observer = nullptr;
+static bool            g_privOnly = false;
+static unsigned long long g_refused = 0, g_allowed = 0;
 
 void wx86_net_set_redirect(uint32_t ip) { g_routeIp = ip; }
 uint32_t wx86_net_redirect() { return g_routeIp; }
 void wx86_net_set_observer(WsockObserverFn cb) { g_observer = cb; }
+
+void wx86_net_set_private_only(bool on) { g_privOnly = on; }
+bool wx86_net_private_only() { return g_privOnly; }
+unsigned long long wx86_net_refused() { return g_refused; }
+unsigned long long wx86_net_allowed() { return g_allowed; }
+
+// « Cette adresse peut-elle atteindre l'internet public ? » — une question de
+// la couche socket, sans un mot sur le protocole ou le produit qui tourne
+// dessus. ip est en ordre RESEAU, tel qu'il est dans le sockaddr.
+bool wx86_net_addr_is_private(uint32_t ip_be) {
+    const uint8_t a = (uint8_t)(ip_be & 0xff), b = (uint8_t)((ip_be >> 8) & 0xff);
+    if (a == 127) return true;                       // boucle locale
+    if (ip_be == 0) return true;                     // non specifie
+    if (ip_be == 0xFFFFFFFFu) return true;           // diffusion LAN
+    if (a == 10) return true;                        // 10/8
+    if (a == 172 && b >= 16 && b <= 31) return true; // 172.16/12
+    if (a == 192 && b == 168) return true;           // 192.168/16
+    if (a == 169 && b == 254) return true;           // 169.254/16 lien-local
+    if (a >= 224 && a <= 239) return true;           // multicast
+    return false;
+}
 
 // Lecture d'une chaine C invitee, octet par octet — les shims d'adresse
 // recoivent un char* invite. Bornee (1 Kio) : un pointeur errant ne doit pas
@@ -161,6 +193,21 @@ static void wx86_net_notify(int kind, Cpu* c, uint32_t handle, int fd,
     if (!g_observer) return;
     WsockEvent e{kind, c, handle, fd, ip, routeIp, port, result, wsaErr, data, len};
     g_observer(e);
+}
+
+// LE VERROU DE SORTIE, applique EN AVAL de la route : il ne voit que ce qui
+// partirait REELLEMENT sur le fil. Rend true si la destination est autorisee.
+// Un refus ne touche AUCUNE socket hote : pas de poignee TCP entamee, pas un
+// octet emis. Le moteur ne journalise rien lui-meme (il est muet) — il le DIT
+// par WX86_NET_REFUSED, et l'embarqueur ecrit ou il veut.
+static bool wx86_net_allow(Cpu* c, uint32_t handle, int fd,
+                           uint32_t ip_be, uint16_t port, int kindRefus) {
+    if (!g_privOnly || wx86_net_addr_is_private(ip_be)) { g_allowed++; return true; }
+    g_refused++;
+    wx86_net_set_last_error(10013);   // WSAEACCES — le code Winsock d'un envoi interdit
+    wx86_net_notify(WX86_NET_REFUSED, c, handle, fd, ip_be, ip_be, port,
+                    kindRefus, 10013, nullptr, 0);
+    return false;
 }
 
 uint32_t wx86_net_last_error() { return g_wsaLastErr; }
@@ -538,6 +585,10 @@ void win32_shims_wsock32_install(Bridge& br) {
                 c.write(c.arg(1), sa, 16);
             }
         }
+        // Verrou EN AVAL de la route : c'est la destination reellement composee
+        // qui est jugee, et un refus n'a AUCUN effet de bord (aucun SYN ne part).
+        if (!wx86_net_allow(&c, c.arg(0), fd, rip, dport, WX86_NET_CONNECT))
+            return 0xFFFFFFFFu;
         wx86_net_notify(WX86_NET_CONNECT, &c, c.arg(0), fd, dip, rip, dport, 0, 0, nullptr, 0);
         int r = ::connect(fd, (sockaddr*)sa, (socklen_t)c.arg(2));
         if (r == 0) {
@@ -592,6 +643,98 @@ void win32_shims_wsock32_install(Bridge& br) {
     };
     REGORD("WSOCK32.dll", 19, 4, send_fn);
     REGORD("WS2_32.dll", 19, 4, send_fn);
+
+    // ---- sendto (#20) / recvfrom (#17) — LE TROU UDP ----------------------
+    // Ces deux ordinaux n'ont JAMAIS ete inscrits, ni ici ni chez le
+    // consommateur : la table allait 1-16, 19, 21-23, 52, 57, 101, 111, 112,
+    // 115, 116 et sautait 17 et 20. Un appel tombait donc sur le shim par
+    // defaut — arret controle ET derive ESP, puisque l'argc est inconnu. Or
+    // tout protocole qui fait un test d'accessibilite UDP passe par la.
+    // L'argc est la seule chose qui compte ici : un shim stdcall mal dimensionne
+    // decale la pile a CHAQUE appel.
+    //   int sendto  (SOCKET, const char* buf, int len, int flags,
+    //                const struct sockaddr* to, int tolen);        -> 6
+    //   int recvfrom(SOCKET, char* buf, int len, int flags,
+    //                struct sockaddr* from, int* fromlen);         -> 6
+    auto sendto_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0xFFFFFFFFu;
+        int fd = wx86_sock_fd(c.arg(0));
+        if (fd < 0) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
+        const uint32_t len = c.arg(2), pto = c.arg(4), tolen = c.arg(5);
+        uint8_t sa[16] = {0};
+        if (pto) c.read(pto, sa, tolen > 16 ? 16 : (tolen ? tolen : 16));
+        uint32_t dip; std::memcpy(&dip, sa + 4, 4);
+        const uint16_t dport = (uint16_t)((sa[2] << 8) | sa[3]);
+        // MEME route generique que connect : un banc local doit pouvoir
+        // detourner un test UDP sans toucher au jeu.
+        uint32_t rip = dip;
+        if (g_routeIp) {
+            const uint8_t hi = dip & 0xff;
+            if (hi != 127 && hi != 0 && dip != 0xffffffffu) {
+                rip = g_routeIp; std::memcpy(sa + 4, &rip, 4);
+            }
+        }
+        if (!wx86_net_allow(&c, c.arg(0), fd, rip, dport, WX86_NET_SEND))
+            return 0xFFFFFFFFu;               // rien ne part
+        std::vector<uint8_t> b(len);
+        if (len) c.read(c.arg(1), b.data(), len);
+        ssize_t n = ::sendto(fd, b.data(), b.size(), MSG_NOSIGNAL,
+                             (sockaddr*)sa, pto ? (socklen_t)16 : (socklen_t)0);
+        uint32_t we = 0;
+        if (n < 0) { we = wx86_wsa_from_errno(errno); wx86_net_set_last_error(we); }
+        wx86_net_notify(WX86_NET_SEND, &c, c.arg(0), fd, dip, rip, dport,
+                        (int)n, we, b.data(), (int)b.size());
+        return n >= 0 ? (uint32_t)n : 0xFFFFFFFFu;
+    };
+    REGORD("WSOCK32.dll", 20, 6, sendto_fn);
+    REGORD("WS2_32.dll", 20, 6, sendto_fn);
+
+    auto recvfrom_fn = [](Cpu& c) -> uint32_t {
+        if (!wx86_net_enabled()) return 0xFFFFFFFFu;
+        WsockHandle h;
+        if (!wx86_sock_get(c.arg(0), h)) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
+        const uint32_t len = c.arg(2), pfrom = c.arg(4), pflen = c.arg(5);
+        std::vector<uint8_t> b(len);
+        sockaddr_in sa{}; socklen_t sl = sizeof sa;
+        ssize_t n = ::recvfrom(h.fd, b.data(), b.size(), 0, (sockaddr*)&sa, &sl);
+        if (n < 0 && !h.nonblock && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // Attente BORNEE (3 s) : un test UDP sans reponse doit degrader
+            // proprement, jamais figer le runtime.
+            pollfd pf{h.fd, POLLIN, 0};
+            wx86_poll_gilfree(&pf, 3000);
+            sl = sizeof sa;
+            n = ::recvfrom(h.fd, b.data(), b.size(), 0, (sockaddr*)&sa, &sl);
+        }
+        if (n < 0) {
+            const uint32_t we = wx86_wsa_from_errno(errno);
+            wx86_net_set_last_error(we);
+            wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, 0, 0, h.port, -1, we, nullptr, 0);
+            return 0xFFFFFFFFu;
+        }
+        // Defense en profondeur : sous verrou, un datagramme VENANT d'une
+        // adresse non privee est jete — sinon le verrou ne tiendrait que la
+        // moitie de la conversation.
+        const uint32_t sip = (uint32_t)sa.sin_addr.s_addr;
+        if (!wx86_net_allow(&c, c.arg(0), h.fd, sip, (uint16_t)ntohs(sa.sin_port), WX86_NET_RECV)) {
+            wx86_net_set_last_error(10035);   // WSAEWOULDBLOCK : « rien pour toi »
+            return 0xFFFFFFFFu;
+        }
+        if (n > 0) c.write(c.arg(1), b.data(), (uint32_t)n);
+        if (pfrom) {
+            uint8_t out[16] = {0}; out[0] = 2; out[1] = 0;
+            const uint16_t sp = (uint16_t)ntohs(sa.sin_port);
+            out[2] = (uint8_t)(sp >> 8); out[3] = (uint8_t)(sp & 0xff);
+            std::memcpy(out + 4, &sa.sin_addr.s_addr, 4);
+            const uint32_t cap = pflen ? c.read_u32(pflen) : 16u;
+            c.write(pfrom, out, cap < 16 ? cap : 16);
+            if (pflen) c.write_u32(pflen, 16);
+        }
+        wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, sip, sip,
+                        (uint16_t)ntohs(sa.sin_port), (int)n, 0, b.data(), (int)n);
+        return (uint32_t)n;
+    };
+    REGORD("WSOCK32.dll", 17, 6, recvfrom_fn);
+    REGORD("WS2_32.dll", 17, 6, recvfrom_fn);
 
     // accept/bind/listen: real POSIX passthrough. No D2 client ever
     // exercises this path (D2 is a pure Winsock client), so these are
