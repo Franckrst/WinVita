@@ -42,6 +42,13 @@ EXTRA="-Wno-unused-parameter" \
 EXTRA="-O1 -g -fsanitize=address,undefined" \
   run kb "$ROOT/tools/tests/kb_test.cpp"
 
+# Le verrou de sortie couvre-t-il la RESOLUTION DE NOM ? Une requete DNS est
+# deja un depart, et le verrou ne s'appliquait qu'apres la resolution. Ce
+# filet n'interroge aucun hote public : sa seule resolution reelle porte sur
+# « localhost ».
+run net_resolve_guard "$ROOT/tools/net_resolve_guard_selftest.cpp" \
+                      "$ROOT/src/runtime/net_nonblock.cpp"
+
 # GARDE DE SECRET : le texte tape ne doit atteindre AUCUNE sortie.
 echo "== garde de secret du clavier =="
 if grep -nE '\b(printf|fprintf|sprintf|snprintf|puts|fputs|fwrite|d2vita_progress|wx86_vita_progress|jpline)\b' \

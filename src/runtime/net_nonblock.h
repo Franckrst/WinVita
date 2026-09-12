@@ -34,4 +34,11 @@ uint32_t wx86_net_resolve(const char* host);
 // create" from "created fine, no answer" when a name lookup fails.
 int wx86_net_last_resolve_rc();
 
+// Nombre de resolutions de NOM refusees par le verrou de sortie
+// (wx86_net_set_private_only) depuis le demarrage. Un litteral pointe ne
+// consulte personne et n'est donc jamais compte ici. Temoin positif : sans
+// lui, « aucune requete n'est sortie » et « le code n'a jamais ete atteint »
+// rendent le meme silence.
+unsigned long long wx86_net_resolves_refused();
+
 } // namespace d2rt
