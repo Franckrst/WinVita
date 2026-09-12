@@ -109,6 +109,24 @@ int  wx86_vita_core_mask(int who);
 // refaire l'epinglage sur lui-meme en premiere instruction.
 extern "C" int wx86_vita_pin_self(int mask, unsigned* relu);
 
+// EPINGLER UN AUTRE FIL. Le moteur n'offrait que l'auto-epinglage, si bien que
+// tout portage qui doit poser le masque d'un fil QU'IL CREE appelait
+// sceKernelChangeThreadCpuAffinityMask directement — le premier en avait cinq
+// sites. Rendu ici, c'est le meme service que pin_self, du cote du createur.
+//
+// A LIRE AVANT DE S'EN SERVIR : le paragraphe ci-dessus n'est pas annule. Un
+// masque pose PAR LE CREATEUR avant sceKernelStartThread rend rc=0 et se relit
+// 0 une fois le fil parti. Cette fonction sert donc a EXPRIMER l'intention (et
+// a publier son rc) ; la seule pose fiable reste wx86_vita_pin_self, faite par
+// le fil lui-meme a son entree.
+//
+// `relu` : masque relu apres la pose, comme pin_self. Passer nullptr n'appelle
+// PAS sceKernelGetThreadCpuAffinityMask — un site qui ne relit pas garde donc
+// exactement un appel systeme, comme avant. (pin_self, lui, relit toujours :
+// son unique appelant a nullptr est ancien et on ne change pas son compte
+// d'appels au passage d'un ajout d'API.)
+extern "C" int wx86_vita_pin_thread(int thread_uid, int mask, unsigned* relu);
+
 // Inscrit un fil au tableau publie par wx86_vita_core_window_line().
 void wx86_vita_core_register(const char* nom, int uid, unsigned wanted, int pin_rc);
 // Nombre de fils hotes deja inscrits (contexte des diagnostics de creation de

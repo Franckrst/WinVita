@@ -132,6 +132,14 @@ extern "C" int wx86_vita_pin_self(int mask, unsigned* relu) {
     return rc;
 }
 
+extern "C" int wx86_vita_pin_thread(int thread_uid, int mask, unsigned* relu) {
+    const int rc = sceKernelChangeThreadCpuAffinityMask((SceUID)thread_uid, mask);
+    // Relecture SEULEMENT si l'appelant la demande : voir vita_host.h.
+    if (relu) { const int r = sceKernelGetThreadCpuAffinityMask((SceUID)thread_uid);
+                *relu = (r < 0) ? 0u : (unsigned)r; }
+    return rc;
+}
+
 namespace {
 // SONDE DU QUATRIEME COEUR, jouee UNE FOIS a la premiere fenetre de 10 s.
 //
