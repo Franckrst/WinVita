@@ -21,16 +21,33 @@ CXX="${CXX:-g++}"
 mkdir -p "$OUT" || exit 2
 fail=0
 
+# EXTRA : drapeaux supplementaires pour un controle donne (assainisseurs).
 run() { # $1 = nom, $2... = sources
   local nom="$1"; shift
   echo "== $nom =="
-  if ! $CXX -std=c++17 -O2 -Wall -I"$ROOT/src" -o "$OUT/$nom" "$@" 2>"$OUT/$nom.build.log"; then
+  # shellcheck disable=SC2086
+  if ! $CXX -std=gnu++17 -O2 -Wall -Wextra -Werror ${EXTRA:-} -I"$ROOT/src" -o "$OUT/$nom" "$@" 2>"$OUT/$nom.build.log"; then
     echo "ECHEC de compilation :"; cat "$OUT/$nom.build.log"; fail=1; return
   fi
   if "$OUT/$nom"; then :; else echo "ECHEC a l'execution (rc=$?)"; fail=1; fi
 }
 
-run present_scale "$ROOT/tools/present_scale_selftest.cpp" "$ROOT/src/platform/present_scale.cpp"
+EXTRA="-Wno-unused-parameter" \
+  run present_scale "$ROOT/tools/present_scale_selftest.cpp" "$ROOT/src/platform/present_scale.cpp"
+
+# Le clavier virtuel : en-tete AUTONOME, donc entierement prouvable ici.
+# 1 297 verifications — les 95 ASCII imprimables, le dessin borne au panneau,
+# tactile == dessin, MAJ a trois etats, mode masque, bornes de l'echo, et un
+# etat volontairement incoherent qui ne doit ni planter ni deborder.
+EXTRA="-O1 -g -fsanitize=address,undefined" \
+  run kb "$ROOT/tools/tests/kb_test.cpp"
+
+# GARDE DE SECRET : le texte tape ne doit atteindre AUCUNE sortie.
+echo "== garde de secret du clavier =="
+if grep -nE '\b(printf|fprintf|sprintf|snprintf|puts|fputs|fwrite|d2vita_progress|wx86_vita_progress|jpline)\b' \
+        "$ROOT/src/platform/vita_kb.h"; then
+  echo "   ECHEC: vita_kb.h contient un appel de sortie"; fail=1
+else echo "   OK: vita_kb.h sans appel de sortie"; fi
 
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi
 exit "$fail"
