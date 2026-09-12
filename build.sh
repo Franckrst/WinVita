@@ -141,6 +141,7 @@ $RT/guest_sync.cpp
 $RT/win32_shims_sync.cpp
 $RT/guest_thread_ctx.cpp
 $RT/win32_shims_kernel32.cpp
+$RT/win32_shims_locale.cpp
 $RT/win32_shims_shell32.cpp
 $RT/win32_shims_advapi32.cpp
 $RT/win32_shims_user32.cpp

@@ -29,6 +29,7 @@ add_library(winx86_core STATIC
   src/runtime/win32_shims_sync.cpp
   src/runtime/guest_thread_ctx.cpp
   src/runtime/win32_shims_kernel32.cpp
+  src/runtime/win32_shims_locale.cpp
   src/runtime/win32_shims_shell32.cpp
   src/runtime/win32_shims_advapi32.cpp
   src/runtime/win32_shims_user32.cpp
