@@ -27,10 +27,10 @@ Tous les chiffres ci-dessous sont relevés sur l'arbre, pas estimés.
 
 | | |
 |---|---:|
-| Sources du moteur (`src/`) | 13 764 lignes |
-| Inscriptions de shims Win32 | 297 |
+| Sources du moteur (`src/`) | 17 723 lignes |
+| Inscriptions de shims Win32 | 362 |
 | DLL couvertes (au moins partiellement) | 14 |
-| Unités d'installation (`win32_shims_*_install`) | 11 |
+| Unités d'installation (`win32_shims_*_install`) | 14 |
 
 Au-delà des shims, le moteur possède les briques transverses qu'un portage
 écrivait autrefois lui-même :
@@ -54,18 +54,18 @@ Relevé sur le premier portage, dont la liste de shims est
 
 | | Clés | Part |
 |---|---:|---:|
-| servies par le moteur | 297 | 46 % |
-| servies par le portage | 346 | 54 % |
+| servies par le moteur | 362 | 55 % |
+| servies par le portage | 294 | 45 % |
 
 La répartition par DLL dit où se trouve le travail restant :
 
 | DLL | total | moteur | portage |
 |---|---:|---:|---:|
-| `KERNEL32.dll` | 252 | 76 | 176 |
+| `KERNEL32.dll` | 252 | 137 | 115 |
 | `USER32.dll` | 92 | 56 | 36 |
 | `ADVAPI32.dll` | 67 | 37 | 30 |
 | `GDI32.dll` | 41 | 36 | 5 |
-| `WSOCK32.dll` / `WS2_32.dll` | 58 | 54 | 4 |
+| `WSOCK32.dll` / `WS2_32.dll` | 62 | 58 | 4 |
 
 Les DLL absentes de cette table (`glide3x`, `native.hook`, `CRYPT32`, et les
 DLL propres au jeu) sont **entièrement** côté portage, et c'est normal : elles
@@ -91,7 +91,7 @@ n'est pas du jeu.**
 | `src/win32/shims_audio.cpp` | 384 | 10 |
 | `src/win32/shims_carnivores.cpp` | 146 | 7 |
 
-Soit environ **576 inscriptions**, face aux 297 que le moteur fournit.
+Soit environ **576 inscriptions**, face aux 362 que le moteur fournit.
 
 Plus, hors shims : son propre `RegionAlloc` (`src/win32/rt_internals.h`), son
 propre `misc()` et `put_cstr` (`tools/rt_boot.cpp`), ses propres objets noyau et
@@ -551,7 +551,7 @@ perdre une journée à celui qui le suit.
 | ~~l'émulation DirectSound~~ | **au moteur** (`runtime/ds_emul`) | livrée depuis. Un portage dont le jeu passe par une autre bibliothèque audio ne la consommera pas, mais le **puits** (null / WAV / console) et l'horloge hôte, eux, sont communs. |
 | le backend GPU de la console | côté portage | volontairement borné aux états que le premier jeu émet. La couture générique existe (`render/render.h`), le backend qui la réalise, non. |
 | la lecture du pad et le curseur | côté portage | catégorie « propre à la console » identifiée mais pas encore déplacée. Les valeurs par défaut (orbite, sensibilité, zone morte) sont **identiques dans deux jeux sans rapport** : elles tiennent à l'ergonomie du stick, pas au jeu. Travail en cours. |
-| ~176 fonctions `KERNEL32` | côté portage | fichiers et chemins, plan mémoire, chronométrage d'attente, horloge — voir vague 5. |
+| ~115 fonctions `KERNEL32` | côté portage | fichiers et chemins, plan mémoire, chronométrage d'attente, horloge — voir vague 5. |
 | l'ordonnancement | les **deux** existent | le moteur fournit coopératif **et** natif ; un portage choisit. Le premier portage ne cible plus que le natif, le second démarre encore en coopératif. Ce n'est pas une dette, c'est un choix par consommateur. |
 
 ### Une asymétrie à connaître avant de se lancer
