@@ -54,8 +54,32 @@
 //
 // Le portage ecrit, une fois, a portee de fichier :
 //     extern "C" const char* const wx86_vita_progress_path = "ux0:data/…/x.txt";
+//
+// HORS CONSOLE, le portage n'a rien a definir : voir juste en dessous.
 extern "C" const char* const wx86_vita_progress_path;
 
+// CES DEUX POINTS D'ENTREE EXISTENT SUR LES DEUX CIBLES.
+//
+// Pourquoi ca n'allait pas de soi. Le reste de ce fichier est du service
+// console pur : ses appelants vivent tous sous `#ifdef __vita__`, donc une
+// definition sous la meme garde suffit. Le journal, non — il est appele depuis
+// le CORPS GENERIQUE du moteur (bridge, cpu_box86, les deux ordonnanceurs, le
+// mappeur), qui se compile aussi pour le harnais qemu/bureau. Une declaration
+// console-seulement y laisserait une reference non resolue.
+//
+// La solution retenue est la plus ennuyeuse, et c'est pour ca qu'elle est la
+// bonne : hors `__vita__`, vita_host.cpp definit ces deux fonctions comme des
+// NO-OP. Consequences voulues —
+//   * le corps generique appelle en lien FORT, partout, sans test de nullite ;
+//   * aucun portage n'a de symbole a fournir hors console (le chemin du
+//     journal n'est pas lu par le no-op, donc pas de reference a resoudre) ;
+//   * le comportement hors console est IDENTIQUE a ce qu'il etait du temps des
+//     references faibles non resolues — silence. Le correctif ne change que
+//     QUI est appele, jamais CE QUI se passe.
+//
+// L'alternative — une reference FAIBLE au nom du moteur — a ete ecartee : elle
+// aurait garde le mode de panne (un portage qui ne fournit rien reste muet
+// sans le savoir) en se contentant de renommer le symbole fautif.
 void wx86_vita_progress(const char* msg);
 extern "C" void wx86_vita_progress_c(const char* msg);
 

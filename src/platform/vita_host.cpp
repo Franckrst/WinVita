@@ -230,4 +230,28 @@ void wx86_vita_core_window_line() {
     if (used > 7) wx86_vita_progress(buf);
 }
 
+#else  // ---------------------------------------------------------------------
+//  HORS CONSOLE : le journal existe quand meme, et il ne fait rien
+// ---------------------------------------------------------------------------
+// Le corps GENERIQUE du moteur (bridge, cpu_box86, les deux ordonnanceurs, le
+// mappeur de memoire) journalise sa progression. Ce corps se compile aussi pour
+// le harnais qemu/bureau, ou il n'y a ni console ni fichier durable a tenir.
+//
+// Avant ce fichier, chacune de ces unites declarait une reference FAIBLE vers
+// un symbole au prefixe du PREMIER consommateur et testait sa nullite avant
+// d'appeler : le lien se faisait partout, et tout portage dont les symboles ne
+// portent pas ce prefixe heritait d'un journal muet SANS erreur de lien. Le
+// moteur nommait ses consommateurs, et se taisait pour les autres.
+//
+// Deux no-op tiennent lieu de toute la portabilite : les appelants appellent en
+// lien FORT sans test, et hors console il ne se passe rien — exactement ce que
+// produisait la reference faible non resolue. Aucune regression possible sur ce
+// chemin : le comportement observable hors console est le meme silence.
+//
+// wx86_vita_progress_path N'EST PAS LU ICI, et c'est deliberé : un portage
+// n'a donc RIEN a definir pour que son build bureau se lie.
+
+void wx86_vita_progress(const char*) {}
+extern "C" void wx86_vita_progress_c(const char*) {}
+
 #endif // __vita__

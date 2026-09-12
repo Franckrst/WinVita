@@ -50,6 +50,10 @@ add_library(winx86_core STATIC
   src/runtime/guest_locale.cpp
   src/runtime/ds_emul.cpp
   src/platform/present_scale.cpp
+  # Les services de la CONSOLE. Tout son corps vit sous `#ifdef __vita__` sauf
+  # le journal de progression, qui a ici sa version no-op : le corps generique
+  # de la bibliotheque (bridge.cpp) l'appelle en lien FORT sur les deux cibles.
+  src/platform/vita_host.cpp
   src/render/render_null.cpp)
 target_include_directories(winx86_core PUBLIC src)
 
