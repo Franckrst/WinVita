@@ -255,11 +255,6 @@ private:
     // <cpu>+c). Sans ces knobs, AUCUN appel d'affinite n'est ajoute.
     bool is_server_thread(GuestThread* t);
     void pin_runner(GuestThread* t, bool is_main);   // appele PAR LE FIL LUI-MEME, a l'entree
-public:
-    // 0x1a550 = entree du fil d I/O de Storm (0x41a550 dans Game.exe 1.14d ; docs/audit/piste_async_sync_20260903.md §2),
-    // le « fil 4 » des lignes fils: — mesure sous qemu (docs/perf/coeur2_serveur_20260906.md). 0 = desarme.
-    static constexpr uint32_t kCoeur2ServerRva = 0x1a550;
-private:
     void run_guest(GuestThread* t);         // seed + cpu run + finish (GIL held at entry/exit)
     void seed_first_run(GuestThread* t);
     void finish_thread(GuestThread* t, bool ok, const char* fault);
