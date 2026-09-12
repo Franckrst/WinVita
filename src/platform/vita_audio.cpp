@@ -19,12 +19,20 @@
 
 #ifdef __vita__
 
-// Journal optionnel d'un hote (d2vita fournit d2vita_progress_c ; sans hote,
-// symbole FAIBLE = pointeur nul, tous les appels ci-dessous deviennent des no-op).
-// Meme convention que runtime/bridge.cpp, sched_native.cpp, sched_cooperative.cpp,
-// cpu_box86.cpp.
-extern "C" { __attribute__((weak)) void d2vita_progress_c(const char* msg); }
-static inline void wx86_progress(const char* msg) { if (d2vita_progress_c) d2vita_progress_c(msg); }
+// LE JOURNAL ET L'EPINGLAGE SONT AU MOTEUR, PAS CHEZ LE PORTAGE.
+//
+// Ce fichier appelait trois symboles FAIBLES du premier consommateur —
+// d2vita_progress_c, d2vita_pin_self_c, d2vita_core_register_c — pour trois
+// services que le moteur POSSEDE desormais (platform/vita_host.h). C'etait la
+// forme du premier consommateur restee dans le moteur : un second portage, dont
+// les symboles ne portent pas ce prefixe, obtenait un journal MUET et un fil
+// audio NON EPINGLE, sans la moindre erreur de lien pour l'en avertir — le pire
+// mode de panne de ce projet, le « diagnostic qui ment ».
+//
+// Ces trois services vivent maintenant dans la meme archive et sous garde
+// __vita__ identique : l'appel est DIRECT, et tout portage les obtient.
+#include "platform/vita_host.h"
+static inline void wx86_progress(const char* msg) { wx86_vita_progress(msg); }
 
 #include <psp2/audioout.h>
 #include <psp2/kernel/threadmgr.h>
@@ -32,13 +40,6 @@ static inline void wx86_progress(const char* msg) { if (d2vita_progress_c) d2vit
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-// Hote optionnel : d2vita fournit les vraies implementations dans
-// vita_present.cpp (epinglage de coeur, recensement des fils) ; sans
-// hote, symboles FAIBLES = pointeurs nuls, appels ci-dessous en no-op.
-// Meme convention que d2vita_progress_c ci-dessus.
-extern "C" { __attribute__((weak)) int  d2vita_pin_self_c(int mask, unsigned* relu); }
-extern "C" { __attribute__((weak)) void d2vita_core_register_c(const char* nom, int uid, unsigned wanted, int pin_rc); }
 
 namespace d2rt { namespace audio {
 
@@ -176,11 +177,16 @@ int audio_thread(SceSize, void*) {
             default: break;
         }
     }
-    const int rc = d2vita_pin_self_c ? d2vita_pin_self_c(mask, &relu) : 0;
+    const int rc = wx86_vita_pin_self(mask, &relu);
     char s[128];
     std::snprintf(s, sizeof s, "audio: auto-epinglage masque=0x%x rc=0x%08x relu=0x%x", (unsigned)mask, (unsigned)rc, relu);
     wx86_progress(s);
-    if (d2vita_core_register_c) d2vita_core_register_c("d2_audio", g_th, (unsigned)mask, rc);
+    // Le libelle reste « d2_audio » : c'est le nom du premier consommateur, et
+    // il porte encore la forme de celui-ci dans un fichier generique. Le
+    // renommer ici serait un changement de COMPORTEMENT (la ligne « coeurs: »
+    // est grepee par la recette de validation de ce consommateur) glisse sous
+    // une etiquette de nettoyage — voir le rapport de vague 4.
+    wx86_vita_core_register("d2_audio", g_th, (unsigned)mask, rc);
     if (g_body) g_body();
     wx86_progress("audio: fil termine");
     return 0;
