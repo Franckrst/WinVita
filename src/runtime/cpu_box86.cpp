@@ -577,10 +577,15 @@ public:
             // console, 17 Mo ET 29 Mo sont TOUS DEUX refuses
             // (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio
             // (0x1000000) est un PLAFOND NOYAU par bloc VM, pas un choix de ce
-            // projet. Pire : la tentative precoce, meme refusee, marquait
-            // g_jitpool_tried=1, desarmant ensuite la reservation paresseuse
-            // de 16 Mio qui marchait depuis toujours — la partie tournait donc
-            // SANS piscine du tout (repli bloc-par-bloc permanent). Voir
+            // projet. Effet revele en route, PAS introduit par cette tentative :
+            // jitpool_reserve() (mman_vita.c) marque g_jitpool_tried=1 AVANT de
+            // connaitre le resultat de l'allocation — deja le cas dans le
+            // chemin paresseux a 16 Mio, avant ce chantier. Un refus GARANTI a
+            // 29 Mio l'a juste rendu visible ; le meme bug latent reste dans le
+            // chemin a 16 Mio aujourd'hui (un refus, quelle qu'en soit la
+            // cause, y desarmerait la piscine pour le reste de la session,
+            // sans retentative, seule trace : la ligne REFUSEE). Non corrige —
+            // change un comportement, pas seulement un diagnostic. Voir
             // docs/audit/repartition_ram_20260912.md pour la mesure complete.
             // Le rabiot d'alignement de l'arene (13 Mio ce soir) reste donc
             // un gachis REEL mais SANS solution a cout nul : le recuperer
