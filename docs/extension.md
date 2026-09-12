@@ -130,6 +130,32 @@ donnée, en gardant le port — l'équivalent moral d'une entrée de fichier hos
    binaire via `set_alternate` + `shim_trap`.
 7. Démarrer l'ordonnanceur (coopératif ou natif).
 
+### Ce que le portage doit fournir pour une cible console
+
+Une seule chose, et elle est **obligatoire** dans un build `__vita__` :
+
+```cpp
+// à portée de fichier, initialiseur CONSTANT — pas un setter
+extern "C" const char* const wx86_vita_progress_path = "ux0:data/<votre-jeu>/boot.txt";
+```
+
+C'est le **chemin** du journal de progression durable, la seule fenêtre sur un
+démarrage sans écran. Tout le reste — le journal lui-même, le verrou qui le
+rend sûr entre fils, la répartition des fils sur les cœurs user, l'auto-épinglage
+et l'inventaire publié dans la ligne `coeurs:` — appartient au moteur
+(`platform/vita_host.h`).
+
+!!! danger "Ne le déclarez pas faible, et n'inventez pas de valeur par défaut"
+    Sans cette définition, le lien **échoue** sur cible — et c'est voulu. Le
+    moteur a longtemps appelé son journal par une référence **faible** vers un
+    symbole au préfixe de son premier consommateur : un portage qui ne
+    fournissait rien obtenait un journal **muet** et des fils **non épinglés**,
+    sans la moindre erreur de lien (`docs/migration.md`, piège 9). Un lien qui
+    casse tôt vaut mille fois mieux qu'un service qui se tait.
+
+    Hors console, il n'y a **rien** à fournir : le journal y est un no-op qui ne
+    lit même pas ce chemin.
+
 ## Exemple complet : un crochet d'observation à repli fidèle
 
 Ce hook intercepte l'entrée d'une fonction du jeu à une adresse précise, compte
