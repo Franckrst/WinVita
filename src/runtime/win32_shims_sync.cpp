@@ -92,6 +92,17 @@ void win32_shims_sync_install(Bridge& br){
     K("CreateSemaphoreA",4,mksema);
     K("CreateSemaphoreW",4,mksema);
 
+    // ReleaseSemaphore etait reste au portage alors que CreateSemaphore etait
+    // deja ici : le moteur savait creer un semaphore mais pas le rendre. Le
+    // plafond est honore comme sur Windows — un depassement ECHOUE et laisse le
+    // compte intact, il ne saturne pas en silence.
+    K("ReleaseSemaphore",3,[](Cpu&c){ Waitable* itw=wx86_handle_find(c.arg(0));
+        if(!itw||!wx86_is_kind(itw,"sema")) return 0u;
+        WxSemaphore* s=static_cast<WxSemaphore*>(itw);
+        if((int64_t)s->count + (int)c.arg(1) > s->maxc){ wx86_set_lasterr(c,298); return 0u; }  // ERROR_TOO_MANY_POSTS
+        if(c.arg(2)) c.write_u32(c.arg(2),(uint32_t)s->count);              // lpPreviousCount
+        s->count+=(int)c.arg(1); if(ThreadScheduler* sc=wx86_sched()) sc->notify(s); return 1u; });
+
     K("GetExitCodeThread",2,[](Cpu&c){
         Waitable* w=wx86_handle_find(c.arg(0));
         uint32_t code=259;   // STILL_ACTIVE
