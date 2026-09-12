@@ -26,11 +26,35 @@
 #include "runtime/cpu.h"
 #include "guest_atomics.h"
 #include "guest_thread_ctx.h"
+extern "C" {
+#include "my_cpuid.h"     // wx86_cpuid_features : les bits que NOTRE cpuid annonce
+}
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <functional>
 #include <string>
 using namespace d2rt;
+
+// ---- identite process / fils (voir l'en-tete) ---------------------------
+// 0x0AE4 = 2788 : multiple de 4, != 1, dans la plage ou un vrai Windows
+// distribue ses PID. 0x0AF0 pour le premier fil, puis +4 par fil.
+static const uint32_t WX86_PID  = 0x00000AE4u;
+static const uint32_t WX86_TID0 = 0x00000AF0u;
+bool wx86_fid_avant() {
+    static int st = -1;
+    if (st < 0) st = (getenv("WX86_FID_AVANT") || getenv("D2_FID_AVANT")) ? 1 : 0;
+    return st == 1;
+}
+uint32_t wx86_win_pid() { return wx86_fid_avant() ? 1u : WX86_PID; }
+uint32_t wx86_win_tid(uint32_t schedId) {
+    return wx86_fid_avant() ? schedId : (WX86_TID0 + 4u * schedId);
+}
+uint32_t wx86_sched_tid(uint32_t winTid) {
+    if (wx86_fid_avant()) return winTid;
+    return (winTid >= WX86_TID0 && ((winTid - WX86_TID0) & 3u) == 0)
+         ? (winTid - WX86_TID0) / 4u : 0u;
+}
 
 // Alias locaux : les corps de la vague 2 sont deplaces mot pour mot depuis le
 // portage, ou ces noms courts designaient les memes fonctions. Les definir ici
@@ -61,7 +85,7 @@ void win32_shims_kernel32_install(Bridge& br){
     K("FreeEnvironmentStringsW",1,[](Cpu&){ return 1u; });
     K("FreeLibrary",1,[](Cpu&){ return 1u; });
     K("GetCPInfo",2,[](Cpu&c){ uint32_t p=c.arg(1); c.write_u32(p,1); return 1u; });   // MaxCharSize=1
-    K("GetCurrentProcessId",0,[](Cpu&){ return 1u; });
+    K("GetCurrentProcessId",0,[](Cpu&){ return wx86_win_pid(); });   // jamais 1 : ce PID n'existe pas
     K("GetDriveTypeA",1,[](Cpu&){ return 3u; });   // DRIVE_FIXED
     K("GetFileType",1,[](Cpu&){ return 1u; });                           // FILE_TYPE_CHAR
     K("GetProcessAffinityMask",3,[](Cpu&c){ if(c.arg(1))c.write_u32(c.arg(1),1); if(c.arg(2))c.write_u32(c.arg(2),1); return 1u; });
@@ -79,7 +103,24 @@ void win32_shims_kernel32_install(Bridge& br){
     K("IsBadReadPtr",2,[](Cpu&){ return 0u; });
     K("IsBadWritePtr",2,[](Cpu&){ return 0u; });
     K("IsDebuggerPresent",0,[](Cpu&){ return 0u; });                       // not debugged
-    K("IsProcessorFeaturePresent",1,[](Cpu&){ return 0u; });   // conservative: generic CRT paths
+    // Rendait 0 POUR TOUT, alors que notre propre cpuid annonce FPU/CMOV/MMX/
+    // FXSR/SSE/SSE2. Deux vues du meme processeur qui se contredisent : c'est
+    // la signature la moins chere de tout l'audit a lever. Les reponses sont
+    // DERIVEES de wx86_cpuid_features(), pas choisies — si la feuille 1 change,
+    // celles-ci suivent sans qu'on y pense.
+    K("IsProcessorFeaturePresent",1,[](Cpu&c)->uint32_t{
+        if(wx86_fid_avant()) return 0u;                 // reponse D'AVANT (bouton coupant)
+        uint32_t edx=0, ecx=0; wx86_cpuid_features(&edx,&ecx);
+        switch(c.arg(0)){
+            case 0:  return 0u;                          // PF_FLOATING_POINT_PRECISION_ERRATA
+            case 1:  return (edx&1u)?0u:1u;              // PF_FLOATING_POINT_EMULATED : FPU materiel => 0
+            case 2:  return (edx>>8)&1u;                 // PF_COMPARE_EXCHANGE_DOUBLE (CX8)
+            case 3:  return (edx>>23)&1u;                // PF_MMX_INSTRUCTIONS_AVAILABLE
+            case 6:  return (edx>>25)&1u;                // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
+            case 8:  return 1u;                          // PF_RDTSC_INSTRUCTION_AVAILABLE (ReadTSC implemente)
+            case 10: return (edx>>26)&1u;                // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
+            case 13: return ecx&1u;                      // PF_SSE3_INSTRUCTIONS_AVAILABLE
+            default: return 0u; } });
     K("IsValidCodePage",1,[](Cpu&){ return 1u; });
     K("IsValidLocale",2,[](Cpu&){ return 1u; });
     K("QueryPerformanceFrequency",1,[](Cpu&c){ uint32_t p=c.arg(0); c.write_u32(p,1000000); c.write_u32(p+4,0); return 1u; });
