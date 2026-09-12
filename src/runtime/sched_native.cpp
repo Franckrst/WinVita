@@ -26,14 +26,24 @@ extern "C" {
 extern "C" void dyn86_vita_open_vm_thread(void);   // mman_vita.c — VM domain PAR FIL (DACR)
 #endif
 
-extern "C" __attribute__((weak)) void d2vita_progress_c(const char* msg);
-// D2_COEURS (vita_present.cpp). Liaison FAIBLE, comme progress : le harnais
-// qemu ne compile pas vita_present.cpp et ces deux symboles y sont nuls.
-//   who 2 = battement anti-famine.
-extern "C" __attribute__((weak)) int  d2vita_core_mask_c(int who);
-extern "C" __attribute__((weak)) int  d2vita_pin_self_c(int mask, unsigned* relu);   // auto-epinglage a l'entree du fil (vita_present.cpp)
-extern "C" __attribute__((weak)) void d2vita_core_register_c(const char* nom, int uid,
-                                                             unsigned wanted, int rc);
+// JOURNAL, EPINGLAGE ET RECENSEMENT DES COEURS : tout cela appartient au MOTEUR
+// (platform/vita_host.h), parce que le moteur cible la Vita.
+//
+// Cette unite est l'ordonnanceur par DEFAUT du projet : c'est elle qui epingle
+// et recense les fils ouvriers. Elle declarait quatre symboles en lien FAIBLE
+// au prefixe du PREMIER consommateur — et un commentaire nommait meme le
+// fichier `vita_present.cpp`, qui appartient a ce consommateur. Un lien faible
+// non resolu vaut NULL : tout portage dont les symboles ne portent pas ce
+// prefixe obtenait, EN SILENCE et sans erreur de lien, un journal muet et des
+// fils NON EPINGLES. L'epinglage n'est pas cosmetique (regles de placement
+// mesurees sur materiel) et un filet inerte en silence est le mode de panne le
+// plus cher de ce projet.
+//
+// Les trois services de coeurs restent CONSOLE-SEULEMENT : tous leurs appels
+// ci-dessous vivent deja sous `#ifdef __vita__`, il n'y a ni coeur a repartir
+// ni affinite a relire ailleurs. Le journal, lui, est appele depuis le corps
+// generique : il a sa version no-op hors console (voir platform/vita_host.h).
+#include "platform/vita_host.h"
 extern "C" { extern uint32_t d2rt_sw_seq; }   // tick_real cache invalidation (rt_boot)
 extern "C" void dyn86_dump_xfer(void);
 
@@ -41,7 +51,7 @@ namespace d2rt {
 
 using S = GuestThread::State;
 
-static void progress(const char* m) { if (d2vita_progress_c) d2vita_progress_c(m); }
+static void progress(const char* m) { wx86_vita_progress_c(m); }
 
 NativeScheduler::NativeScheduler(Cpu* cpu, Bridge* br,
                                  uint32_t stack_region, uint32_t stack_each,
@@ -635,17 +645,17 @@ void NativeScheduler::pin_runner(GuestThread* t, bool is_main) {
     const int mask = srv ? (int)(0x10000u << c) : (int)SCE_KERNEL_CPU_MASK_USER_0;
     const int rc = sceKernelChangeThreadCpuAffinityMask(self, mask);
     if (!is_main) sceKernelChangeThreadPriority(self, 0x10000100);
-    else if (d2vita_core_register_c)
+    else
         // Le main invite est enregistre dans la carte des coeurs comme TEMOIN de
         // USER_0 : la ligne « coeurs: » a besoin d'au moins un fil dont on sait ou
         // il doit etre pour que les autres lignes se lisent. Les runners ne sont
         // pas enregistres — ils naissent et meurent, le registre est fixe.
-        d2vita_core_register_c("invite-main", (int)self, (unsigned)SCE_KERNEL_CPU_MASK_USER_0, rc);
+        wx86_vita_core_register("invite-main", (int)self, (unsigned)SCE_KERNEL_CPU_MASK_USER_0, rc);
     if (srv) {
         // Le serveur EST enregistre : la ligne coeurs: publiera son d= (dernier
         // coeur execute), la seule preuve qu'il COURT ailleurs (masque relu = 0
         // sur ce firmware, t12 §10.1).
-        if (d2vita_core_register_c) d2vita_core_register_c("serveur", (int)self, (unsigned)mask, rc);
+        wx86_vita_core_register("serveur", (int)self, (unsigned)mask, rc);
         char m[160];
         std::snprintf(m, sizeof m, "coeur2: fil %u (entree=%08x) epingle sur USER_%d masque=0x%x rc=0x%08x — serveur D2Game sur son coeur",
                       t->id, t->entry, c, (unsigned)mask, (unsigned)rc);
@@ -875,8 +885,7 @@ void NativeScheduler::fam_beat() {
     // régime (0x10000100 résolu), pas un invariant.
     // « USER_2 » ecrit en dur mentirait des que D2_COEURS bouge : le coeur
     // annonce est celui que le knob a REELLEMENT demande.
-    { const int fm = d2vita_core_mask_c ? d2vita_core_mask_c(2)
-                                        : (int)SCE_KERNEL_CPU_MASK_USER_2;
+    { const int fm = wx86_vita_core_mask(2);
       char m[120];
       std::snprintf(m, sizeof m, "famine: battement arme (Sce brut, USER_%d createur [D2_COEURS], prio relue=%d)",
                     fm == SCE_KERNEL_CPU_MASK_USER_0 ? 0
@@ -1122,15 +1131,14 @@ void NativeScheduler::run() {
         // du watchdog est déjà à l'aise, on prend une marge x4 (les 0x4000
         // des sondes ne font que spinner).
         auto tramp = [](SceSize, void* argp) -> int {
-            // AUTO-EPINGLAGE (d2vita_pin_self, vita_present.cpp) : le masque
-            // pose par le createur ne tient pas apres le start (05/09).
-            if (d2vita_pin_self_c) {
-                const unsigned fm = d2vita_core_mask_c ? (unsigned)d2vita_core_mask_c(2)
-                                                       : (unsigned)SCE_KERNEL_CPU_MASK_USER_2;
-                unsigned relu = 0; const int rc = d2vita_pin_self_c((int)fm, &relu);
+            // AUTO-EPINGLAGE (wx86_vita_pin_self) : le masque pose par le
+            // createur ne tient pas apres le start (05/09).
+            {
+                const unsigned fm = (unsigned)wx86_vita_core_mask(2);
+                unsigned relu = 0; const int rc = wx86_vita_pin_self((int)fm, &relu);
                 char m[112]; std::snprintf(m, sizeof m,
                     "famine: battement auto-epinglage masque=0x%x rc=0x%08x relu=0x%x", fm, (unsigned)rc, relu);
-                if (d2vita_progress_c) d2vita_progress_c(m);
+                wx86_vita_progress_c(m);
             }
             (*(NativeScheduler* const*)argp)->fam_beat();
             return 0; };
@@ -1145,12 +1153,11 @@ void NativeScheduler::run() {
             // a l'octet pres. Ce fil est le SEUL des trois auxiliaires qui ne
             // doit JAMAIS atterrir sur USER_0 : verdict noyau RUN-TO-BLOCK
             // (t12_schedprobe §1), et le battement existe precisement pour le
-            // cas ou un runner invite de USER_0 ne bloque plus. d2vita_core_mask
+            // cas ou un runner invite de USER_0 ne bloque plus. wx86_vita_core_mask
             // accepte la valeur mais la DENONCE dans le journal.
-            const unsigned fmask = d2vita_core_mask_c
-                ? (unsigned)d2vita_core_mask_c(2) : (unsigned)SCE_KERNEL_CPU_MASK_USER_2;
+            const unsigned fmask = (unsigned)wx86_vita_core_mask(2);
             int prc = sceKernelChangeThreadCpuAffinityMask(th, (int)fmask);
-            if (d2vita_core_register_c) d2vita_core_register_c("battement", (int)th, fmask, prc);
+            wx86_vita_core_register("battement", (int)th, fmask, prc);
             if (prc < 0) {
                 char m[176];
                 std::snprintf(m, sizeof m,
