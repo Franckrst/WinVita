@@ -38,15 +38,19 @@
 namespace d2rt {
 
 // Decalage applique a TOUTES les regions invitees. 0 = aucun (defaut).
-// D2HI=<hex> change la base (defaut 0x81000000, la forme des blocs Vita).
+// WX86_HI=<hex> (repli D2HI) change la base (defaut 0x81000000, la forme des
+// blocs Vita). Les noms WX86_* sont les PRIMAIRES : les anciens noms au prefixe
+// du premier consommateur restent acceptes pour ne casser aucune recette.
 // Aligne sur 1 Mio : le plan compact l'est deja, et un ADD de membase encodable
 // exige des bits bas nuls du cote arene — ici membase vaut 0, mais on garde
 // l'alignement pour que les adresses restent lisibles dans les journaux.
 inline uint32_t layout_hi() {
     static const uint32_t hi = [] () -> uint32_t {
-        const char* l = std::getenv("D2LAYOUT");
+        const char* l = std::getenv("WX86_LAYOUT");
+        if (!l) l = std::getenv("D2LAYOUT");
         if (!l || std::strcmp(l, "haut")) return 0u;
-        const char* h = std::getenv("D2HI");
+        const char* h = std::getenv("WX86_HI");
+        if (!h) h = std::getenv("D2HI");
         uint32_t v = h ? (uint32_t)std::strtoul(h, nullptr, 16) : 0x81000000u;
         return v & ~0xFFFFFu;
     }();
@@ -56,7 +60,8 @@ inline uint32_t layout_hi() {
 // Vrai pour les deux plans TASSES (compact et haut) : ils partagent le meme
 // pack, seul le decalage change.
 inline bool layout_packed() {
-    const char* l = std::getenv("D2LAYOUT");
+    const char* l = std::getenv("WX86_LAYOUT");
+    if (!l) l = std::getenv("D2LAYOUT");
     return l && (!std::strcmp(l, "compact") || !std::strcmp(l, "haut"));
 }
 

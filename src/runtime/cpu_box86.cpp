@@ -340,7 +340,7 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
 #endif // !__vita__
 
 
-// fastmmu: guest->host delta (env D2MEMBASE, hex, low 24 bits zero; 0 =
+// fastmmu: guest->host delta (env WX86_MEMBASE, repli D2MEMBASE; hex, low 24 bits zero; 0 =
 // identity). The guest keeps its validated D2 layout; host pages live at
 // va+g_mb — the exact Vita memory model (memblock VAs are kernel-assigned).
 // g_mb defined above (forward-declared before diag_segv); initialized here.
@@ -370,7 +370,7 @@ static inline bool mem_guard(){ if(g_memGuardV<0) g_memGuardV = (std::getenv("WX
 // chosen); map()/set_trap() no longer host-mmap per region — the block already
 // backs them. On Vita this block is one sceKernelAllocMemBlockForVM; here it is
 // one lazy mmap (overcommit), proving the model without needing the compressed
-// hardware layout yet. Enabled by D2ARENA=<hex bytes>.
+// hardware layout yet. Enabled by WX86_ARENA=<hex bytes> (repli D2ARENA).
 static bool     g_arena = false;
 // (compteurs D2_EIPPROF : définis AU NIVEAU FICHIER, voir avant `namespace d2rt`)
 #define g_eipProf        d2rt_eipprof_on
@@ -544,7 +544,8 @@ public:
         if (g_noEmuOpt)
             wx86_vita_progress_c("emutls: OPTIMISATIONS DESACTIVEES (D2_NOEMUOPT=1) — "
                                  "E() resolu a chaque acces, t_fault_addr reecrit par trap");
-        if (const char* as = getenv("D2ARENA")) {
+        const char* as = getenv("WX86_ARENA"); if (!as) as = getenv("D2ARENA");
+        if (as) {
             uint64_t sz = strtoull(as, nullptr, 16);
             // Page-granular size: only the guest->host DELTA needs 16 MiB
             // alignment, and D2ARENA already carries the 16 MiB slack for that.
@@ -640,7 +641,8 @@ public:
             dyn86_mi_set_span(g_arena_span);
             fprintf(stderr, "[cpu_box86] arena: block=%p size=0x%llx membase=0x%lx (Vita single-block model)\n",
                     blk, (unsigned long long)sz, (unsigned long)g_mb);
-        } else if (const char* mbs = getenv("D2MEMBASE")) {
+        } else if (const char* mbs = getenv("WX86_MEMBASE") ? getenv("WX86_MEMBASE")
+                                                            : getenv("D2MEMBASE")) {
             g_mb = strtoul(mbs, nullptr, 16);
             if (g_mb & 0xFFFFFFu) { fprintf(stderr, "[cpu_box86] D2MEMBASE low 24 bits must be 0\n"); _exit(2); }
             dyn86_set_membase(g_mb);
