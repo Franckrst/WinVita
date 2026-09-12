@@ -11,7 +11,6 @@ extern "C" {
     // Compteur des sondages a delai zero servis SANS dormir : c'est la mesure
     // du gain, et sans lui on ne saurait pas si le correctif a pris.
     uint64_t d2rt_poll0_n = 0;
-    uint64_t d2rt_wake_now_us(void);     // horloge plateforme (rt_boot)
 }
 #include "runtime/prof.h"
 
@@ -44,6 +43,10 @@ extern "C" void dyn86_vita_open_vm_thread(void);   // mman_vita.c — VM domain 
 // ni affinite a relire ailleurs. Le journal, lui, est appele depuis le corps
 // generique : il a sa version no-op hors console (voir platform/vita_host.h).
 #include "platform/vita_host.h"
+// L'HORLOGE MONOTONE EST AU MOTEUR (meme constat que bridge.cpp) : ces appels
+// passaient par `d2rt_wake_now_us`, que chaque portage definissait en une ligne
+// comme un renvoi vers wx86_now_us.
+#include "runtime/host_clock.h"
 extern "C" { extern uint32_t d2rt_sw_seq; }   // tick_real cache invalidation (rt_boot)
 extern "C" void dyn86_dump_xfer(void);
 
@@ -455,7 +458,7 @@ uint32_t NativeScheduler::wait_common(Waitable* w, uint32_t timeout_ms, uint32_t
         if (rc == ETIMEDOUT && !n->woken) break;
     }
     if (d2rt_wakeprof && n->t_signal_us) {
-        const uint64_t dt = d2rt_wake_now_us() - n->t_signal_us;
+        const uint64_t dt = wx86_now_us() - n->t_signal_us;
         n->t_signal_us = 0;
         ++d2rt_wake_n; d2rt_wake_us += dt;
         if (dt > d2rt_wake_worst) d2rt_wake_worst = dt;
@@ -508,7 +511,7 @@ void NativeScheduler::wake_check_all() {
             // jeu. Ici on isole la moitie qui nous appartient : de
             // pthread_cond_signal() a la reprise EFFECTIVE du fil reveille
             // (qui doit reprendre le GIL). Aucune ambiguite d'interpretation.
-            if (d2rt_wakeprof) { n->t_signal_us = d2rt_wake_now_us(); ++d2rt_wake_sig; }
+            if (d2rt_wakeprof) { n->t_signal_us = wx86_now_us(); ++d2rt_wake_sig; }
             pthread_cond_signal(&n->cv);
         }
     }

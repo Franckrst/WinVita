@@ -14,7 +14,6 @@
 extern "C" {
     int d2rt_natprof = 0;                       // lu au commit()
     extern int d2rt_wakeprof;                   // D2_WAKEPROF (sched_native.cpp)
-    uint64_t d2rt_natprof_now_us(void);         // fourni par rt_boot.cpp (horloge plateforme)
 }
 namespace {
     uint64_t g_natprof_us[d2rt::trapcnt::kMax];
@@ -33,6 +32,12 @@ namespace {
 // erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
 // de ses consommateurs.
 #include "platform/vita_host.h"
+// L'HORLOGE MONOTONE EST AU MOTEUR. Ces deux appels passaient par
+// `d2rt_natprof_now_us`, que CHAQUE portage devait definir — et que les deux
+// definissaient a l'identique, en une ligne, comme un renvoi vers leur propre
+// horloge, elle-meme un renvoi vers wx86_now_us. Trois sauts pour revenir a
+// l'endroit d'ou l'on part : le type avait demenage, la demande, non.
+#include "runtime/host_clock.h"
 extern "C" { extern uint32_t d2rt_timeprof_base; }   // base invitee (cpu_box86.cpp)
 
 namespace d2rt {
@@ -493,9 +498,9 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
     gil::note_shim_enter(trap_va, slot->tagc);
     uint32_t eax;
     if (d2rt_natprof) {
-        const uint64_t t0 = d2rt_natprof_now_us();
+        const uint64_t t0 = wx86_now_us();
         eax = slot->shim.fn(cpu);
-        const uint64_t dt = d2rt_natprof_now_us() - t0;
+        const uint64_t dt = wx86_now_us() - t0;
         if (idx < trapcnt::kMax) { g_natprof_us[idx] += dt; ++g_natprof_n[idx]; }
     } else
     eax = slot->shim.fn(cpu);
