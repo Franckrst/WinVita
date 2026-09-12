@@ -1,6 +1,6 @@
 diff -ruN a/custommem.c b/custommem.c
---- a/custommem.c	2026-09-07 22:05:58.494508126 +0200
-+++ b/custommem.c	2026-09-07 22:05:58.496508170 +0200
+--- a/custommem.c	2026-09-12 12:36:28.536294809 +0200
++++ b/custommem.c	2026-09-12 12:36:28.537294830 +0200
 @@ -48,9 +48,25 @@
  #ifdef USE_CUSTOM_MUTEX
  static uint32_t            mutex_prot;
@@ -27,7 +27,38 @@ diff -ruN a/custommem.c b/custommem.c
  #endif
  #define MEMPROT_SHIFT 12
  #define MEMPROT_SIZE (1<<(32-MEMPROT_SHIFT))
-@@ -508,6 +524,22 @@
+@@ -338,6 +354,30 @@
+ #ifdef TRACE_MEMSTAT
+ static size_t customMalloc_allocated = 0;
+ #endif
++/* ⚡ 08/09 : EXPOSER LES POSTES D'ALLOCATION DE BOX86. mallinfo() donne le tas
++ * newlib EN BLOC ; quand il grimpe de 22 a 30 Mio a l'entree en jeu, on ne sait
++ * pas si c'est box86 (metadonnees de blocs, table de sauts) ou le reste du
++ * runtime. Ces compteurs EXISTAIENT deja mais (a) etaient derriere
++ * TRACE_MEMSTAT, non defini — donc pas meme compiles — et (b) n'etaient
++ * publies que dans un printf_log de fin, jamais atteint sur console. Deux
++ * facons pour un compteur de ne servir a rien.
++ * Le surcout de TRACE_MEMSTAT est nul en pratique : les increments sont sur
++ * des chemins FROIDS (nouveau bloc de 64 Kio, table de sauts), pas dans le
++ * malloc chaud. */
++size_t d2rt_box86_custommalloc_kb(void){
++#ifdef TRACE_MEMSTAT
++    return customMalloc_allocated >> 10;
++#else
++    return 0;
++#endif
++}
++size_t d2rt_box86_jmptbl_kb(void){
++#ifdef TRACE_MEMSTAT
++    return jmptbl_allocated >> 10;
++#else
++    return 0;
++#endif
++}
+ void* customMalloc(size_t size)
+ {
+     size = roundSize(size);
+@@ -508,6 +548,22 @@
  
      size = roundSize(size);
  
@@ -50,7 +81,7 @@ diff -ruN a/custommem.c b/custommem.c
      mmaplist_t* list = mmaplist;
      if(!list)
          list = mmaplist = (mmaplist_t*)box_calloc(1, sizeof(mmaplist_t));
-@@ -525,6 +557,7 @@
+@@ -525,6 +581,7 @@
                      list->chunks[i].first = getNextFreeBlock(sub);
                  if(rsize==list->chunks[i].maxfree)
                      list->chunks[i].maxfree = getMaxFreeBlock(list->chunks[i].block, list->chunks[i].size, list->chunks[i].first);
@@ -58,7 +89,7 @@ diff -ruN a/custommem.c b/custommem.c
                  return (uintptr_t)ret;
              }
          }
-@@ -538,6 +571,7 @@
+@@ -538,6 +595,7 @@
              void *p = NULL;
              if(!(p=box_memalign(box86_pagesize, allocsize))) {
                  dynarec_log(LOG_INFO, "Cannot create dynamic map of %zu bytes\n", allocsize);
@@ -66,7 +97,7 @@ diff -ruN a/custommem.c b/custommem.c
                  return 0;
              }
              mprotect(p, allocsize, PROT_READ | PROT_WRITE | PROT_EXEC);
-@@ -545,6 +579,7 @@
+@@ -545,6 +603,7 @@
              void* p = mmap(NULL, allocsize, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
              if(p==MAP_FAILED) {
                  dynarec_log(LOG_INFO, "Cannot create dynamic map of %zu bytes (%s)\n", allocsize, strerror(errno));
@@ -74,7 +105,7 @@ diff -ruN a/custommem.c b/custommem.c
                  return 0;
              }
              #ifdef MADV_HUGEPAGE
-@@ -554,7 +589,6 @@
+@@ -554,7 +613,6 @@
  #ifdef TRACE_MEMSTAT
              dynarec_allocated += allocsize;
  #endif
@@ -82,7 +113,7 @@ diff -ruN a/custommem.c b/custommem.c
              list->chunks[i].block = p;
              list->chunks[i].first = p;
              list->chunks[i].size = allocsize;
-@@ -572,6 +606,15 @@
+@@ -572,6 +630,15 @@
              list->chunks[i].maxfree = getMaxFreeBlock(list->chunks[i].block, list->chunks[i].size, NULL);
              if(list->chunks[i].maxfree)
                  list->chunks[i].first = getNextFreeBlock(m);
@@ -98,7 +129,7 @@ diff -ruN a/custommem.c b/custommem.c
              return (uintptr_t)ret;
          }
          // next chunk...
-@@ -589,17 +632,19 @@
+@@ -589,17 +656,19 @@
  {
      if(!addr)
          return;
@@ -120,7 +151,7 @@ diff -ruN a/custommem.c b/custommem.c
              return;
          }
          ++i;
-@@ -608,6 +653,7 @@
+@@ -608,6 +677,7 @@
              list = list->next;
          }
      }
@@ -128,7 +159,7 @@ diff -ruN a/custommem.c b/custommem.c
  }
  
  static uintptr_t getDBSize(uintptr_t addr, size_t maxsize, dynablock_t** db)
-@@ -662,7 +708,8 @@
+@@ -662,7 +732,8 @@
              if(destroy)
                  FreeRangeDynablock(db, addr, size);
              else
@@ -138,7 +169,7 @@ diff -ruN a/custommem.c b/custommem.c
          }
      }
      if(destroy) {
-@@ -688,6 +735,11 @@
+@@ -688,6 +759,11 @@
  {
      if(box86_jmptbl[idx1] == box86_jmptbl_default) {
          uintptr_t* tbl = (uintptr_t*)box_malloc((1<<JMPTABL_SHIFT)*sizeof(uintptr_t));
@@ -150,7 +181,7 @@ diff -ruN a/custommem.c b/custommem.c
          for(int i=0; i<(1<<JMPTABL_SHIFT); ++i)
              tbl[i] = (uintptr_t)arm_next;
          if(arm_lock_storeifref(&box86_jmptbl[idx1], tbl, box86_jmptbl_default)!=tbl)
-@@ -767,6 +819,7 @@
+@@ -767,6 +843,7 @@
      return *(dynablock_t**)(ret - sizeof(void*));
  }
  
@@ -158,7 +189,7 @@ diff -ruN a/custommem.c b/custommem.c
  int getNeedTest(uintptr_t addr)
  {
      uintptr_t idx1, idx0;
-@@ -774,6 +827,11 @@
+@@ -774,6 +851,11 @@
      idx0 = ((addr)               )&JMPTABLE_MASK;
      uintptr_t ret = (uintptr_t)box86_jmptbl[idx1][idx0];
      dynablock_t* db = *(dynablock_t**)(ret - sizeof(void*));
@@ -170,7 +201,7 @@ diff -ruN a/custommem.c b/custommem.c
      return db?((ret!=(uintptr_t)db->block)?1:0):0;
  }
  
-@@ -786,6 +844,7 @@
+@@ -786,6 +868,7 @@
  }
  
  // Remove the Write flag from an adress range, so DB can be executed
@@ -178,7 +209,7 @@ diff -ruN a/custommem.c b/custommem.c
  void protectDB(uintptr_t addr, uintptr_t size)
  {
      dynarec_log(LOG_DEBUG, "protectDB %p -> %p\n", (void*)addr, (void*)(addr+size-1));
-@@ -807,8 +866,13 @@
+@@ -807,8 +890,13 @@
          if(!(dyn&PROT_NEVERPROT)) {
              prot&=~PROT_CUSTOM;
              if(prot&PROT_WRITE) {
@@ -194,7 +225,7 @@ diff -ruN a/custommem.c b/custommem.c
                  prot |= PROT_DYNAREC;
              } else 
                  prot |= PROT_DYNAREC_R;
-@@ -848,7 +912,8 @@
+@@ -848,7 +936,8 @@
                  prot&=~PROT_DYN;
                  if(mark)
                      cleanDBFromAddressRange(cur, bend-cur, 0);
@@ -204,7 +235,7 @@ diff -ruN a/custommem.c b/custommem.c
              } else if(prot&PROT_DYNAREC_R)
                  prot &= ~PROT_CUSTOM;
          }
-@@ -919,7 +984,7 @@
+@@ -919,7 +1008,7 @@
          if(!(dyn&PROT_NEVERPROT)) {
              if(dyn && (prot&PROT_WRITE)) {   // need to remove the write protection from this block
                  dyn = PROT_DYNAREC;
@@ -213,7 +244,7 @@ diff -ruN a/custommem.c b/custommem.c
              } else if(dyn && !(prot&PROT_WRITE)) {
                  dyn = PROT_DYNAREC_R;
              }
-@@ -982,7 +1047,7 @@
+@@ -982,7 +1071,7 @@
      uint32_t prot;
      uintptr_t bend;
      if (rb_get_end(memprot, addr, &prot, &bend)) {
@@ -222,7 +253,7 @@ diff -ruN a/custommem.c b/custommem.c
          dynarec_log(LOG_DEBUG, "refreshProtection(%p): %p/0x%x (ret=%d/%s)\n", (void*)addr, (void*)(addr&~(box86_pagesize-1)), prot, ret, ret?strerror(errno):"ok");
      }
      mutex_unlock(&mutex_prot);
-@@ -1137,6 +1202,7 @@
+@@ -1137,6 +1226,7 @@
      #endif
      GO(mutex_blocks, 0)
      GO(mutex_prot, 1)
@@ -230,7 +261,7 @@ diff -ruN a/custommem.c b/custommem.c
      #undef GO
      return ret;
  }
-@@ -1149,6 +1215,7 @@
+@@ -1149,6 +1239,7 @@
  
      GO(mutex_blocks, 0)
      GO(mutex_prot, 1)
@@ -238,7 +269,7 @@ diff -ruN a/custommem.c b/custommem.c
      #undef GO
  }
  
-@@ -1157,12 +1224,14 @@
+@@ -1157,12 +1248,14 @@
      #ifdef USE_CUSTOM_MUTEX
      arm_lock_stored(&mutex_blocks, 0);
      arm_lock_stored(&mutex_prot, 0);
@@ -253,7 +284,7 @@ diff -ruN a/custommem.c b/custommem.c
  
      pthread_mutexattr_destroy(&attr);
      #endif
-@@ -1180,9 +1249,13 @@
+@@ -1180,9 +1273,13 @@
      if(inited) // already initialized
          return;
      inited = 1;
@@ -268,7 +299,7 @@ diff -ruN a/custommem.c b/custommem.c
  #ifdef DYNAREC
  #ifdef ARM
      for(int i=0; i<(1<<JMPTABL_SHIFT); ++i)
-@@ -1269,6 +1342,7 @@
+@@ -1269,6 +1366,7 @@
      #ifndef USE_CUSTOM_MUTEX
      pthread_mutex_destroy(&mutex_blocks);
      pthread_mutex_destroy(&mutex_prot);
@@ -277,8 +308,8 @@ diff -ruN a/custommem.c b/custommem.c
  }
  
 diff -ruN a/dynarec/arm_lock_helper.S b/dynarec/arm_lock_helper.S
---- a/dynarec/arm_lock_helper.S	2026-09-07 22:05:58.422506543 +0200
-+++ b/dynarec/arm_lock_helper.S	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/arm_lock_helper.S	2026-09-12 12:36:28.479293622 +0200
++++ b/dynarec/arm_lock_helper.S	2026-09-12 12:36:28.537294830 +0200
 @@ -114,7 +114,7 @@
      bne     arm_lock_storeifref2_exit
      strex   r3, r1, [r0]
@@ -289,8 +320,8 @@ diff -ruN a/dynarec/arm_lock_helper.S b/dynarec/arm_lock_helper.S
  arm_lock_storeifref2_exit:
      dmb     ish
 diff -ruN a/dynarec/arm_next.S b/dynarec/arm_next.S
---- a/dynarec/arm_next.S	2026-09-07 22:05:58.425506609 +0200
-+++ b/dynarec/arm_next.S	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/arm_next.S	2026-09-12 12:36:28.482293685 +0200
++++ b/dynarec/arm_next.S	2026-09-12 12:36:28.537294830 +0200
 @@ -11,14 +11,22 @@
  .global arm_next
      .4byte  0   // NULL pointer before arm64_next, for getDB
@@ -318,8 +349,8 @@ diff -ruN a/dynarec/arm_next.S b/dynarec/arm_next.S
 +.ltorg
  
 diff -ruN a/dynarec/dynablock.c b/dynarec/dynablock.c
---- a/dynarec/dynablock.c	2026-09-07 22:05:58.471507620 +0200
-+++ b/dynarec/dynablock.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynablock.c	2026-09-12 12:36:28.517294414 +0200
++++ b/dynarec/dynablock.c	2026-09-12 12:36:28.537294830 +0200
 @@ -23,6 +23,8 @@
  #include "bridge.h"
  #ifdef ARM
@@ -727,8 +758,8 @@ diff -ruN a/dynarec/dynablock.c b/dynarec/dynablock.c
          emu->test.test = 0;
      return db;
 diff -ruN a/dynarec/dynarec.c b/dynarec/dynarec.c
---- a/dynarec/dynarec.c	2026-09-07 22:05:58.472507642 +0200
-+++ b/dynarec/dynarec.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec.c	2026-09-12 12:36:28.518294435 +0200
++++ b/dynarec/dynarec.c	2026-09-12 12:36:28.537294830 +0200
 @@ -24,6 +24,9 @@
  void x86test_check(x86emu_t* ref, uintptr_t ip);
  #endif
@@ -955,8 +986,8 @@ diff -ruN a/dynarec/dynarec.c b/dynarec/dynarec.c
  }
 \ No newline at end of file
 diff -ruN a/dynarec/dynarec_arm.c b/dynarec/dynarec_arm.c
---- a/dynarec/dynarec_arm.c	2026-09-07 22:05:58.469507576 +0200
-+++ b/dynarec/dynarec_arm.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm.c	2026-09-12 12:36:28.516294393 +0200
++++ b/dynarec/dynarec_arm.c	2026-09-12 12:36:28.537294830 +0200
 @@ -108,7 +108,7 @@
      return -2;
  }
@@ -1072,8 +1103,8 @@ diff -ruN a/dynarec/dynarec_arm.c b/dynarec/dynarec_arm.c
      //block->done = 1;
      return (void*)block;
 diff -ruN a/dynarec/dynarec_arm_00.c b/dynarec/dynarec_arm_00.c
---- a/dynarec/dynarec_arm_00.c	2026-09-07 22:05:58.445507049 +0200
-+++ b/dynarec/dynarec_arm_00.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_00.c	2026-09-12 12:36:28.499294039 +0200
++++ b/dynarec/dynarec_arm_00.c	2026-09-12 12:36:28.537294830 +0200
 @@ -26,6 +26,7 @@
  
  #include "dynarec_arm_functions.h"
@@ -1809,8 +1840,8 @@ diff -ruN a/dynarec/dynarec_arm_00.c b/dynarec/dynarec_arm_00.c
  
                  default:
 diff -ruN a/dynarec/dynarec_arm_0f.c b/dynarec/dynarec_arm_0f.c
---- a/dynarec/dynarec_arm_0f.c	2026-09-07 22:05:58.446507071 +0200
-+++ b/dynarec/dynarec_arm_0f.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_0f.c	2026-09-12 12:36:28.500294060 +0200
++++ b/dynarec/dynarec_arm_0f.c	2026-09-12 12:36:28.537294830 +0200
 @@ -33,6 +33,7 @@
      } else {    \
          SMREAD(); \
@@ -2292,8 +2323,8 @@ diff -ruN a/dynarec/dynarec_arm_0f.c b/dynarec/dynarec_arm_0f.c
              }
              break;
 diff -ruN a/dynarec/dynarec_arm_64.c b/dynarec/dynarec_arm_64.c
---- a/dynarec/dynarec_arm_64.c	2026-09-07 22:05:58.447507093 +0200
-+++ b/dynarec/dynarec_arm_64.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_64.c	2026-09-12 12:36:28.501294080 +0200
++++ b/dynarec/dynarec_arm_64.c	2026-09-12 12:36:28.537294830 +0200
 @@ -146,10 +146,10 @@
                      nextop=F8;
                      grab_fsdata(dyn, addr, ninst, x14);
@@ -2348,8 +2379,8 @@ diff -ruN a/dynarec/dynarec_arm_64.c b/dynarec/dynarec_arm_64.c
                      break;
                  default:
 diff -ruN a/dynarec/dynarec_arm_65.c b/dynarec/dynarec_arm_65.c
---- a/dynarec/dynarec_arm_65.c	2026-09-07 22:05:58.449507137 +0200
-+++ b/dynarec/dynarec_arm_65.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_65.c	2026-09-12 12:36:28.502294101 +0200
++++ b/dynarec/dynarec_arm_65.c	2026-09-12 12:36:28.537294830 +0200
 @@ -404,10 +404,10 @@
              grab_tlsdata(dyn, addr, ninst, x14);
              nextop = F8;
@@ -2373,8 +2404,8 @@ diff -ruN a/dynarec/dynarec_arm_65.c b/dynarec/dynarec_arm_65.c
                      break;
                  default:
 diff -ruN a/dynarec/dynarec_arm_66.c b/dynarec/dynarec_arm_66.c
---- a/dynarec/dynarec_arm_66.c	2026-09-07 22:05:58.450507159 +0200
-+++ b/dynarec/dynarec_arm_66.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_66.c	2026-09-12 12:36:28.503294122 +0200
++++ b/dynarec/dynarec_arm_66.c	2026-09-12 12:36:28.537294830 +0200
 @@ -182,7 +182,7 @@
              INST_NAME("PUSH DS");
              MOVW(x1, offsetof(x86emu_t, segs[_DS]));
@@ -2637,8 +2668,8 @@ diff -ruN a/dynarec/dynarec_arm_66.c b/dynarec/dynarec_arm_66.c
                  default:
                      DEFAULT;
 diff -ruN a/dynarec/dynarec_arm_660f.c b/dynarec/dynarec_arm_660f.c
---- a/dynarec/dynarec_arm_660f.c	2026-09-07 22:05:58.452507203 +0200
-+++ b/dynarec/dynarec_arm_660f.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_660f.c	2026-09-12 12:36:28.503294122 +0200
++++ b/dynarec/dynarec_arm_660f.c	2026-09-12 12:36:28.537294830 +0200
 @@ -30,6 +30,7 @@
      } else {                    \
          SMREAD();               \
@@ -3100,8 +3131,8 @@ diff -ruN a/dynarec/dynarec_arm_660f.c b/dynarec/dynarec_arm_660f.c
          case 0xF8:
              INST_NAME("PSUBB Gx,Ex");
 diff -ruN a/dynarec/dynarec_arm_66f0.c b/dynarec/dynarec_arm_66f0.c
---- a/dynarec/dynarec_arm_66f0.c	2026-09-07 22:05:58.453507225 +0200
-+++ b/dynarec/dynarec_arm_66f0.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_66f0.c	2026-09-12 12:36:28.504294143 +0200
++++ b/dynarec/dynarec_arm_66f0.c	2026-09-12 12:36:28.537294830 +0200
 @@ -55,6 +55,7 @@
                          emit_add16c(dyn, ninst, ed, i16, x3, x14);
                      } else {
@@ -3127,8 +3158,8 @@ diff -ruN a/dynarec/dynarec_arm_66f0.c b/dynarec/dynarec_arm_66f0.c
                              TSTS_IMM8(wback, 1);
                              B_MARK(cNE);    // unaligned
 diff -ruN a/dynarec/dynarec_arm_67.c b/dynarec/dynarec_arm_67.c
---- a/dynarec/dynarec_arm_67.c	2026-09-07 22:05:58.455507269 +0200
-+++ b/dynarec/dynarec_arm_67.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_67.c	2026-09-12 12:36:28.505294164 +0200
++++ b/dynarec/dynarec_arm_67.c	2026-09-12 12:36:28.537294830 +0200
 @@ -56,6 +56,7 @@
                              BFI(ed, gd, 0, 16);
                          }
@@ -3172,8 +3203,8 @@ diff -ruN a/dynarec/dynarec_arm_67.c b/dynarec/dynarec_arm_67.c
                              break;
                          default:
 diff -ruN a/dynarec/dynarec_arm_d8.c b/dynarec/dynarec_arm_d8.c
---- a/dynarec/dynarec_arm_d8.c	2026-09-07 22:05:58.456507290 +0200
-+++ b/dynarec/dynarec_arm_d8.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_d8.c	2026-09-12 12:36:28.506294185 +0200
++++ b/dynarec/dynarec_arm_d8.c	2026-09-12 12:36:28.537294830 +0200
 @@ -216,6 +216,7 @@
                      parity = getedparity(dyn, ninst, addr, nextop, 2);
                      if(parity) {
@@ -3239,8 +3270,8 @@ diff -ruN a/dynarec/dynarec_arm_d8.c b/dynarec/dynarec_arm_d8.c
                      } else {
                          GETED;
 diff -ruN a/dynarec/dynarec_arm_d9.c b/dynarec/dynarec_arm_d9.c
---- a/dynarec/dynarec_arm_d9.c	2026-09-07 22:05:58.457507313 +0200
-+++ b/dynarec/dynarec_arm_d9.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_d9.c	2026-09-12 12:36:28.507294205 +0200
++++ b/dynarec/dynarec_arm_d9.c	2026-09-12 12:36:28.537294830 +0200
 @@ -642,9 +642,11 @@
                      parity = getedparity(dyn, ninst, addr, nextop, 2);
                      if(parity) {
@@ -3302,8 +3333,8 @@ diff -ruN a/dynarec/dynarec_arm_d9.c b/dynarec/dynarec_arm_d9.c
                      wb1 = 1;
                      LDRH_IMM8(x1, xEmu, offsetof(x86emu_t, cw));
 diff -ruN a/dynarec/dynarec_arm_db.c b/dynarec/dynarec_arm_db.c
---- a/dynarec/dynarec_arm_db.c	2026-09-07 22:05:58.460507379 +0200
-+++ b/dynarec/dynarec_arm_db.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_db.c	2026-09-12 12:36:28.509294247 +0200
++++ b/dynarec/dynarec_arm_db.c	2026-09-12 12:36:28.538294851 +0200
 @@ -188,6 +188,7 @@
                      parity = getedparity(dyn, ninst, addr, nextop, 2);
                      if(parity) {
@@ -3393,8 +3424,8 @@ diff -ruN a/dynarec/dynarec_arm_db.c b/dynarec/dynarec_arm_db.c
                          LDR_IMM9(x3, xEmu, offsetof(x86emu_t, top));
                          int a = -dyn->n.x87stack;
 diff -ruN a/dynarec/dynarec_arm_dc.c b/dynarec/dynarec_arm_dc.c
---- a/dynarec/dynarec_arm_dc.c	2026-09-07 22:05:58.461507400 +0200
-+++ b/dynarec/dynarec_arm_dc.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_dc.c	2026-09-12 12:36:28.510294268 +0200
++++ b/dynarec/dynarec_arm_dc.c	2026-09-12 12:36:28.538294851 +0200
 @@ -210,9 +210,11 @@
                      parity = getedparity(dyn, ninst, addr, nextop, 2);
                      if(parity) {
@@ -3492,8 +3523,8 @@ diff -ruN a/dynarec/dynarec_arm_dc.c b/dynarec/dynarec_arm_dc.c
                          LDR_IMM9(x3, wback, fixedaddress+4);
                          VMOVtoV_D(d1, x2, x3);
 diff -ruN a/dynarec/dynarec_arm_dd.c b/dynarec/dynarec_arm_dd.c
---- a/dynarec/dynarec_arm_dd.c	2026-09-07 22:05:58.462507423 +0200
-+++ b/dynarec/dynarec_arm_dd.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_dd.c	2026-09-12 12:36:28.511294289 +0200
++++ b/dynarec/dynarec_arm_dd.c	2026-09-12 12:36:28.538294851 +0200
 @@ -11,6 +11,10 @@
  #include "emu/x86run_private.h"
  #include "x86run.h"
@@ -3589,8 +3620,8 @@ diff -ruN a/dynarec/dynarec_arm_dd.c b/dynarec/dynarec_arm_dd.c
                      LDRH_IMM8(x1, xEmu, offsetof(x86emu_t, sw));
                      if(dyn->n.x87stack) {
 diff -ruN a/dynarec/dynarec_arm_df.c b/dynarec/dynarec_arm_df.c
---- a/dynarec/dynarec_arm_df.c	2026-09-07 22:05:58.464507466 +0200
-+++ b/dynarec/dynarec_arm_df.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_df.c	2026-09-12 12:36:28.513294330 +0200
++++ b/dynarec/dynarec_arm_df.c	2026-09-12 12:36:28.538294851 +0200
 @@ -11,6 +11,10 @@
  #include "emu/x86run_private.h"
  #include "x86run.h"
@@ -3706,8 +3737,8 @@ diff -ruN a/dynarec/dynarec_arm_df.c b/dynarec/dynarec_arm_df.c
                              STR_IMM9(x2, ed, 0);
                              STR_IMM9(x3, ed, 4);
 diff -ruN a/dynarec/dynarec_arm_f0.c b/dynarec/dynarec_arm_f0.c
---- a/dynarec/dynarec_arm_f0.c	2026-09-07 22:05:58.466507510 +0200
-+++ b/dynarec/dynarec_arm_f0.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_f0.c	2026-09-12 12:36:28.513294330 +0200
++++ b/dynarec/dynarec_arm_f0.c	2026-09-12 12:36:28.538294851 +0200
 @@ -51,6 +51,7 @@
                  BFI(wback, ed, wb2*8, 8);
              } else {                   
@@ -3997,8 +4028,8 @@ diff -ruN a/dynarec/dynarec_arm_f0.c b/dynarec/dynarec_arm_f0.c
                              TSTS_IMM8(wback, 3);
                              B_MARK(cNE);    // unaligned
 diff -ruN a/dynarec/dynarec_arm_f20f.c b/dynarec/dynarec_arm_f20f.c
---- a/dynarec/dynarec_arm_f20f.c	2026-09-07 22:05:58.467507532 +0200
-+++ b/dynarec/dynarec_arm_f20f.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_f20f.c	2026-09-12 12:36:28.514294351 +0200
++++ b/dynarec/dynarec_arm_f20f.c	2026-09-12 12:36:28.538294851 +0200
 @@ -32,9 +32,11 @@
          SMREAD();                                   \
          if(parity) {                                \
@@ -4084,8 +4115,8 @@ diff -ruN a/dynarec/dynarec_arm_f20f.c b/dynarec/dynarec_arm_f20f.c
                  LDR_IMM9(x3, ed, fixedaddress+4);
                  VMOVtoV_D(v0, x2, x3);
 diff -ruN a/dynarec/dynarec_arm_f30f.c b/dynarec/dynarec_arm_f30f.c
---- a/dynarec/dynarec_arm_f30f.c	2026-09-07 22:05:58.468507554 +0200
-+++ b/dynarec/dynarec_arm_f30f.c	2026-09-07 22:05:58.498508214 +0200
+--- a/dynarec/dynarec_arm_f30f.c	2026-09-12 12:36:28.515294372 +0200
++++ b/dynarec/dynarec_arm_f30f.c	2026-09-12 12:36:28.538294851 +0200
 @@ -40,6 +40,7 @@
          SMREAD();                                   \
          if(parity) {                                \
@@ -4224,8 +4255,8 @@ diff -ruN a/dynarec/dynarec_arm_f30f.c b/dynarec/dynarec_arm_f30f.c
                      LDR_IMM9(x3, ed, fixedaddress+4);
                      VMOVtoV_D(v0, x2, x3);
 diff -ruN a/dynarec/dynarec_arm_functions.c b/dynarec/dynarec_arm_functions.c
---- a/dynarec/dynarec_arm_functions.c	2026-09-07 22:05:58.436506851 +0200
-+++ b/dynarec/dynarec_arm_functions.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_functions.c	2026-09-12 12:36:28.492293893 +0200
++++ b/dynarec/dynarec_arm_functions.c	2026-09-12 12:36:28.538294851 +0200
 @@ -391,7 +391,12 @@
  
  void arm_clflush(x86emu_t* emu, void* p)
@@ -4269,8 +4300,8 @@ diff -ruN a/dynarec/dynarec_arm_functions.c b/dynarec/dynarec_arm_functions.c
      if(!addr || !getProtection(addr))
          return 0;
 diff -ruN a/dynarec/dynarec_arm_helper.c b/dynarec/dynarec_arm_helper.c
---- a/dynarec/dynarec_arm_helper.c	2026-09-07 22:05:58.433506785 +0200
-+++ b/dynarec/dynarec_arm_helper.c	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_helper.c	2026-09-12 12:36:28.490293851 +0200
++++ b/dynarec/dynarec_arm_helper.c	2026-09-12 12:36:28.538294851 +0200
 @@ -27,6 +27,22 @@
  #include "dynarec_arm_functions.h"
  #include "dynarec_arm_helper.h"
@@ -4491,8 +4522,8 @@ diff -ruN a/dynarec/dynarec_arm_helper.c b/dynarec/dynarec_arm_helper.c
  
  static int findCacheSlot(dynarec_arm_t* dyn, int ninst, int t, int n, neoncache_t* cache)
 diff -ruN a/dynarec/dynarec_arm_helper.h b/dynarec/dynarec_arm_helper.h
---- a/dynarec/dynarec_arm_helper.h	2026-09-07 22:05:58.435506829 +0200
-+++ b/dynarec/dynarec_arm_helper.h	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_helper.h	2026-09-12 12:36:28.491293872 +0200
++++ b/dynarec/dynarec_arm_helper.h	2026-09-12 12:36:28.538294851 +0200
 @@ -13,19 +13,136 @@
  
  #include "debug.h"
@@ -4859,7 +4890,7 @@ diff -ruN a/dynarec/dynarec_arm_helper.h b/dynarec/dynarec_arm_helper.h
  #define DEFAULT      *ok = -1; BARRIER(BARRIER_NOFLAGS)
 diff -ruN a/dynarec/dynarec_arm_mmu.h b/dynarec/dynarec_arm_mmu.h
 --- a/dynarec/dynarec_arm_mmu.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/dynarec/dynarec_arm_mmu.h	2026-09-07 22:05:58.498508214 +0200
++++ b/dynarec/dynarec_arm_mmu.h	2026-09-12 12:36:28.538294851 +0200
 @@ -0,0 +1,278 @@
 +#ifndef __DYNAREC_ARM_MMU_H_
 +#define __DYNAREC_ARM_MMU_H_
@@ -5140,8 +5171,8 @@ diff -ruN a/dynarec/dynarec_arm_mmu.h b/dynarec/dynarec_arm_mmu.h
 +
 +#endif //__DYNAREC_ARM_MMU_H_
 diff -ruN a/dynarec/dynarec_arm_pass.c b/dynarec/dynarec_arm_pass.c
---- a/dynarec/dynarec_arm_pass.c	2026-09-07 22:05:58.439506917 +0200
-+++ b/dynarec/dynarec_arm_pass.c	2026-09-07 22:05:58.496508170 +0200
+--- a/dynarec/dynarec_arm_pass.c	2026-09-12 12:36:28.494293935 +0200
++++ b/dynarec/dynarec_arm_pass.c	2026-09-12 12:36:28.538294851 +0200
 @@ -19,6 +19,10 @@
  #include "dynarec_arm_private.h"
  #include "arm_printer.h"
@@ -5520,8 +5551,8 @@ diff -ruN a/dynarec/dynarec_arm_pass.c b/dynarec/dynarec_arm_pass.c
  }
 \ No newline at end of file
 diff -ruN a/dynarec/dynarec_arm_pass3.h b/dynarec/dynarec_arm_pass3.h
---- a/dynarec/dynarec_arm_pass3.h	2026-09-07 22:05:58.432506763 +0200
-+++ b/dynarec/dynarec_arm_pass3.h	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_pass3.h	2026-09-12 12:36:28.489293831 +0200
++++ b/dynarec/dynarec_arm_pass3.h	2026-09-12 12:36:28.538294851 +0200
 @@ -6,7 +6,22 @@
  #define EMIT(A)                                         \
      do{                                                 \
@@ -5547,8 +5578,8 @@ diff -ruN a/dynarec/dynarec_arm_pass3.h b/dynarec/dynarec_arm_pass3.h
          dyn->block += 4; dyn->arm_size += 4;            \
          dyn->insts[ninst].size2 += 4;                   \
 diff -ruN a/dynarec/dynarec_arm_private.h b/dynarec/dynarec_arm_private.h
---- a/dynarec/dynarec_arm_private.h	2026-09-07 22:05:58.427506653 +0200
-+++ b/dynarec/dynarec_arm_private.h	2026-09-07 22:05:58.497508192 +0200
+--- a/dynarec/dynarec_arm_private.h	2026-09-12 12:36:28.484293727 +0200
++++ b/dynarec/dynarec_arm_private.h	2026-09-12 12:36:28.538294851 +0200
 @@ -115,6 +115,62 @@
      int                 forward_ninst;  // ninst at the forward point
      uint8_t             always_test;
@@ -5614,7 +5645,7 @@ diff -ruN a/dynarec/dynarec_arm_private.h b/dynarec/dynarec_arm_private.h
  void add_next(dynarec_arm_t *dyn, uintptr_t addr);
 diff -ruN a/dynarec/dynarec_arm_signtag.h b/dynarec/dynarec_arm_signtag.h
 --- a/dynarec/dynarec_arm_signtag.h	1970-01-01 01:00:00.000000000 +0100
-+++ b/dynarec/dynarec_arm_signtag.h	2026-09-07 22:05:58.498508214 +0200
++++ b/dynarec/dynarec_arm_signtag.h	2026-09-12 12:36:28.538294851 +0200
 @@ -0,0 +1,139 @@
 +#ifndef __DYNAREC_ARM_SIGNTAG_H_
 +#define __DYNAREC_ARM_SIGNTAG_H_
@@ -5756,8 +5787,8 @@ diff -ruN a/dynarec/dynarec_arm_signtag.h b/dynarec/dynarec_arm_signtag.h
 +
 +#endif /* __DYNAREC_ARM_SIGNTAG_H_ */
 diff -ruN a/emu/x86emu_private.h b/emu/x86emu_private.h
---- a/emu/x86emu_private.h	2026-09-07 22:05:58.482507862 +0200
-+++ b/emu/x86emu_private.h	2026-09-07 22:05:58.498508214 +0200
+--- a/emu/x86emu_private.h	2026-09-12 12:36:28.525294580 +0200
++++ b/emu/x86emu_private.h	2026-09-12 12:36:28.539294872 +0200
 @@ -42,7 +42,10 @@
      uint32_t    jmpbuf_ready:1;   // the jmpbuf in the emu is ok and don't need refresh
  } emu_flags_t;
@@ -5804,8 +5835,8 @@ diff -ruN a/emu/x86emu_private.h b/emu/x86emu_private.h
  
  #define EMUTYPE_NONE    0
 diff -ruN a/emu/x86run_private.h b/emu/x86run_private.h
---- a/emu/x86run_private.h	2026-09-07 22:05:58.483507884 +0200
-+++ b/emu/x86run_private.h	2026-09-07 22:05:58.498508214 +0200
+--- a/emu/x86run_private.h	2026-09-12 12:36:28.526294601 +0200
++++ b/emu/x86run_private.h	2026-09-12 12:36:28.539294872 +0200
 @@ -2,6 +2,7 @@
  #define __X86RUN_PRIVATE_H_
  
@@ -5832,8 +5863,8 @@ diff -ruN a/emu/x86run_private.h b/emu/x86run_private.h
  
  #if 0
 diff -ruN a/include/dynablock.h b/include/dynablock.h
---- a/include/dynablock.h	2026-09-07 22:05:58.478507774 +0200
-+++ b/include/dynablock.h	2026-09-07 22:05:58.498508214 +0200
+--- a/include/dynablock.h	2026-09-12 12:36:28.523294539 +0200
++++ b/include/dynablock.h	2026-09-12 12:36:28.539294872 +0200
 @@ -5,10 +5,15 @@
  typedef struct dynablock_s dynablock_t;
  typedef struct kh_dynablocks_s  kh_dynablocks_t;
@@ -5853,8 +5884,8 @@ diff -ruN a/include/dynablock.h b/include/dynablock.h
  void FreeInvalidDynablock(dynablock_t* db, int need_lock);
  dynablock_t* InvalidDynablock(dynablock_t* db, int need_lock);
 diff -ruN a/include/dynarec_arm.h b/include/dynarec_arm.h
---- a/include/dynarec_arm.h	2026-09-07 22:05:58.480507818 +0200
-+++ b/include/dynarec_arm.h	2026-09-07 22:05:58.499508236 +0200
+--- a/include/dynarec_arm.h	2026-09-12 12:36:28.524294559 +0200
++++ b/include/dynarec_arm.h	2026-09-12 12:36:28.539294872 +0200
 @@ -5,7 +5,7 @@
  typedef struct x86emu_s x86emu_t;
  typedef struct instsize_s instsize_t;
