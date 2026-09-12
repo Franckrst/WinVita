@@ -194,41 +194,76 @@ unsigned int dyn86_jit_cur = 0;   /* bytes in VM (PROT_EXEC) blocks */
  *     equivalente a l'existant, sans la competition.
  * Si la reservation echoue, on retombe sur l'ancien chemin bloc-par-bloc :
  * aucune regression possible. */
-static void*  g_jitpool      = 0;
-static size_t g_jitpool_size = 0, g_jitpool_used = 0;
-static SceUID g_jitpool_uid  = -1;
-static int    g_jitpool_tried = 0;
-unsigned int  dyn86_jitpool_size = 0, dyn86_jitpool_used = 0;   /* pour la jauge */
+unsigned int  dyn86_jitpool_size = 0, dyn86_jitpool_used = 0;   /* pour la jauge, somme des segments */
 unsigned int dyn86_rw_cur  = 0;   /* bytes in plain RW blocks */
 
-/* Reservation de la piscine, au premier mmap PROT_EXEC (defaut 16 Mo,
- * WX86_JITPOOL_MB/D2_JITPOOL_MB pour changer). ⚡ 12/09 : un bloc ForVM plus
- * grand (teste a 17 et 29 Mo, voie 5.2 de jit_budget_20260908.md) est refuse
- * par le noyau (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio
- * est un PLAFOND NOYAU par bloc VM, pas un choix de ce projet. Voir
- * docs/audit/repartition_ram_20260912.md. */
-static void jitpool_reserve(unsigned default_mb) {
-    if (g_jitpool_tried) return;
-    g_jitpool_tried = 1;
-    const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
-    size_t want = (size_t)((e ? (unsigned)atoi(e) : default_mb)) << 20;
-    if (!want) return;
+/* Piscine JIT en PLUSIEURS SEGMENTS de 16 Mio. ⚡ 12/09 : un bloc
+ * sceKernelAllocMemBlockForVM plus grand (teste a 17 et 29 Mo, voie 5.2 de
+ * jit_budget_20260908.md) est refuse par le noyau (sce=0x80024B0B,
+ * SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio est un PLAFOND NOYAU PAR BLOC
+ * VM, pas un choix de ce projet. Un seul bloc plus gros n'existe donc pas ;
+ * plusieurs blocs de 16 Mio, si. Sur par construction : verifie le 13/09
+ * (dynarec_arm_jmpnext.c: CreateJmpNext = LDR_literal+BX ; D2_CALLRET
+ * (dynarec_arm_helper.c: ret_to_epilog/retn_to_epilog) = BX apres
+ * verification ou table de sauts + BX) — TOUTE liaison entre blocs traduits
+ * est un branchement INDIRECT sur adresse 32 bits complete, jamais un B/BL
+ * direct a portee limitee. L'eloignement entre segments ne coute donc rien :
+ * meme instruction, meme cout, que la cible soit a cote ou a l'autre bout de
+ * l'espace d'adressage. Voir docs/audit/repartition_ram_20260912.md.
+ *
+ * WX86_JITPOOL_MB/D2_JITPOOL_MB = taille de CHAQUE segment (plafonnee a 16,
+ * au-dela le noyau refuse de toute facon). WX86_JITPOOL_SEGS/D2_JITPOOL_SEGS
+ * = nombre de segments vises (defaut 2, donc 32 Mio de piscine totale). Un
+ * segment est ouvert PARESSEUSEMENT, seulement quand le precedent est plein —
+ * jamais tous d'un coup au boot. */
+#define JITPOOL_MAX_SEGS 8
+typedef struct { void* base; size_t size, used; SceUID uid; } JitSeg;
+static JitSeg    g_jitseg[JITPOOL_MAX_SEGS];
+static int       g_jitseg_n = 0;          /* segments reellement ouverts */
+static unsigned  g_jitseg_cap_mb = 0;     /* taille visee par segment, 0 = pas encore lu */
+static unsigned  g_jitseg_max = 0;        /* nombre de segments vises */
+static int       g_jitseg_refused = 0;    /* un essai a echoue : on arrete d'en demander */
+
+/* Tente d'ouvrir UN segment de plus. Rend 0 sans toucher au noyau si le
+ * plafond configure est deja atteint OU si un essai precedent a deja
+ * echoue (pas de martelage du noyau a chaque nouveau bloc PROT_EXEC). */
+static int jitpool_grow(void) {
+    if (g_jitseg_refused) return 0;
+    if (!g_jitseg_cap_mb) {
+        const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
+        unsigned mb = e ? (unsigned)atoi(e) : 16u;
+        if (mb > 16u) mb = 16u;   /* plafond noyau par bloc VM, mesure le 12/09 */
+        g_jitseg_cap_mb = mb ? mb : 16u;
+        const char* es = getenv("WX86_JITPOOL_SEGS"); if (!es) es = getenv("D2_JITPOOL_SEGS");
+        unsigned segs = es ? (unsigned)atoi(es) : 2u;
+        if (segs < 1) segs = 1;
+        if (segs > JITPOOL_MAX_SEGS) segs = JITPOOL_MAX_SEGS;
+        g_jitseg_max = segs;
+    }
+    if (g_jitseg_n >= (int)g_jitseg_max) return 0;
+    size_t want = (size_t)g_jitseg_cap_mb << 20;
     SceUID u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
     void* pb = 0;
-    if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) {
-        g_jitpool = pb; g_jitpool_size = want; g_jitpool_uid = u;
-        dyn86_jitpool_size = (unsigned int)want;
-    } else if (u >= 0) { sceKernelFreeMemBlock(u); }
+    if (u < 0 || sceKernelGetMemBlockBase(u, &pb) < 0 || !pb) {
+        if (u >= 0) sceKernelFreeMemBlock(u);
+        g_jitseg_refused = 1;
+        char m[176];
+        snprintf(m, sizeof m,
+            "JIT: segment %d/%u de %u Mo REFUSE (sce=0x%08x) — piscine figee a %u Mo, repli bloc-par-bloc au-dela",
+            g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)u, dyn86_jitpool_size >> 20);
+        wx86_vita_progress_c(m);
+        return 0;
+    }
+    g_jitseg[g_jitseg_n].base = pb; g_jitseg[g_jitseg_n].size = want; g_jitseg[g_jitseg_n].used = 0;
+    g_jitseg[g_jitseg_n].uid = u;
+    ++g_jitseg_n;
+    dyn86_jitpool_size += (unsigned int)want;
     { char m[176];
-        if (g_jitpool)
-            snprintf(m, sizeof m,
-                "JIT: piscine de %u Mo reservee (sous-allocation ; le tas ne peut plus l'affamer)",
-                (unsigned)(want >> 20));
-        else
-            snprintf(m, sizeof m,
-                "JIT: piscine de %u Mo REFUSEE (sce=0x%08x) — repli bloc-par-bloc (ancien comportement)",
-                (unsigned)(want >> 20), (unsigned)u);
+        snprintf(m, sizeof m,
+            "JIT: segment %d/%u de %u Mo reserve (piscine totale %u Mo ; le tas ne peut plus l'affamer)",
+            g_jitseg_n, g_jitseg_max, g_jitseg_cap_mb, dyn86_jitpool_size >> 20);
         wx86_vita_progress_c(m); }
+    return 1;
 }
 
 static Blk* blk_find(const void* p) {
@@ -319,20 +354,25 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 errno = ENOMEM; return MAP_FAILED;
             }
         }
-        /* --- piscine : reserver une fois, puis sous-allouer --- */
-        if (!g_jitpool_tried) jitpool_reserve(16u);
-        if (g_jitpool && g_jitpool_used + size <= g_jitpool_size) {
-            void* p = (char*)g_jitpool + g_jitpool_used;
-            g_jitpool_used += size;
-            dyn86_jitpool_used = (unsigned int)g_jitpool_used;
-            dyn86_jit_cur += (unsigned int)size;
-            g_blk[slot].base = p;   g_blk[slot].size = size;
-            g_blk[slot].uid  = g_jitpool_uid;   /* uid de la PISCINE : requis par le sync VM */
-            g_blk[slot].vm   = 1;
-            g_blk[slot].pool = 1;              /* ne PAS rendre au noyau au munmap */
-            pthread_mutex_unlock(&g_blk_mx);
-            dyn86_vita_open_vm_thread();
-            return p;
+        /* --- piscine : segments de 16 Mio, on grandit a la demande --- */
+        {
+            JitSeg* s = (g_jitseg_n > 0) ? &g_jitseg[g_jitseg_n - 1] : 0;
+            if (!(s && s->used + size <= s->size)) {
+                s = jitpool_grow() ? &g_jitseg[g_jitseg_n - 1] : 0;
+            }
+            if (s && s->used + size <= s->size) {
+                void* p = (char*)s->base + s->used;
+                s->used += size;
+                dyn86_jitpool_used += (unsigned int)size;
+                dyn86_jit_cur += (unsigned int)size;
+                g_blk[slot].base = p;   g_blk[slot].size = size;
+                g_blk[slot].uid  = s->uid;   /* uid du SEGMENT : requis par le sync VM */
+                g_blk[slot].vm   = 1;
+                g_blk[slot].pool = 1;              /* ne PAS rendre au noyau au munmap */
+                pthread_mutex_unlock(&g_blk_mx);
+                dyn86_vita_open_vm_thread();
+                return p;
+            }
         }
         uid = sceKernelAllocMemBlockForVM("dyn86_jit", size);
     } else {
