@@ -46,7 +46,7 @@ Deux choix de fond :
   rend visible la divergence réelle entre `WSOCK32.dll` et `WS2_32.dll` sur les
   ordinaux 10/11/12.
 
-## `tools/shim_seq.py` / `.sh` / `.allow`
+## `tools/shim_seq.py` / `.sh`
 
 Reconstruit la **séquence ordonnée** des shims Win32 (et hooks natifs)
 inscrits dans un binaire de boot, avec l'empreinte du corps de chaque
@@ -70,10 +70,12 @@ dépôt a effectuée sur lui-même plusieurs fois en se séparant de d2vita.
 Lancer `tools/shim_seq.sh` avant et après ; `OK` = rien n'a changé côté
 table effective.
 
-`tools/shim_seq.allow` documente les transitions de corps *explicitement*
-attendues (clé, empreinte avant, empreinte après, raison) quand un
-changement de comportement est volontaire — jamais un blanc-seing, une
-dérive ultérieure de la même clé redevient fatale.
+Un fichier passé via `ALLOW_BODY=<fichier>` documente les transitions de
+corps *explicitement* attendues (clé, empreinte avant, empreinte après)
+quand un changement de comportement est volontaire — jamais un
+blanc-seing, une dérive ultérieure de la même clé redevient fatale. Rien
+n'impose son nom ni son emplacement : ce n'est pas un fichier `.allow` fixe
+versionné dans le dépôt.
 
 ## `tools/extract_box86.sh` / `tools/regen_box86_patch.sh`
 
