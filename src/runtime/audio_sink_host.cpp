@@ -71,7 +71,7 @@ private:
     }
     char  path_[256] = {0};
     FILE* f_ = nullptr;
-    int   freq_ = 22050, ch_ = 2;
+    int   freq_ = 0, ch_ = 2;      // posés par open(), jamais devinés ici
     uint32_t data_ = 0, lastHdr_ = 0;
 };
 

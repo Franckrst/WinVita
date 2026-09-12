@@ -25,10 +25,17 @@ namespace d2rt { namespace dsound {
 namespace {
 
 // ---- constantes du flux ----------------------------------------------------
-// TOUS les WAV de D2 1.14d sont à 22050 Hz (recensement exhaustif des 4412
-// fichiers des cinq MPQ audio : aucune autre fréquence). Le puits BGM de la
-// Vita accepte 22050 : AUCUN rééchantillonnage sur le chemin par défaut.
-constexpr int kRate  = 22050;
+// FRÉQUENCE DU FLUX MÉLANGÉ. Elle n'est PLUS une constante : c'est l'embarqueur
+// qui la donne (HostOps::mix_rate), parce que c'est une propriété de SON jeu —
+// la fréquence à laquelle ses échantillons ne demandent aucun rééchantillonnage.
+// Elle valait 22050 en dur jusqu'au 2026-09-12, le chiffre du premier
+// consommateur ; 0 ici veut dire « personne ne l'a dite », et install() refuse
+// alors de s'armer plutôt que de deviner (voir ds_emul.h HostOps::mix_rate).
+//
+// kRate n'est jamais une borne de tableau (seul kGrain l'est) : le passage de
+// constexpr à variable ne change aucune taille, seulement des divisions par un
+// entier chargé au lieu d'un entier immédiat, hors boucle de trame.
+int kRate = 0;
 constexpr int kOutCh = 2;
 constexpr int kGrain = 512;          // 23,2 ms — 43 réveils/s, ~46 ms de latence
 
@@ -928,6 +935,9 @@ void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
     if (g_installed) return;
     g_installed = true;
     g_ops = ops;
+    // LA FREQUENCE VIENT DE L'APPELANT. Posee ici, avant tout ce qui la lit
+    // (g_maxFrames plus bas, l'ouverture du puits, le pas de rechantillonnage).
+    kRate = ops.mix_rate;
 
     // Reglages : nom du moteur d'abord, ancien nom du portage en repli. Meme
     // convention que le reste du moteur (gil.cpp, cpu_box86.cpp) — les scripts
@@ -942,6 +952,14 @@ void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
     // SON=0 reste MAITRE : il eteint tout, SONDUMP present ou non.
     g_on  = (k && *k) ? (std::strcmp(k, "0") != 0)
                       : (dump0 && *dump0);
+    // Un socle arme SANS frequence ne peut que jouer a la mauvaise hauteur.
+    // Le moteur ne devine pas : il refuse, et il le DIT (un knob qui ne fait
+    // pas ce qu'il annonce coute une soiree — cf. le cas SONDUMP ci-dessus).
+    if (g_on && kRate <= 0) {
+        jpline("[son] REFUS : HostOps::mix_rate absent — socle DirectSound DESARME."
+               " La frequence d'echantillonnage appartient au jeu, pas au moteur.");
+        g_on = false;
+    }
     g_log = env2("WX86_SONLOG", "D2_SONLOG") != nullptr;
     if (const char* n = env2("WX86_SONVOICES", "D2_SONVOICES")) g_voiceCap = atoi(n);
     // Sous horloge virtuelle, 4000 images du banc valent ~4000 SECONDES de temps
@@ -1201,7 +1219,11 @@ int stat_line(char* out, unsigned n) {
 // Ni DirectSound, ni jeu, ni fil : une sinusoïde 440 Hz écrite dans un WAV, puis
 // le fichier RELU et vérifié. Sépare pour toujours « le puits marche » de
 // « l'émulation DirectSound marche ».
-int selftest(const char* path, int ms) {
+int selftest(const char* path, int ms, int rate) {
+    // Ce test n'installe rien : sa frequence ne peut donc pas venir du socle,
+    // elle vient de l'appelant, comme tout le reste depuis le 2026-09-12.
+    if (rate <= 0) { std::printf("=== [SONTEST] ECHEC: frequence non fournie\n"); return 2; }
+    kRate = rate;
     audio::Sink* s = audio::make_wav_sink(path);
     if (!s->open(kRate, kOutCh, kGrain)) { std::printf("=== [SONTEST] ECHEC: ouverture %s\n", path); delete s; return 2; }
     const int total = (int)((int64_t)ms * kRate / 1000);

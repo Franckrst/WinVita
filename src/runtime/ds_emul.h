@@ -32,6 +32,18 @@ struct HostOps {
     uint32_t (*va_alloc)(uint32_t n) = nullptr; // arène d'adresses invitées — les tampons PCM
     uint32_t (*tick_ms)(Cpu& c)    = nullptr;   // horloge INVITÉE en ms (timeGetTime)
     const char* write_root         = nullptr;   // dossier d'écriture de l'embarqueur
+    // FRÉQUENCE DU FLUX MÉLANGÉ, en Hz. Elle appartient au JEU : c'est la
+    // fréquence de ses échantillons, celle à laquelle le mélangeur n'a AUCUN
+    // rééchantillonnage à faire. Jusqu'au 2026-09-12 le socle imposait 22050 —
+    // le chiffre du premier consommateur — à tout le monde ; un jeu échantillonné
+    // ailleurs aurait joué à la mauvaise hauteur, en silence. C'est le MÊME
+    // défaut que celui corrigé au puits console (VitaSink::open recevait la
+    // fréquence et l'ignorait), à un autre étage.
+    //
+    // 0 = l'embarqueur ne l'a pas dite. Le socle REFUSE alors de s'armer et le
+    // dit : le moteur n'a pas d'opinion sur la fréquence d'un jeu, et un
+    // défaut choisi ici serait le chiffre d'un jeu imposé aux autres.
+    int mix_rate = 0;
 };
 
 // Journal. Le moteur est muet par construction : il ne connaît ni la console
@@ -97,6 +109,6 @@ int stat_line(char* out, unsigned n);
 // Auto-test du PUITS SEUL (D2_SONTEST=1) : une sinusoïde 440 Hz poussée dans un
 // puits WAV, puis le fichier RELU et vérifié. Sépare pour toujours « le puits
 // marche » de « l'émulation DirectSound marche ». Rend 0 si PASS.
-int selftest(const char* path, int ms);
+int selftest(const char* path, int ms, int rate);
 
 }} // namespace d2rt::dsound

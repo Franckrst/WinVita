@@ -62,5 +62,20 @@ else echo "   OK: vita_kb.h sans appel de sortie"; fi
 # aucun oracle ne pouvait l'exercer.
 run prof_map "$ROOT/tools/prof_map_selftest.cpp"
 
+# La frequence du melangeur : elle vient de l'appelant, plus d'une constante.
+# Le puits WAV et le socle DirectSound se compilent sur bureau, donc ce filet
+# fabrique deux fichiers a deux frequences et relit leurs en-tetes.
+# -Wno-* : ds_emul.cpp et audio_sink_host.cpp portent des avertissements de
+# STYLE anterieurs (indentation trompeuse, aide inutilisee). Les corriger ici
+# melangerait un nettoyage a un filet ; on les tait pour ce filet-la seulement.
+EXTRA="-Wno-misleading-indentation -Wno-unused-function" \
+run ds_rate "$ROOT/tools/ds_rate_selftest.cpp" \
+            "$ROOT/src/runtime/ds_emul.cpp" \
+            "$ROOT/src/runtime/audio_sink_host.cpp" \
+            "$ROOT/src/runtime/guest_scratch.cpp" \
+            "$ROOT/src/runtime/host_clock.cpp" \
+            "$ROOT/src/runtime/gil.cpp" \
+            "$ROOT/src/platform/vita_host.cpp"
+
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi
 exit "$fail"

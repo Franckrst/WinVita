@@ -20,9 +20,9 @@ namespace d2rt { namespace audio {
 
 struct Sink {
     virtual ~Sink() {}
-    // freq/channels du flux mélangé (22050/2 par construction : tous les WAV de
-    // D2 1.14d sont à 22050 Hz, recensement des 4412 fichiers). `grain` = trames
-    // par appel de write() ; le puits peut l'ignorer.
+    // freq/channels du flux mélangé, tels que l'EMBARQUEUR les a donnés
+    // (ds_emul.h HostOps::mix_rate) — le moteur n'en impose aucun. `grain` =
+    // trames par appel de write() ; le puits peut l'ignorer.
     virtual bool open(int freq, int channels, int grain) = 0;
     // PEUT BLOQUER (sceAudioOutOutput bloque ~23 ms). Jamais appelée avec le GIL.
     virtual void write(const int16_t* interleaved, int frames) = 0;
@@ -102,7 +102,9 @@ struct WavStats {
     int      top_hz = 0;        // fréquence de la raie dominante
     uint32_t windows = 0;       // fenêtres de 1024 points analysées
 };
+// want_rate = 0 : on ne vérifie PAS la fréquence (c'était 22050 par défaut,
+// le chiffre du premier consommateur, dans un en-tête générique).
 bool wav_check(const char* path, WavStats* st, char* report, unsigned n,
-               int want_rate = 22050);
+               int want_rate = 0);
 
 }} // namespace d2rt::audio
