@@ -23,10 +23,16 @@ namespace {
     d2rt::Bridge* g_natprof_bridge = nullptr;
 }
 
-// Journal lisible sur MATERIEL. Symbole FAIBLE : les outils hotes qui lient
-// bridge.cpp sans la couche plateforme le laissent nul — on teste avant
-// d'appeler (meme patron que cpu_box86.cpp:218 et sched_native.cpp:15).
-extern "C" { __attribute__((weak)) void d2vita_progress_c(const char* msg); }
+// JOURNAL DU MOTEUR. Le service appartient au moteur (platform/vita_host.h) :
+// sur console il ecrit la ligne durable, hors console il ne fait rien. L'appel
+// est DIRECT et en lien FORT — plus de reference faible a tester.
+//
+// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
+// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
+// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
+// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
+// de ses consommateurs.
+#include "platform/vita_host.h"
 extern "C" { extern uint32_t d2rt_timeprof_base; }   // base invitee (cpu_box86.cpp)
 
 namespace d2rt {
@@ -325,11 +331,11 @@ bool Bridge::commit(std::string& err) {
     // et aucun trap ne peut partir avant que set_trap ait ouvert la fenetre.
     trapcnt::base = trap_base_;
     { const char* w = std::getenv("WX86_WAKEPROF"); if (!w) w = std::getenv("D2_WAKEPROF"); d2rt_wakeprof = (w && *w && *w != '0') ? 1 : 0;
-      if (d2rt_wakeprof && d2vita_progress_c)
-          d2vita_progress_c("wakeprof: ARME — latence pthread_cond_signal -> reprise du fil"); }
+      if (d2rt_wakeprof)
+          wx86_vita_progress_c("wakeprof: ARME — latence pthread_cond_signal -> reprise du fil"); }
     { const char* e = std::getenv("WX86_NATPROF"); if (!e) e = std::getenv("D2_NATPROF"); d2rt_natprof = (e && *e && *e != '0') ? 1 : 0;
       g_natprof_bridge = this;
-      if (d2rt_natprof && d2vita_progress_c) d2vita_progress_c("natprof: ARME — temps par creneau publie par fenetre (cout ~5 %)"); }
+      if (d2rt_natprof) wx86_vita_progress_c("natprof: ARME — temps par creneau publie par fenetre (cout ~5 %)"); }
     committed_ = true;
     return true;
 }
@@ -397,7 +403,7 @@ bool Bridge::link(std::string& err) {
             std::snprintf(m, sizeof m, "[trap] %x  va=0x%08x  %s",
                           (unsigned)(sl.va - d2rt_timeprof_base), sl.va, sl.shim.tag.c_str());
             std::printf("%s\n", m);
-            if (d2vita_progress_c) d2vita_progress_c(m);
+            wx86_vita_progress_c(m);
         }
     }
     (void)err;
@@ -590,7 +596,7 @@ void Bridge::dump_trap_counts(int topn) const {
                   (unsigned long long)total, ord.size(),
                   slots_.size() > trapcnt::kMax ? " (TRONQUE: slots_ > trapcnt::kMax)" : "");
     std::printf("  %s\n", m);
-    if (d2vita_progress_c) d2vita_progress_c(m);
+    wx86_vita_progress_c(m);
     for (int k = 0; k < topn && k < (int)ord.size(); ++k) {
         const size_t i = ord[k];
         const char* t = slots_[i].tagc ? slots_[i].tagc : "?";
@@ -598,7 +604,7 @@ void Bridge::dump_trap_counts(int topn) const {
                       k + 1, (unsigned long long)trapcnt::hits[i],
                       total ? 100.0 * (double)trapcnt::hits[i] / (double)total : 0.0, t);
         std::printf("    %s\n", m);
-        if (d2vita_progress_c) d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
     }
     std::fflush(stdout);
 }
@@ -617,7 +623,7 @@ void Bridge::dump_tls_counts(int topn) const {
         std::snprintf(m, sizeof m,
             "tlscnt: RIEN A DIRE (build sans -DD2_TLSCOUNT, ou aucune traversee)");
         std::printf("  %s\n", m);
-        if (d2vita_progress_c) d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
         std::fflush(stdout);
         return;
     }
@@ -630,7 +636,7 @@ void Bridge::dump_tls_counts(int topn) const {
                   "tlscnt: %llu appels E() sur %llu traversees => %llu.%02llu par traversee",
                   (unsigned long long)total, (unsigned long long)traps, avg / 100ull, avg % 100ull);
     std::printf("  %s\n", m);
-    if (d2vita_progress_c) d2vita_progress_c(m);
+    wx86_vita_progress_c(m);
     for (int k = 0; k < topn && k < (int)ord.size(); ++k) {
         const size_t i = ord[k];
         const char* t = slots_[i].tagc ? slots_[i].tagc : "?";
@@ -641,7 +647,7 @@ void Bridge::dump_tls_counts(int topn) const {
                       (unsigned long long)slots_[i].tls_traps,
                       per / 100ull, per % 100ull, t);
         std::printf("    %s\n", m);
-        if (d2vita_progress_c) d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
     }
     std::fflush(stdout);
 }

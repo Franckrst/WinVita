@@ -23,11 +23,16 @@
 /* Registry of live blocks: munmap frees whole blocks by exact base (that is
  * the only pattern custommem.c uses), and the cache-sync needs base+uid. */
 #define DYN86_MAXBLK 256
-/* boot-progress logger (vita_present.cpp). Weak so any link without the
- * presentation layer still resolves; guarded at each call site. An alloc
- * failure MUST reach boot_progress.txt: on hardware there is no stderr and a
- * silent MAP_FAILED looks like "the app closes at launch" (2026-08-24). */
-__attribute__((weak)) void d2vita_progress_c(const char* msg);
+/* JOURNAL DU MOTEUR (platform/vita_host.h). Declare ICI et non par inclusion :
+ * cette unite est du C, l'en-tete est du C++. Reference FORTE — le symbole est
+ * defini par la meme bibliotheque, sous la meme garde de cible.
+ *
+ * Avant : une reference FAIBLE vers `d2vita_progress_c`, le nom du PREMIER
+ * consommateur, testee a chaque appel. Un portage au prefixe different
+ * n'obtenait RIEN, sans erreur de lien. Un echec d'allocation DOIT atteindre le
+ * journal : sur materiel il n'y a pas de stderr, et un MAP_FAILED silencieux se
+ * lit « l'application se ferme au lancement » (2026-08-24). */
+void wx86_vita_progress_c(const char* msg);
 /* `pool` : sous-bloc de la piscine JIT. L'uid reste celui de la PISCINE — la
  * synchronisation du domaine VM (dyn86_vita_clear_cache) en a besoin, et un
  * uid bidon y faisait echouer le sync : le code emis ne devenait jamais
@@ -143,7 +148,7 @@ void dyn86_vita_open_vm_thread(void) {
     static int announced = 0;   /* one line for the console log, first thread only */
     if (!announced) {
         announced = 1;
-        if (d2vita_progress_c) {
+        {
             /* Estampille dans LES DEUX SENS (doctrine : jamais de changement
              * de mode silencieux) — un journal dit toujours quel mode a
              * tourne. Libelle conditionnel (review) : un rc<0 ne doit pas se
@@ -154,9 +159,9 @@ void dyn86_vita_open_vm_thread(void) {
                                        : "vm-domain: BRACKET DESACTIVE (D2_VMBRACKET=0) - mode legacy open-unique EN ECHEC (premier rc=0x%08x)")
                             : (bracket ? "vm-domain: BRACKET close+open arme (premier rc=0x%08x)"
                                        : "vm-domain: BRACKET DESACTIVE (D2_VMBRACKET=0) - mode legacy open-unique (premier rc=0x%08x)"), (unsigned)rc);
-            d2vita_progress_c(m);
+            wx86_vita_progress_c(m);
         }
-    } else if (rc < 0 && d2vita_progress_c) {
+    } else if (rc < 0) {
         /* a per-thread failure is exactly the crash we are fixing: say it */
         char m[160];
         if (bracket)
@@ -165,7 +170,7 @@ void dyn86_vita_open_vm_thread(void) {
         else
             snprintf(m, sizeof m, "vm-domain: [legacy D2_VMBRACKET=0] OpenVMDomain rc=0x%08x sur un fil ecrivain JIT",
                      (unsigned)rc);
-        d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
     }
 }
 /* Live JIT (VM) and RW bytes held by this façade. Exposed (non-static) so the
@@ -267,20 +272,20 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
             if (res_kb && sceKernelGetFreeMemorySize(&fi) >= 0 &&
                 (long)(fi.size_user >> 10) - (long)(size >> 10) < (long)res_kb) {
                 pthread_mutex_unlock(&g_blk_mx);
-                if (!said2 && d2vita_progress_c) { said2 = 1; char m[160];
+                if (!said2) { said2 = 1; char m[160];
                     snprintf(m, sizeof m,
                         "JIT BRIDE : reserve systeme atteinte (libre %d Ko, plancher %u Ko) — interpretation en repli, voir fail=",
                         (int)(fi.size_user >> 10), res_kb);
-                    d2vita_progress_c(m); }
+                    wx86_vita_progress_c(m); }
                 errno = ENOMEM; return MAP_FAILED;
             }
             if (cap_mb && dyn86_jit_cur + size > (size_t)cap_mb << 20) {
                 pthread_mutex_unlock(&g_blk_mx);
-                if (!said && d2vita_progress_c) { said = 1; char m[152];
+                if (!said) { said = 1; char m[152];
                     snprintf(m, sizeof m,
                         "JIT PLAFONNE a %u Mo (en cours %u Mo) — interpretation en repli, voir fail= ; D2_JITMAX_MB pour changer",
                         cap_mb, (unsigned)(dyn86_jit_cur >> 20));
-                    d2vita_progress_c(m); }
+                    wx86_vita_progress_c(m); }
                 errno = ENOMEM; return MAP_FAILED;
             }
         }
@@ -296,12 +301,12 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                     g_jitpool = pb; g_jitpool_size = want; g_jitpool_uid = u;
                     dyn86_jitpool_size = (unsigned int)want;
                 } else if (u >= 0) { sceKernelFreeMemBlock(u); }
-                if (d2vita_progress_c) { char m[144];
+                { char m[144];
                     snprintf(m, sizeof m, g_jitpool
                         ? "JIT: piscine de %u Mo reservee (sous-allocation ; le tas ne peut plus l'affamer)"
                         : "JIT: piscine de %u Mo REFUSEE — repli bloc-par-bloc (ancien comportement)",
                         (unsigned)(want >> 20));
-                    d2vita_progress_c(m); }
+                    wx86_vita_progress_c(m); }
             }
         }
         if (g_jitpool && g_jitpool_used + size <= g_jitpool_size) {
@@ -325,7 +330,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
     }
     if (uid < 0) {
         pthread_mutex_unlock(&g_blk_mx);
-        if (d2vita_progress_c) {
+        {
             SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
             int frc = sceKernelGetFreeMemorySize(&fi);
             char m[144];
@@ -334,16 +339,16 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                      frc < 0 ? -1 : fi.size_user >> 10,
                      frc < 0 ? -1 : fi.size_cdram >> 10,
                      frc < 0 ? -1 : fi.size_phycont >> 10);
-            d2vita_progress_c(m);
+            wx86_vita_progress_c(m);
         }
         errno = ENOMEM; return MAP_FAILED;
     }
     if (vm) dyn86_jit_cur += (unsigned int)size; else dyn86_rw_cur += (unsigned int)size;
-    if (size >= (64u << 20) && d2vita_progress_c) {   /* big blocks: confirm on HW */
+    if (size >= (64u << 20)) {   /* big blocks: confirm on HW */
         char m[96];
         snprintf(m, sizeof m, "memblock %s %u MB ok (uid=0x%08x)",
                  vm ? "VM" : "RW", (unsigned)(size >> 20), (unsigned)uid);
-        d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
     }
 
     void* base = 0;

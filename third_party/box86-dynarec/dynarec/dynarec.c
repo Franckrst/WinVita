@@ -56,7 +56,9 @@ void dyn86_dump_xfer(void)
     for(int k=0;k<64;k++){ int i=(g_xfi+k)&63; if(g_xf[i][0]||g_xf[i][1])
         printf_log(LOG_NONE, "  [xfer] %08x -> %08x  esp=%08x\n", g_xf[i][0], g_xf[i][1], g_xf[i][2]); }
 }
-__attribute__((weak)) void d2vita_progress_c(const char* msg);
+/* Journal du moteur (src/platform/vita_host.h) : reference FORTE, meme
+ * bibliotheque. Portait le prefixe du premier consommateur en lien faible. */
+void wx86_vita_progress_c(const char* msg);
 // D2Vita eiptrap silent ring: every chain to dyn86_eiptrap records the live
 // register file here (no I/O — printing at the race window suppresses the race);
 // dyn86_dump_eipring() is called by rt_boot's Crash.txt hook at a Fog Halt.
@@ -72,7 +74,7 @@ void dyn86_dump_eipring(void)
                  R[0]&0x7FFFFFFFu,(R[0]&0x80000000u)?"B":"A",R[1],R[2],R[3],R[4],R[5],R[6],R[7],R[8],R[9],
                  R[10],R[11],R[12],R[13],R[14],R[15]);
         fprintf(stderr, "%s\n", m);
-        if(d2vita_progress_c) d2vita_progress_c(m);
+        wx86_vita_progress_c(m);
     }
     fflush(stderr);
 }
@@ -136,7 +138,7 @@ void* LinkNext(x86emu_t* emu, uintptr_t addr, void* x2)
                      hits, (uint32_t)addr, db?(uint32_t)(uintptr_t)db->x86_addr:0, ret0,
                      R_EAX, R_ECX, R_EDX, R_EBX, R_ESI, R_EDI, esp, R_EBP);
             fprintf(stderr, "%s\n", m);
-            if(d2vita_progress_c) d2vita_progress_c(m);
+            wx86_vita_progress_c(m);
             if(getProtection((uintptr_t)esp) && getProtection((uintptr_t)esp+28)) {
                 uint32_t* s = (uint32_t*)DYN86_G2H(esp);
                 fprintf(stderr, "  [stack] %08x %08x %08x %08x %08x %08x %08x %08x\n",

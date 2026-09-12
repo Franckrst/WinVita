@@ -344,11 +344,21 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
 // identity). The guest keeps its validated D2 layout; host pages live at
 // va+g_mb — the exact Vita memory model (memblock VAs are kernel-assigned).
 // g_mb defined above (forward-declared before diag_segv); initialized here.
-// Boot-progress logger (vita_present.cpp); weak so the qemu build links
-// without it. A fatal early exit MUST leave a line in boot_progress.txt — on
-// hardware there is no stderr and a silent _exit reads as "the app closes at
-// launch" (2026-08-24 HW report: death right at the compact-arena alloc).
-extern "C" { __attribute__((weak)) void d2vita_progress_c(const char* msg); }
+// JOURNAL DU MOTEUR. Une sortie fatale precoce DOIT laisser une ligne : sur
+// materiel il n'y a pas de stderr, et un _exit silencieux se lit
+// « l'application se ferme au lancement » (rapport HW 2026-08-24 : mort pile a
+// l'allocation de l'arene compacte).
+//
+// Le service appartient au moteur (platform/vita_host.h) : sur console il ecrit
+// la ligne durable, hors console il ne fait rien. L'appel est DIRECT et en lien
+// FORT — plus de reference faible a tester.
+//
+// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
+// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
+// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
+// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
+// de ses consommateurs.
+#include "platform/vita_host.h"
 static inline void* H(uint32_t va) { return (void*)((uintptr_t)va + g_mb); }
 // C11 (deep review 2026-08-25): evaluated LAZILY, not as a pre-main static —
 // on Vita the knob arrives via env.txt which platform_init applies AFTER static
@@ -377,9 +387,9 @@ static inline bool arena_check(uint32_t va, uint32_t n, const char* what) {
     if ((uint64_t)va + n <= (uint64_t)g_arena_span) return true;
     if (++g_arenaViol <= 64) {
         fprintf(stderr, "[cpu_box86] C3 OUT-OF-ARENA %s va=0x%08x n=%u span=0x%08x\n", what, va, n, g_arena_span);
-        if (d2vita_progress_c) { char m[128];
+        { char m[128];
             snprintf(m, sizeof m, "C3: acces hors arene %s va=%08x n=%u (span=%08x)", what, va, n, g_arena_span);
-            d2vita_progress_c(m); }
+            wx86_vita_progress_c(m); }
     }
     return false;
 }
@@ -531,9 +541,9 @@ public:
             if (v >= 1 && v <= 1024) g_b5scale = (uint32_t)v;
         }
 #endif
-        if (g_noEmuOpt && d2vita_progress_c)   // symbole FAIBLE : tester avant d'appeler
-            d2vita_progress_c("emutls: OPTIMISATIONS DESACTIVEES (D2_NOEMUOPT=1) — "
-                              "E() resolu a chaque acces, t_fault_addr reecrit par trap");
+        if (g_noEmuOpt)
+            wx86_vita_progress_c("emutls: OPTIMISATIONS DESACTIVEES (D2_NOEMUOPT=1) — "
+                                 "E() resolu a chaque acces, t_fault_addr reecrit par trap");
         if (const char* as = getenv("D2ARENA")) {
             uint64_t sz = strtoull(as, nullptr, 16);
             // Page-granular size: only the guest->host DELTA needs 16 MiB
@@ -597,10 +607,10 @@ public:
                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
             if (blk == MAP_FAILED) { fprintf(stderr, "[cpu_box86] D2ARENA mmap %llx failed\n",
                                              (unsigned long long)sz);
-                if (d2vita_progress_c) { char m[112];
+                { char m[112];
                     snprintf(m, sizeof m, "FATAL: arena alloc failed (%llu MB) — see the mmap FAIL line above",
                              (unsigned long long)(sz >> 20));
-                    d2vita_progress_c(m); }
+                    wx86_vita_progress_c(m); }
                 _exit(2); }
             // membase must have zero low 24 bits (single-ADD imm8-ror-8). mmap is
             // page-aligned; round the *guest→host delta* up to 16 MiB and rely on
@@ -617,11 +627,11 @@ public:
             // Rendre le gachis d'alignement VISIBLE : c'est lui qu'on cherche a
             // supprimer, et sans ce releve on ne saurait pas s'il a coute 0 ou
             // 16 Mio sur ce lancement.
-            if (d2vita_progress_c) { char m[152];
+            { char m[152];
                 snprintf(m, sizeof m, "arene: base=%p membase=%p span=%u Mo reserve=%llu Mo perdu-alignement=%u Ko",
                          (void*)base, (void*)g_mb, (unsigned)(g_arena_span>>20),
                          (unsigned long long)(sz>>20), (unsigned)((g_mb-base)>>10));
-                d2vita_progress_c(m); }
+                wx86_vita_progress_c(m); }
             dyn86_set_membase(g_mb);
             // Meme etendue pour le garde-fou des intrinseques memcpy/memset
             // (dyn86_memintrin.h) : le helper natif ecrit en memoire invitee
@@ -1092,7 +1102,7 @@ public:
         // gratuite ; et elle CRIE au lieu de deriver.
         if (e && !g_multi_emu.load(std::memory_order_relaxed)) {
             std::fprintf(stderr, "FATAL: thread_emu_bind(non nul) sans thread_emu_create — invariant E() rompu\n");
-            if (d2vita_progress_c) d2vita_progress_c("FATAL: invariant E() rompu (bind sans create)");
+            wx86_vita_progress_c("FATAL: invariant E() rompu (bind sans create)");
             std::abort();
         }
         t_emu = (x86emu_t*)e;

@@ -2,9 +2,16 @@
 #include "runtime/sched_cooperative.h"
 #include "runtime/prof.h"
 
-// Boot-progress logger (vita_present.cpp); weak so the qemu link resolves it to
-// null and the call is skipped. Durable channel on the console (no stderr).
-extern "C" __attribute__((weak)) void d2vita_progress_c(const char* msg);
+// JOURNAL DU MOTEUR. Le service appartient au moteur (platform/vita_host.h) :
+// sur console il ecrit la ligne durable, hors console il ne fait rien. L'appel
+// est DIRECT et en lien FORT — plus de reference faible a tester.
+//
+// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
+// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
+// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
+// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
+// de ses consommateurs.
+#include "platform/vita_host.h"
 extern "C" uint32_t d2rt_sw_seq = 0;   // C-visible scheduler event counter (dynarec eipring timestamps)
 
 #include <cstdio>
@@ -90,7 +97,7 @@ GuestThread* CooperativeScheduler::create_thread(uint32_t entry, uint32_t param,
             std::fprintf(stderr, "[sched] WARNING worker stacks (%u threads) reached the TIB region 0x%08x — long-session overrun risk\n",
                          next_id_, tib_region_);
             char m[128]; std::snprintf(m, sizeof m, "SCHED: %u threads, worker stacks reached TIB 0x%08x (overrun risk)", next_id_, tib_region_);
-            if (d2vita_progress_c) d2vita_progress_c(m);
+            wx86_vita_progress_c(m);
         }
         cpu_->map(sbase, ssize, nullptr, P_RW);
     }
