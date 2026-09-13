@@ -221,6 +221,14 @@ private:
     std::map<std::string, uint32_t> slot_by_tag_;  // tag → trap va
 
     uint32_t next_base_ = 0x30000000;   // module load bases grow from here
+    uint32_t module_limit_ = 0;         // 0 = pas de borne ; sinon fin EXCLUE de la fenetre modules
+public:
+    // Borne haute de la fenetre des modules auto-places. Un module qui la
+    // depasserait est REFUSE (add_module rend null + err) au lieu d'etre pose
+    // par-dessus la region voisine du plan memoire de l'hote — ce qui, le
+    // 2026-09-13, ecrasait en silence les talons de rappel invites.
+    void set_module_limit(uint32_t end) { module_limit_ = end; }
+private:
     uint32_t trap_base_ = 0x7F000000;   // native-thunk window
     uint32_t trap_next_ = 0x7F000000;
     uint32_t trap_hi_   = 0x7F100000;

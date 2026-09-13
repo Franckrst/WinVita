@@ -332,7 +332,7 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
     // readable in the host address space. Env D2_CODELO/HI override the range.
     if (e) {   // g_mb may be 0 (identity mmap) — gesp+g_mb is still the host ptr
         uint32_t gesp = e->regs[4].dword[0];
-        uint32_t lo = 0x01900000, hi = 0x02100000;   // compact-layout module window (forced-reloc Game.exe, 2026-08-25 squeeze); override via D2_CODELO/HI
+        uint32_t lo = 0x01900000, hi = 0x02200000;   // compact-layout module window (9 MiB depuis le 13/09) (forced-reloc Game.exe, 2026-08-25 squeeze); override via D2_CODELO/HI
         if (const char* s = getenv("WX86_CODELO") ? getenv("WX86_CODELO") : getenv("D2_CODELO")) lo = (uint32_t)strtoul(s, nullptr, 16);
         if (const char* s = getenv("WX86_CODEHI") ? getenv("WX86_CODEHI") : getenv("D2_CODEHI")) hi = (uint32_t)strtoul(s, nullptr, 16);
         const uint32_t* gs = (const uint32_t*)(uintptr_t)(gesp + g_mb);

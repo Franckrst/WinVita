@@ -214,6 +214,13 @@ PeImage* Bridge::add_module(const std::string& key, const std::vector<uint8_t>& 
         }
     }
     if (!img->load(bytes, base, err)) return nullptr;
+    if (!keepBase && module_limit_ && (uint64_t)base + img->image_size() > module_limit_) {
+        char m[160];
+        std::snprintf(m, sizeof m, "module window full: %s needs 0x%08x..0x%08x, limit 0x%08x",
+                      key.c_str(), base, (unsigned)(base + img->image_size()), module_limit_);
+        err = m;
+        return nullptr;
+    }
     if (!keepBase) {
         // Advance next_base_ past this image (page aligned, 64 KiB gap).
         next_base_ = (base + img->image_size() + 0xFFFFu) & ~0xFFFFu;

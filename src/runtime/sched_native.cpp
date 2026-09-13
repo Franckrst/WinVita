@@ -576,15 +576,32 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
         // diagnostic qui se tait au moment ou on en a le plus besoin. Le pont
         // connait la base et la taille de chaque module charge : on lui
         // demande, et le dump dit lequel.
+        // Tout ce bloc passe AUSSI par progress() : sur Vita stdout n'existe pas,
+        // et le 2026-09-13 un plantage console n'a laisse que la ligne resume
+        // ci-dessous — ni registres, ni pile, ni module fautif.
         { uint32_t esp = cpu_->reg(R_ESP);
           const std::vector<std::pair<uint32_t,uint32_t>> mods =
               br_ ? br_->loaded_modules() : std::vector<std::pair<uint32_t,uint32_t>>();
+          char l[160];
+          std::snprintf(l, sizeof l, "  fault thr %u: EAX=%08x EBX=%08x ECX=%08x EDX=%08x ESI=%08x EDI=%08x EBP=%08x ESP=%08x",
+                        t->id, cpu_->reg(R_EAX), cpu_->reg(R_EBX), cpu_->reg(R_ECX), cpu_->reg(R_EDX),
+                        cpu_->reg(R_ESI), cpu_->reg(R_EDI), cpu_->reg(R_EBP), esp);
+          progress(l);
+          for (size_t k = 0; k < mods.size(); ++k) {
+              std::snprintf(l, sizeof l, "  fault module @%08x taille %08x%s", mods[k].first, mods[k].second,
+                            (cpu_->reg(R_EIP) - mods[k].first < mods[k].second) ? "  <- EIP ICI" : "");
+              progress(l); }
+          int shown = 0;
           for (uint32_t off = 0; off < 0x100; off += 4) {
               uint32_t v = cpu_->read_u32(esp + off);
               for (size_t k = 0; k < mods.size(); ++k)
                   if (v >= mods[k].first && v - mods[k].first < mods[k].second) {
                       std::printf("      [esp+0x%02x] 0x%08x  (module @%08x +0x%x)\n",
                                   off, v, mods[k].first, (unsigned)(v - mods[k].first));
+                      if (shown++ < 16) {
+                          std::snprintf(l, sizeof l, "  fault pile [esp+0x%02x] 0x%08x (module @%08x +0x%x)",
+                                        (unsigned)off, v, mods[k].first, (unsigned)(v - mods[k].first));
+                          progress(l); }
                       break; } } }
         char m[128]; std::snprintf(m, sizeof m, "NATIVE FAULT thr %u eip=%08x addr=%08x",
                                    t->id, cpu_->reg(R_EIP), cpu_->fault_addr());
