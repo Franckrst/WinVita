@@ -60,6 +60,7 @@ else echo "   OK: vita_kb.h sans appel de sortie"; fi
 # La carte des familles du profil : en-tete AUTONOME, donc prouvable ici. Le
 # classement vivait dans cpu_box86.cpp, qui ne se compile que pour ARM/Vita —
 # aucun oracle ne pouvait l'exercer.
+run authenticode "$ROOT/tools/authenticode_selftest.cpp" "$ROOT/src/runtime/authenticode.cpp"
 run prof_map "$ROOT/tools/prof_map_selftest.cpp"
 
 # La frequence du melangeur : elle vient de l'appelant, plus d'une constante.

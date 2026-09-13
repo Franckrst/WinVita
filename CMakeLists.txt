@@ -38,6 +38,8 @@ add_library(winx86_core STATIC
   src/runtime/win32_shims_misc.cpp
   src/runtime/win32_shims_psapi.cpp
   src/runtime/win32_shims_version.cpp
+  src/runtime/authenticode.cpp
+  src/runtime/win32_shims_wintrust.cpp
   src/runtime/win32_shims_gdi32.cpp
   src/runtime/win32_shims_window.cpp
   src/runtime/win32_shims_wsock32.cpp
