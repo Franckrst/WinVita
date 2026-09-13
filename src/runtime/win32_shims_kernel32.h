@@ -35,4 +35,14 @@ uint32_t wx86_sched_tid(uint32_t winTid);   // vue invitee -> id d'ordonnanceur 
 // coupe vraiment. Un test qui passe dans les deux jambes ne prouve rien.
 bool wx86_fid_avant();
 
+// --- FREQUENCE DU COMPTEUR DE PERFORMANCE --------------------------------
+// QueryPerformanceFrequency rend cette valeur ; l'embarqueur qui inscrit son
+// propre QueryPerformanceCounter DOIT compter dans la meme unite (lire
+// wx86_perf_frequency()). Defaut 1 000 000 (compteur en microsecondes, le
+// contrat historique). Un Windows 10 moderne a TSC invariant rend 10 000 000 :
+// un embarqueur qui veut ressembler a un PC pose cette valeur ET met son
+// compteur a l'echelle — les deux ensemble, jamais l'un sans l'autre.
+void     wx86_set_perf_frequency(uint64_t hz);
+uint64_t wx86_perf_frequency();
+
 void win32_shims_kernel32_install(d2rt::Bridge& br);

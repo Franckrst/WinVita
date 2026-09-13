@@ -71,6 +71,10 @@ static inline uint32_t ilk_cas(uint32_t* h, uint32_t e, uint32_t d){ return wx86
 static inline void set_lasterr(Cpu& c, uint32_t v){ wx86_set_lasterr(c,v); }
 static inline uint32_t get_lasterr(Cpu& c){ return wx86_get_lasterr(c); }
 
+static uint64_t g_perfFreq = 1000000ull;
+void     wx86_set_perf_frequency(uint64_t hz) { if (hz) g_perfFreq = hz; }
+uint64_t wx86_perf_frequency() { return g_perfFreq; }
+
 void win32_shims_kernel32_install(Bridge& br){
     auto K=[&](const char* name,uint32_t ac,std::function<uint32_t(Cpu&)> fn){
         Shim s; s.argc=ac; s.stdcall_cleanup=true; s.tag=std::string("KERNEL32.dll!")+name;
@@ -123,7 +127,8 @@ void win32_shims_kernel32_install(Bridge& br){
             default: return 0u; } });
     K("IsValidCodePage",1,[](Cpu&){ return 1u; });
     K("IsValidLocale",2,[](Cpu&){ return 1u; });
-    K("QueryPerformanceFrequency",1,[](Cpu&c){ uint32_t p=c.arg(0); c.write_u32(p,1000000); c.write_u32(p+4,0); return 1u; });
+    K("QueryPerformanceFrequency",1,[](Cpu&c){ uint32_t p=c.arg(0); const uint64_t f=wx86_perf_frequency();
+        c.write_u32(p,(uint32_t)f); c.write_u32(p+4,(uint32_t)(f>>32)); return 1u; });
     K("RemoveDirectoryA",1,[](Cpu&){ return 1u; });
     K("RtlUnwind",4,[](Cpu&){ return 0u; });
     K("SetCurrentDirectoryA",1,[](Cpu&){ return 1u; });
