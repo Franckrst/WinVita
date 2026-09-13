@@ -64,6 +64,8 @@ int wx86_connect_wait(int fd, int timeout_ms, uint32_t* outWsaErr);
 // Returns the same shape as POSIX recv/send: >=0 bytes (0 on EOF for recv),
 // or -1 with *outWsaErr set. `blocking` is the guest-visible mode (i.e. the
 // caller's own !nonblock check on the WsockHandle).
+// wait_ms : 0 = politique Windows (attente infinie, ou SO_RCVTIMEO pose par
+// setsockopt -> WSAETIMEDOUT) ; > 0 = borne explicite imposee par l'appelant.
 int wx86_recv_blocking(int fd, void* buf, uint32_t len, bool blocking, int wait_ms, uint32_t* outWsaErr);
 int wx86_send_simple(int fd, const void* buf, uint32_t len, uint32_t* outWsaErr);
 

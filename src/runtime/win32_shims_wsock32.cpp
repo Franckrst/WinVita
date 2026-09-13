@@ -218,12 +218,35 @@ int wx86_connect_wait(int fd, int timeout_ms, uint32_t* outWsaErr) {
     return -1;
 }
 
+// SO_RCVTIMEO par fd hote (ms ; absent/0 = attente infinie, comme Windows).
+static std::map<int, uint32_t> g_rcvTimeoMs;
+
 int wx86_recv_blocking(int fd, void* buf, uint32_t len, bool blocking, int wait_ms, uint32_t* outWsaErr) {
     ssize_t n = ::recv(fd, buf, len, 0);
+    // Semantique Windows d'une socket BLOQUANTE (13/09) : recv attend
+    // INDEFINIMENT, sauf SO_RCVTIMEO pose, auquel cas il echoue en
+    // WSAETIMEDOUT (10060). Avant, l'attente etait coupee a 15 s et rendait
+    // WSAEWOULDBLOCK — un code qu'une socket bloquante Windows ne rend jamais.
+    // L'attente se fait par tranches GIL relache ; elle s'interrompt si le
+    // reseau est coupe (arret, verrou) ou si la socket est fermee ailleurs.
+    // `wait_ms` > 0 impose une borne explicite a l'appelant (0 = politique Windows).
     if (n < 0 && blocking && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        pollfd pf{fd, POLLIN, 0};
-        wx86_poll_gilfree(&pf, wait_ms);
-        n = ::recv(fd, buf, len, 0);
+        uint32_t limit = wait_ms > 0 ? (uint32_t)wait_ms : 0;
+        if (!limit) { auto it = g_rcvTimeoMs.find(fd); if (it != g_rcvTimeoMs.end()) limit = it->second; }
+        uint32_t waited = 0;
+        for (;;) {
+            const int slice = limit ? (int)((limit - waited) < 1000u ? (limit - waited) : 1000u) : 1000;
+            pollfd pf{fd, POLLIN, 0};
+            wx86_poll_gilfree(&pf, slice);
+            n = ::recv(fd, buf, len, 0);
+            if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) break;
+            waited += (uint32_t)slice;
+            if (!wx86_net_enabled()) break;
+            if (limit && waited >= limit) {
+                wx86_net_set_last_error(10060); if (outWsaErr) *outWsaErr = 10060;
+                return -1;
+            }
+        }
     }
     if (n >= 0) return (int)n;
     { uint32_t e = wx86_wsa_from_errno(errno); wx86_net_set_last_error(e); if (outWsaErr) *outWsaErr = e; }
@@ -315,7 +338,7 @@ void win32_shims_wsock32_install(Bridge& br) {
     auto closesocket_fn = [](Cpu& c) -> uint32_t {
         if (!wx86_net_enabled()) return 0u;
         int fd = wx86_sock_fd(c.arg(0));
-        if (fd >= 0) { ::close(fd); wx86_sock_erase(c.arg(0)); }
+        if (fd >= 0) { g_rcvTimeoMs.erase(fd); ::close(fd); wx86_sock_erase(c.arg(0)); }
         return 0u;
     };
     REGORD("WSOCK32.dll", 3, 1, closesocket_fn);
@@ -384,6 +407,8 @@ void win32_shims_wsock32_install(Bridge& br) {
         if (lvl == 0xffff && opt == 0x0008) {   // SO_KEEPALIVE
             int on = v.size() >= 4 ? *(int*)v.data() : 1;
             ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
+        } else if (lvl == 0xffff && opt == 0x1006) {   // SO_RCVTIMEO (DWORD ms, 0 = infini)
+            g_rcvTimeoMs[fd] = v.size() >= 4 ? *(uint32_t*)v.data() : 0u;
         } else if (lvl == 6 && opt == 1) {      // TCP_NODELAY
             int on = v.size() >= 4 ? *(int*)v.data() : 1;
             ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on);
@@ -596,7 +621,7 @@ void win32_shims_wsock32_install(Bridge& br) {
         if (!wx86_sock_get(c.arg(0), h)) { wx86_net_set_last_error(10038); return 0xFFFFFFFFu; }
         std::vector<uint8_t> b(c.arg(2));
         uint32_t we = 0;
-        int n = wx86_recv_blocking(h.fd, b.data(), (uint32_t)b.size(), !h.nonblock, 15000, &we);
+        int n = wx86_recv_blocking(h.fd, b.data(), (uint32_t)b.size(), !h.nonblock, 0, &we);
         if (n > 0) {
             c.write(c.arg(1), b.data(), (uint32_t)n);
             wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, 0, 0, h.port, n, 0, b.data(), n);
