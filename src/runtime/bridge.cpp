@@ -597,8 +597,19 @@ void Bridge::dump_trap_counts(int topn) const {
     std::sort(ord.begin(), ord.end(),
               [](size_t a, size_t b) { return trapcnt::hits[a] > trapcnt::hits[b]; });
     char m[160];
-    std::snprintf(m, sizeof m, "trapcnt: %llu prises sur %zu creneaux actifs%s",
-                  (unsigned long long)total, ord.size(),
+    // ⚡ 13/09 : plantage a CHAQUE sortie de partie, trouve par bisection
+    // (boot_progress.txt s'arretait net juste apres "dump_trap_counts:
+    // entree"). Cause : %zu n'est PAS substitue par ce snprintf embarque (il
+    // laisse passer les caracteres "zu" tels quels sans consommer d'argument
+    // — verifie ici meme via une balise de diagnostic qui affichait
+    // litteralement "slots_.size()=zu"), ce qui decale de un cran l'argument
+    // suivant. Ici l'argument decale est le %s final : il lisait alors
+    // `ord.size()` (un petit entier) comme un POINTEUR de chaine — dereferencement
+    // sauvage garanti, deterministe a chaque appel puisque dump_trap_counts
+    // n'est appelee qu'a la fermeture. Fix : %u + cast, comme partout ailleurs
+    // dans ce fichier ou %zu n'est jamais suivi d'un %s.
+    std::snprintf(m, sizeof m, "trapcnt: %llu prises sur %u creneaux actifs%s",
+                  (unsigned long long)total, (unsigned)ord.size(),
                   slots_.size() > trapcnt::kMax ? " (TRONQUE: slots_ > trapcnt::kMax)" : "");
     std::printf("  %s\n", m);
     wx86_vita_progress_c(m);
