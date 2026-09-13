@@ -261,15 +261,55 @@ GuestThread* NativeScheduler::create_thread(uint32_t entry, uint32_t param,
     auto t = std::make_unique<GuestThread>();
     t->id = next_id_++;
     uint32_t ssize = stack_size ? ((stack_size + 0xFFFF) & ~0xFFFFu) : stack_each_;
-    uint32_t sbase = stack_next_; stack_next_ += ssize + 0x10000;
-    if (tib_region_ && stack_next_ > tib_region_ && !stack_overrun_warned_) {
-        stack_overrun_warned_ = true;       // one-shot: no boot_progress spam
-        progress("SCHED-NATIVE: worker stacks reached the TIB region (overrun risk)");
+    // ⚡ 13/09 — RECYCLAGE des piles/TIB (porte du coop, sched_cooperative.cpp C2).
+    // Sans lui l'allocation etait en pile montante jamais rendue : ~9 creations
+    // de fils (meme terminees) suffisaient a deborder sur la zone des TIB, puis
+    // sur la fenetre de traps, puis HORS de l'arene. Sur Battle.net officiel, la
+    // creation de partie lance le 15e fil : pile en 0x1100f510, hors arene,
+    // faute du fil et deconnexion (console, 2026-09-13). Un fil Finished dont le
+    // runner a rendu la main ne s'executera plus jamais : sa pile et son TIB
+    // sont libres, exactement comme Windows libere pile et TEB. Taille exacte
+    // seulement, le donneur cede la propriete (une seule reutilisation).
+    uint32_t sbase = 0, tib = 0;
+    for (auto& u : threads_) {
+        GuestThread* g = u.get();
+        if (g->state == S::Finished && g->native && nt(g)->runner_done && !nt(g)->is_main &&
+            g->stack_base && (g->stack_top - g->stack_base) == ssize && g->tib) {
+            sbase = g->stack_base; tib = g->tib;
+            g->stack_base = g->stack_top = 0; g->tib = 0;
+            ++stacks_reused_;
+            if (stacks_reused_ <= 8) { char m[128]; std::snprintf(m, sizeof m,
+                "SCHED-NATIVE: pile+TIB du fil %u recyclees pour le fil %u (reutilisations=%u)",
+                g->id, t->id, stacks_reused_); progress(m); }
+            break;
+        }
     }
-    cpu_->map(sbase, ssize, nullptr, P_RW);
+    if (sbase) {
+        // Windows rend une pile ZEROEE et une page TEB neuve.
+        static const std::vector<uint8_t> z(0x10000, 0);
+        for (uint32_t o = 0; o < ssize; o += (uint32_t)z.size())
+            cpu_->write(sbase + o, z.data(), (ssize - o) > (uint32_t)z.size() ? (uint32_t)z.size() : (ssize - o));
+        cpu_->write(tib, z.data(), 0x1000);
+    } else {
+        // Plus de recyclable ET la region des piles est pleine : REFUSER
+        // proprement (CreateThread echoue) plutot que poser une pile sur les
+        // TIB, la fenetre de traps ou hors de l'arene.
+        if (tib_region_ && stack_next_ + ssize > tib_region_) {
+            if (!stack_overrun_warned_) {
+                stack_overrun_warned_ = true;
+                char m[160]; std::snprintf(m, sizeof m,
+                    "SCHED-NATIVE: region des piles pleine (%u fils vivants) — CreateThread REFUSE plutot que deborder sur les TIB",
+                    (unsigned)threads_.size());
+                progress(m);
+            }
+            return nullptr;
+        }
+        sbase = stack_next_; stack_next_ += ssize + 0x10000;
+        cpu_->map(sbase, ssize, nullptr, P_RW);
+        tib = tib_next_; tib_next_ += 0x1000;
+        cpu_->map(tib, 0x1000, nullptr, P_RW);
+    }
     t->stack_base = sbase; t->stack_top = sbase + ssize;
-    uint32_t tib = tib_next_; tib_next_ += 0x1000;
-    cpu_->map(tib, 0x1000, nullptr, P_RW);
     cpu_->write_u32(tib + 0x00, 0xFFFFFFFF);        // ExceptionList (end of SEH chain)
     cpu_->write_u32(tib + 0x04, t->stack_top);      // StackBase
     cpu_->write_u32(tib + 0x08, t->stack_base);     // StackLimit
@@ -753,10 +793,11 @@ void NativeScheduler::runner(GuestThread* t) {
     while (t->state == S::New && !shutdown_)         // CREATE_SUSPENDED
         pthread_cond_wait(&n->cv, gil::mutex());
     gil::mark_owned();                               // see wait_common
-    if (shutdown_) { t->state = S::Finished; gil::unlock(); return; }
+    if (shutdown_) { t->state = S::Finished; n->runner_done = true; gil::unlock(); return; }
     seed_first_run(t);
     t->state = S::Running;
     run_guest(t);
+    n->runner_done = true;                           // plus aucun code invite sur cette pile
     gil::unlock();
 }
 

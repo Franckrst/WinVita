@@ -240,6 +240,12 @@ private:
         // quoi un fil pourrait rester masqué par le modulo (revue M2, §3.6).
         // Même régime mono-écrivain que fam_ack (le runner lui-même, hors GIL).
         bool            fam_napped = false;
+        // Le runner a RENDU la main pour de bon (plus aucun code invite ne peut
+        // s'executer sur la pile de ce fil). Pose sous GIL juste avant la
+        // derniere liberation. Condition du recyclage de pile/TIB : l'etat
+        // Finished seul ne suffit pas — TerminateThread le pose DEPUIS
+        // L'EXTERIEUR pendant que la cible tourne peut-etre encore.
+        bool            runner_done = false;
     };
     static void* runner_tramp(void* guest_thread);
     void runner(GuestThread* t);            // worker body (GIL taken inside)
@@ -285,6 +291,7 @@ private:
     const char* stop_reason_ = "";
     bool no_preempt_warned_ = false;
     bool stack_overrun_warned_ = false;     // one-shot TIB-overrun warning
+    uint32_t stacks_reused_ = 0;            // piles/TIB de fils termines reutilisees
     uint32_t thread_cap_ = 64;              // fail CreateThread cleanly past this
 
     // ---- Filet anti-famine (Tâche 2 : mécanisme seul — poke + sieste à la
