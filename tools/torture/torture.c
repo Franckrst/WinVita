@@ -39,7 +39,7 @@ static void emit(const char* api, const char* args, DWORD ret, DWORD le, const c
 static DWORD WINAPI thr(LPVOID p){ return (DWORD)(DWORD_PTR)p; }   /* returns its arg */
 
 #ifdef TORTURE_MT
-/* ---------------- TORTURE_MT: real-concurrency stress (native-scheduler etape 1) ----
+/* ---------------- TORTURE_MT: real-concurrency stress ----
  * Opt-in (-DTORTURE_MT, set by TORTURE_MT=1 through run_torture.sh — same
  * compile-time pattern as TORTURE_FAULT, so the ONE exe runs the section on both
  * sides; a getenv gate is impossible here: freestanding build, no CRT, and the

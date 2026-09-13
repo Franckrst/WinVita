@@ -1,40 +1,29 @@
-// src/runtime/guest_files.h — les tables de poignees de FICHIER de l'invite.
+// src/runtime/guest_files.h — guest file-handle tables.
 //
-// POURQUOI C'EST DU MOTEUR. Une poignee Win32 de fichier, la position logique
-// qu'on lui associe, le chemin qu'elle porte et les vues de mapping sont de la
-// semantique Win32, pas du jeu. Les deux portages qui utilisent ce moteur
-// declaraient ces quatre tables avec les MEMES noms et les MEMES types, et
-// FPos comme FMap y sont identiques au caractere pres, commentaire compris.
-// C'etait donc de l'etat du moteur, duplique.
+// A Win32 file handle, its logical position, its resolved path, and its
+// mapping views are OS semantics, not game logic, so they live in the
+// engine. Path resolution (where data lives, platform naming conventions,
+// root) stays with the consumer.
 //
-// CE QUI RESTE AU PORTAGE : la RESOLUTION de chemin. Ou vivent les donnees,
-// quelles conventions de nommage a la plateforme, quelle racine — cela ne
-// regarde que le consommateur. Le moteur tient la table, le portage dit ou
-// trouver le fichier.
-//
-// FORME CHOISIE, ET SON PRIX. Le moteur expose les tables par REFERENCE plutot
-// que par une famille d'accesseurs. C'est moins joli, et c'est deliberé : le
-// but de cette etape est de transferer la PROPRIETE sans reecrire quarante
-// sites d'appel sur un chemin d'entrees-sorties critique. Une seule table
-// existe, celle-ci ; le portage n'en tient qu'une reference. Des accesseurs
-// pourront la remplacer plus tard sans rien changer a la propriete.
+// Tables are exposed by reference rather than through an accessor family:
+// this transfers ownership without rewriting call sites on a hot I/O path.
+// Accessors could replace this later without changing ownership.
 #pragma once
 #include <cstdint>
 #include <cstdio>
 #include <map>
 #include <string>
 
-// Position logique suivie sans syscall (le fseek n'est fait qu'au moment utile).
-struct WxFPos { long logical=0; long real=0; int dir=0; };  // dir: 0 aucun, 1 lecture, 2 ecriture
-// Vue de mapping de fichier.
+// Logical position tracked without a syscall; fseek only happens when needed.
+struct WxFPos { long logical=0; long real=0; int dir=0; };  // dir: 0 none, 1 read, 2 write
+// File mapping view.
 struct WxFMap { std::string path; uint32_t size; uint32_t view; };
 
-std::map<uint32_t,FILE*>&       wx86_files();        // poignee -> flux hote
-std::map<uint32_t,std::string>& wx86_file_paths();   // poignee -> chemin resolu
-std::map<uint32_t,WxFPos>&      wx86_file_pos();     // poignee -> position logique
-std::map<uint32_t,WxFMap>&      wx86_file_maps();    // poignee de mapping -> vue
+std::map<uint32_t,FILE*>&       wx86_files();        // handle -> host stream
+std::map<uint32_t,std::string>& wx86_file_paths();   // handle -> resolved path
+std::map<uint32_t,WxFPos>&      wx86_file_pos();     // handle -> logical position
+std::map<uint32_t,WxFMap>&      wx86_file_maps();    // mapping handle -> view
 
-// Compteur des poignees de mapping. Distinct de celui des objets attendables :
-// ce sont deux espaces de numeros differents, et les melanger serait le meme
-// accident que celui des handles noyau.
+// Mapping-handle counter, kept in a separate namespace from waitable-object
+// handles so the two handle spaces can't collide.
 uint32_t wx86_fmap_next_id();

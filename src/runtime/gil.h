@@ -1,5 +1,5 @@
 // src/runtime/gil.h — the runtime Global Interpreter-style Lock (native
-// scheduler only; spec 2026-08-28 D3).
+// scheduler only).
 //
 // One process-wide pthread_mutex serializing everything that runs OUTSIDE
 // translated guest code: shim bodies, intrinsics, SEH dispatch, scheduler
@@ -25,9 +25,10 @@ bool active();
 void enable();                 // called ONCE, by the native scheduler ctor
 void lock();
 void unlock();
-// Prise NON bloquante (coeur2, D2_FILSTAT) : vrai = pris, memes marques que
-// lock() ; faux = occupe, rien n'est touche. Sert a COMPTER la contention du
-// GIL par fil sans changer le chemin par defaut (cpu_box86.cpp TrapGuard).
+// Non-blocking version of lock() (used for D2_FILSTAT): true = acquired
+// (same bookkeeping as lock()), false = contended, nothing touched. Used to
+// count per-thread GIL contention without changing the default lock path
+// (cpu_box86.cpp TrapGuard).
 bool try_lock();
 pthread_mutex_t* mutex();      // for pthread_cond_wait integration
 
@@ -36,19 +37,18 @@ pthread_mutex_t* mutex();      // for pthread_cond_wait integration
 // assert_held() asserts the CALLING host thread owns the GIL; no-op while
 // inactive. Called at the top of every NativeScheduler method whose contract
 // requires the lock (wait_common/wake_check_all/create_thread/notify).
-// Deux moitiés : (1) le GIL est pris — vraie pour TOUT appelant ; (2) et c'est
-// bien moi — muette pour un fil NON enregistré (cf. la table plus bas). La
-// couverture perdue face à l'ancien pthread_equal(g_owner, pthread_self()) est
-// donc exactement celle des fils non enregistrés ; pour tous les autres (main
-// dans run(), runners) le cas fort « tenu par quelqu'un d'AUTRE » déclenche
-// toujours. La moitié (2) est sous #ifndef NDEBUG.
+// Two checks: (1) the GIL is held at all — true for every caller; (2) it is
+// held by ME — silent (no verdict) for a thread that never registered a
+// stack (see the identity table below), since there is nothing to compare
+// against. For every real caller (main in run(), the runners) check (2) is
+// exact. Check (2) is compiled only under #ifndef NDEBUG.
 void assert_held();
-// Rallume/éteint le contrôle (2) d'assert_held() — « c'est bien MOI qui tiens
-// le GIL », qui parcourt la table d'identité. En production il est ÉTEINT par
-// défaut (il coûtait un parcours par shim de synchronisation) et se rallume
-// par D2_GILCHECK=1, lu UNE fois au démarrage. Cette fonction existe pour les
-// TESTS, qui doivent l'armer sans dépendre de l'environnement ; l'appeler avant
-// de lancer des fils. Le contrôle (1) — assert(g_owned) — reste inconditionnel.
+// Toggles assert_held()'s check (2) ("I am really the holder"), which walks
+// the identity table. Off by default in production (it cost a table scan
+// per synchronization shim); re-enabled via D2_GILCHECK=1, read once at
+// startup. This function exists for tests, which need to arm it without
+// depending on the environment — call it before spawning threads. Check
+// (1) — assert(g_owned) — is always unconditional.
 void set_identity_check(bool on);
 // pthread_cond_wait(cv, mutex()) releases and reacquires the mutex BEHIND
 // lock()/unlock()'s back: the last unlocker cleared the owner flag, so a
@@ -56,114 +56,106 @@ void set_identity_check(bool on);
 // in the same shim body (wait-then-notify) fires falsely. Call with the
 // mutex held, right after the cond-wait loop exits.
 void mark_owned();
-// Symétrique de mark_owned() pour l'OBSERVABILITÉ (§19) : à appeler JUSTE
-// AVANT une boucle de cond-wait. Sans elle, le détenteur publié resterait le
-// fil parti dormir dans le cond (qui a rendu le mutex sans passer par
-// unlock()), et le lecteur croirait à une prise éternelle : le mensonge exact
-// que cette instrumentation existe pour ne pas produire. Ne touche PAS au
-// marquage historique de assert_held() (dont le comportement est inchangé).
+// Symmetric to mark_owned(), for observability: call JUST BEFORE a cond-wait
+// loop. Without it, the published holder would stay the thread that went to
+// sleep in the cond (which released the mutex without going through
+// unlock()), and a reader would believe the GIL held forever — exactly the
+// lie this instrumentation exists to avoid. Does not touch assert_held()'s
+// own bookkeeping.
 void mark_released();
 
-// ---- Observabilité (audit T12 §19) — QUI tient le GIL, et depuis quand -----
+// ---- Observability: who holds the GIL, and since when ----------------------
 //
-// Le gel total de la session console 7 (§18.7) est resté une HYPOTHÈSE faute
-// d'une seule trace de l'état du GIL : `sautees-gil=2893` disait que le filet
-// anti-famine renonçait, jamais QUI le bloquait. Ces champs le disent.
+// Written UNIQUELY by the holder, at acquire and release, as relaxed atomics
+// (no lock, no barrier). Read by the watchdog and the starvation-detector
+// heartbeat WITHOUT taking the GIL — a reader that had to block on the lock
+// it's observing would have nothing to report.
 //
-// Écrits UNIQUEMENT par le détenteur, à la prise et au relâchement, en
-// atomiques relaxed (pas de verrou, pas de barrière). Lus par le chien de
-// garde et le battement famine SANS prendre le GIL — un lecteur qui bloque
-// sur le verrou qu'il observe ne rapporte rien.
+// No clock is read at acquire time, deliberately: on Vita clock_gettime is a
+// kernel call, and the GIL is taken on every import trap, so timestamping
+// every acquire would be too costly. Hold time is therefore DERIVED BY THE
+// READER: two consecutive samples with the same `acq` counter prove the
+// acquisition has lasted at least the interval between the samples. What
+// this module reports is always a LOWER BOUND (printed with a `>=` prefix),
+// never a duration inflated by a stale timestamp.
 //
-// AUCUNE HORLOGE n'est lue à la prise, délibérément : sur Vita clock_gettime
-// est un appel noyau et le GIL est pris à CHAQUE trap d'import (rt_boot met
-// déjà en cache rt_now_ms pour exactement cette raison — « D2 polls the clock
-// ~26k/s »). L'ancienneté de la prise est donc DÉRIVÉE PAR LE LECTEUR : deux
-// relevés successifs portant le même compteur `acq` prouvent que la prise dure
-// depuis au moins l'intervalle qui les sépare. Ce que publie ce module est
-// toujours une BORNE INFÉRIEURE (préfixe `>=` à l'impression), jamais une
-// durée gonflée par une estampille périmée.
-//
-// Identité du détenteur : une MARQUE DE PILE (l'adresse d'une variable locale
-// de lock(), donc un point dans la pile hôte du détenteur), traduite en
-// étiquette par le lecteur. PAS de pthread_t : sur pte, pthread_self() descend
-// dans pthread_getspecific -> pte_osTlsGetValue -> sceKernelGetTLSAddr, la MÊME
-// chaîne noyau qu'un accès emutls — un appel INTER-MODULE par prise du GIL,
-// donc par trap. La marque coûte une instruction (add rX, sp, #n) et aucun
-// appel ; la traduction marque -> étiquette est faite PAR LE LECTEUR (probe(),
-// hors chemin chaud), à partir de la table déclarée ci-dessous.
+// Holder identity is a STACK MARK (the address of a local variable in
+// lock(), i.e. a point in the holder's host stack), resolved to a label by
+// the reader — not a pthread_t: on pte, pthread_self() goes through
+// pthread_getspecific -> pte_osTlsGetValue -> sceKernelGetTLSAddr, the same
+// kernel chain as an emutls access — an inter-module call on every GIL
+// acquire (i.e. every trap). The stack mark costs one instruction (add rX,
+// sp, #n) and no call; the mark-to-label resolution happens on the READER
+// side (probe(), off the hot path), from the table declared below.
 struct Probe {
-    bool        active;    // le GIL existe (backend natif) — faux sous coop
-    bool        held;      // pris à l'instant du relevé
-    uint32_t    owner_tag; // étiquette du détenteur (id de fil invité), 0 = INCONNU
-    uint32_t    acq;       // nombre total de prises depuis le boot
-    bool        in_shim;   // le détenteur est DANS un corps de shim du Bridge
-    uint32_t    shim_va;   // VA du trap (mappable par D2_DUMPTRAPS=1)
-    const char* shim;      // "ws2_32.dll!#18" — chaîne stable (clé de slot_by_tag_)
+    bool        active;    // the GIL exists (native backend) — false under coop
+    bool        held;      // held at the moment of the sample
+    uint32_t    owner_tag; // holder's label (guest thread id), 0 = UNKNOWN
+    uint32_t    acq;       // total acquisitions since boot
+    bool        in_shim;   // the holder is INSIDE a Bridge shim body
+    uint32_t    shim_va;   // trap VA (mappable via D2_DUMPTRAPS=1)
+    const char* shim;      // e.g. "ws2_32.dll!#18" — stable string (slot_by_tag_ key)
 };
-void probe(Probe* out);        // ne bloque jamais ; tout à zéro si inactif
+void probe(Probe* out);        // never blocks; all-zero if inactive
 
-// ---- Table d'identité SANS recherche TLS -----------------------------------
+// ---- Identity table, no TLS lookup ------------------------------------------
 //
-// La seule identité qu'un fil porte GRATUITEMENT (dans un registre, sans appel)
-// est son pointeur de pile. Chaque fil susceptible de prendre le GIL déclare
-// donc UNE FOIS, DEPUIS LUI-MÊME, un intervalle [lo,hi] de SA pile hôte et
-// l'étiquette à afficher (id de fil invité, jamais 0) :
+// The only identity a thread carries for free (in a register, no call) is
+// its stack pointer. Each thread that may take the GIL therefore registers,
+// ONCE, FROM ITSELF, an interval [lo,hi] of its own host stack and the label
+// to report (guest thread id, never 0):
 //
-//     char ici;                                     // son adresse = la marque
+//     char ici;                                     // its address is the mark
 //     int s = gil::register_stack((uintptr_t)&ici - SPAN, (uintptr_t)&ici, t->id);
-//     ...                                           // vie du fil
-//     gil::unregister_stack(s);                     // APRÈS sa dernière prise
+//     ...                                           // thread lifetime
+//     gil::unregister_stack(s);                     // AFTER its last acquire
 //
-// INVARIANT QUI PORTE TOUTE LA SÛRETÉ, et que rien d'autre ne garde :
-//   *** tout fil qui appelle gil::lock() doit s'être enregistré avant, et
-//       s'être désenregistré après sa DERNIÈRE prise. ***
-// Sans lui, un fil non enregistré qui tournerait sur une pile RECYCLÉE d'un fil
-// mort encore inscrit hériterait de SON étiquette : le seul nom faux que ce
-// mécanisme puisse produire. Les deux moitiés comptent — l'enregistrement pour
-// que le fil vivant soit nommé, le désenregistrement pour qu'un mort ne prête
-// pas son nom. (Sur cible aujourd'hui pte ne recycle aucune pile en session :
-// pte_osThreadExit est un sceKernelExitThread nu, et DeleteThread n'est atteint
-// que par detach. Le désenregistrement ne corrige donc rien d'atteignable — il
-// ferme le flanc pour que l'invariant se garde tout seul.)
-// L'unique preneur volontairement NON enregistré est le fil main AVANT run()
-// (gil::Guard des bancs FAMINETEST/SELECTTEST de rt_boot) : sa pile est
-// disjointe de toute pile pte, il s'affiche « hote », et assert_held() ne
-// prétend alors rien de plus que « le GIL est pris ».
+// INVARIANT THE WHOLE SAFETY PROPERTY RESTS ON:
+//   *** every thread that calls gil::lock() must have registered before, and
+//       unregistered after its LAST acquire. ***
+// Without it, an unregistered thread running on a dead, still-registered
+// thread's RECYCLED stack would inherit that thread's label — the only false
+// name this mechanism can produce. Both halves matter: registering names the
+// live thread, unregistering stops a dead one from lending its name. (No
+// target today actually recycles a stack within a session — this half fixes
+// nothing reachable yet, but closes the hole so the invariant holds by
+// construction rather than by accident.)
+// The one deliberately UNREGISTERED caller is the main thread before run()
+// (an early gil::Guard taken during boot self-tests): its stack is disjoint
+// from any worker stack, it prints as "host", and assert_held() then claims
+// nothing more than "the GIL is held".
 //
-// L'intervalle déclaré doit être un SOUS-ENSEMBLE STRICT de la pile réelle : le
-// sens sûr de l'erreur est « je ne sais pas » (marque hors de tout intervalle,
-// étiquette 0, la ligne dit « hote »), jamais « je nomme le fil d'à côté ».
-// La résolution refuse d'ailleurs de répondre dès que DEUX intervalles
-// contiennent la marque (piles recyclées après un exit) : ambiguïté => 0.
-// Un fil non enregistré n'est jamais nommé — c'est exactement ce que faisait
-// déjà un fil hôte sans pthread_t connu.
+// The declared interval must be a STRICT SUBSET of the real stack: the safe
+// failure mode is "don't know" (mark outside every interval, label 0,
+// printed as "host"), never "name the wrong thread". Resolution also
+// refuses to answer as soon as TWO intervals contain the mark (recycled
+// stacks after an exit): ambiguous => 0. An unregistered thread is simply
+// never named.
 //
-// COÛT DE LA RÉSOLUTION, dit sans détour : c'est un parcours linéaire de la
-// table, SANS barrière et SANS appel (la sûreté vient de l'écriture-unique des
-// cases, pas d'un acquire — voir gil.cpp). Sa durée croît avec le nombre de
-// fils invités JAMAIS enregistrés depuis le boot (les cases ne sont pas
-// réutilisées), plafonné à 132. Elle n'est PAS mesurée. Hors chemin de trap
-// (lecteurs + assert_held), jamais dans lock().
+// Cost of resolution, plainly: a linear scan of the table, with NO barrier
+// and NO call (safety comes from write-once slots, not an acquire — see
+// gil.cpp). Scan time grows with the number of guest threads ever
+// registered since boot (slots are not reused), capped at 132. Not measured.
+// Off the trap path (readers + assert_held only, never inside lock()).
 //
-// Rend l'index de la case, ou -1 si le fil n'a pas pu être inscrit (table
-// pleine, arguments refusés) — dans ce cas il restera « hote », ce qui est le
-// sens sûr. unregister_stack(-1) est un no-op.
+// Returns the slot index, or -1 if the thread could not be registered (table
+// full, bad arguments) — it then stays "host", which is the safe outcome.
+// unregister_stack(-1) is a no-op.
 int  register_stack(uintptr_t lo, uintptr_t hi, uint32_t tag);
 void unregister_stack(int slot);
 
-// Marquage du corps de shim en cours (Bridge::trap_handler, sous GIL).
-// UN SEUL enregistrement global suffit : le GIL garantit qu'un seul fil est
-// dans un corps de shim à la fois. Il mémorise son détenteur, donc un shim
-// qui RELÂCHE le GIL (gil::Release autour d'un ::poll) puis le reprend après
-// qu'un autre fil soit passé n'induit pas le lecteur en erreur : les deux
-// détenteurs diffèrent, le lecteur n'attribue alors aucun shim. Inerte tant
-// que le GIL est inactif (coop) — un test d'un booléen global.
-// NOTE (marques de pile) : le détenteur mémorisé ici est la MARQUE publiée par
-// lock(), qui change d'une prise à l'autre pour un MÊME fil (profondeur d'appel
-// différente). La comparaison est donc faite par probe() sur les ÉTIQUETTES
-// résolues, pas sur les marques brutes — sans quoi un shim qui relâche puis
-// reprend le GIL perdrait son attribution alors que rien n'a changé.
+// Marks the shim body currently executing (Bridge::trap_handler, under the
+// GIL). A single global record is enough: the GIL guarantees only one
+// thread is inside a shim body at a time. It remembers its holder so that a
+// shim which RELEASES the GIL (gil::Release around a ::poll) and reacquires
+// it after another thread ran does not mislead a reader: the two holder
+// marks differ, so no shim gets attributed to the wrong thread. Inert while
+// the GIL is inactive (coop) — just a global-bool check.
+// NOTE (stack marks): the holder recorded here is the MARK published by
+// lock(), which differs between acquisitions of the SAME thread (different
+// call depth). Comparison is therefore done by probe() on RESOLVED LABELS,
+// not raw marks — otherwise a shim that releases and reacquires the GIL
+// would lose its attribution even though nothing changed.
 void note_shim_enter(uint32_t trap_va, const char* tag);
 void note_shim_exit();
 
@@ -175,8 +167,8 @@ struct Guard {
     Guard(const Guard&) = delete;              // a copied Guard double-unlocks
     Guard& operator=(const Guard&) = delete;
 };
-// RAII inverse: RELEASE the GIL around a blocking host call (::poll, long
-// translation, sleep) so other guest threads keep running (spec D3).
+// Inverse RAII: RELEASE the GIL around a blocking host call (::poll, long
+// translation, sleep) so other guest threads keep running.
 struct Release {
     bool a;
     Release()  { a = active(); if (a) unlock(); }

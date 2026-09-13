@@ -1,14 +1,12 @@
-// src/runtime/guest_locale.cpp — voir guest_locale.h. Transcription fidele des
-// tables que les DEUX portages hebergeaient (corps identiques a la comparaison,
-// 2026-09-11) ; seul le DEFAUT change : le moteur repond en-US tant que le
-// consommateur n'a rien pose, la ou un portage codait sa propre langue.
+// Engine defaults to en-US (0x0409) until the consumer calls
+// wx86_locale_set_lcid(), rather than hardcoding a game's language.
 #include "guest_locale.h"
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
 
 namespace {
-uint32_t g_lcid = 0x0409u;   // en-US tant que le consommateur n'a rien pose
+uint32_t g_lcid = 0x0409u;   // en-US until the consumer sets one
 }
 
 uint32_t wx86_locale_lcid() { return g_lcid; }
@@ -38,14 +36,14 @@ uint32_t wx86_locale_detect_posix() {
     return 0x0409u;
 }
 
-// Pages de codes de la locale active (un 1252/437 fige serait faux pour un
-// systeme cyrillique, CJK, turc ou grec — meme classe regionale que la locale).
+// Code page for the active locale (a fixed 1252/437 would be wrong for a
+// Cyrillic, CJK, Turkish, or Greek system).
 uint32_t wx86_cp_ansi() {
     switch (g_lcid) {
         case 0x0419: return 1251;  case 0x0415: return 1250;  case 0x0405: return 1250;  // ru / pl / cs
         case 0x0411: return 932;   case 0x0412: return 949;   case 0x0804: return 936;
         case 0x0404: return 950;   case 0x041F: return 1254;  case 0x0408: return 1253;
-        default:     return 1252;                                                        // Europe de l'Ouest
+        default:     return 1252;                                                        // Western Europe
     }
 }
 
@@ -53,28 +51,28 @@ uint32_t wx86_cp_oem() {
     switch (g_lcid) {
         case 0x0419: return 866;   case 0x0411: return 932;   case 0x0412: return 949;
         case 0x0804: return 936;   case 0x0404: return 950;   case 0x0409: return 437;    // US
-        default:     return 850;                                                         // Europe de l'Ouest (multilingue)
+        default:     return 850;                                                         // Western Europe (multilingual)
     }
 }
 
 const char* wx86_locale_info(uint32_t lctype) {
-    const bool fr = (g_lcid & 0xff) == 0x0c;                 // 0x040C etc. = francais
+    const bool fr = (g_lcid & 0xff) == 0x0c;                 // 0x040C etc. = French
     switch (lctype & 0xffff) {
         case 0x1004: return "1252";                          // IDEFAULTANSICODEPAGE
         case 0x000B: return fr ? "850" : "437";              // IDEFAULTCODEPAGE (OEM)
-        case 0x0001: return fr ? "040c" : "0409";            // ILANGUAGE (id hexa en texte)
+        case 0x0001: return fr ? "040c" : "0409";            // ILANGUAGE (hex id as text)
         case 0x0009: return fr ? "040c" : "0409";            // IDEFAULTLANGUAGE
         case 0x0059: return fr ? "fr" : "en";                // SISO639LANGNAME
         case 0x005A: return fr ? "FR" : "US";                // SISO3166CTRYNAME
         case 0x0002: return fr ? "French (France)" : "English (United States)";   // SLANGUAGE
         case 0x0003: return fr ? "FRA" : "ENU";              // SABBREVLANGNAME
         case 0x1001: return fr ? "French" : "English";       // SENGLANGUAGE
-        case 0x0005: return fr ? "33" : "1";                 // ICOUNTRY (code numerique)
-        case 0x0006: return fr ? "France" : "United States"; // SCOUNTRY (localise)
+        case 0x0005: return fr ? "33" : "1";                 // ICOUNTRY (numeric code)
+        case 0x0006: return fr ? "France" : "United States"; // SCOUNTRY (localized)
         case 0x0007: return fr ? "FRA" : "USA";              // SABBREVCTRYNAME
         case 0x1002: return fr ? "France" : "United States"; // SENGCOUNTRY
         case 0x000E: return fr ? "," : ".";                  // SDECIMAL
-        case 0x000F: return fr ? "\xA0" : ",";               // STHOUSAND (FR = espace insecable)
+        case 0x000F: return fr ? "\xA0" : ",";               // STHOUSAND (FR = non-breaking space)
         default:     return "1";
     }
 }

@@ -1,27 +1,13 @@
-// src/runtime/win32_shims_advapi32.cpp — see win32_shims_advapi32.h. Split
-// out of d2vita's tools/rt_boot.cpp ADVAPI32 shim group (2026-09-10): these
+// src/runtime/win32_shims_advapi32.cpp — see win32_shims_advapi32.h. These
 // bodies carry no D2/Blizzard-specific literal, no game-state dependency,
-// and no dependency on any d2vita-hosted helper (misc()/set_lasterr()) —
-// unlike the registry emulation (hardcoded "C:\Diablo II\..." paths) and a
-// handful of security/SCM calls that DO use those d2vita-hosted helpers, in
-// the same original group, which stay d2vita-side
-// (src/runtime/win32_shims_advapi32_d2.cpp).
+// and no dependency on any consumer-hosted helper — unlike the registry
+// emulation (hardcoded install-path strings) and a handful of security/SCM
+// calls that do use consumer-hosted helpers, which stay in the consumer's
+// own shim file (win32_shims_advapi32_d2.cpp).
 //
-// GetUserNameA et CheckTokenMembership etaient chacune inscrites DEUX fois
-// dans l'original. Les inscriptions mortes (celles que la seconde ecrasait)
-// ont ete retirees le 2026-09-11 : une cle = un seul site d'inscription.
-// Le corps GAGNANT est conserve tel quel dans les deux cas, la table
-// effective est donc inchangee. Pour CheckTokenMembership les deux corps
-// etaient identiques ; pour GetUserNameA ils differaient (voir ci-dessous).
-//
-// DISCLOSED BEHAVIOR CHANGE: the original `A` helper wrapped every call in a
-// TRACE/TRACEAFTER diagnostic (prints "name -> result" via the file-scope
-// g_calls/g_traceOn counters defined in d2vita's tools/rt_boot.cpp). That
-// wrapper is dropped here: winx86 must build and link standalone with zero
-// knowledge of any specific consumer (see build.sh's header comment) and
-// g_calls/g_traceOn are d2vita-hosted, not part of winx86's public API.
-// Functional behavior (return values, memory writes) is unchanged; only the
-// TRACE=1 debug log loses coverage of these ~30 calls specifically.
+// No consumer-side tracing here: winx86 links standalone with no knowledge
+// of any specific consumer, so debug-log coverage of these calls lives on
+// the consumer side, not here.
 #include "win32_shims_advapi32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
@@ -80,16 +66,12 @@ void win32_shims_advapi32_install(Bridge& br){
     A("QueryServiceStatus",2,[](Cpu&){ return 0u; });
     A("StartServiceA",3,[](Cpu&){ return 0u; });
     A("ControlService",3,[](Cpu&){ return 0u; });
-    // Corps GAGNANT de l'ancien doublon (l'autre rendait "Player" capitalise et
-    // gardait `if(b)` avant l'ecriture). Celui-ci est celui qui a toujours ete
-    // effectif : c'est donc lui qui a ete valide par tous les essais en ligne.
-    // RESERVE CONNUE, non corrigee ici pour ne rien changer au comportement en
-    // meme temps qu'on retire un doublon : il ecrit dans `b` SANS verifier que
-    // b != 0, alors que GetUserNameA(NULL,&n) est l'idiome Win32 normal pour
-    // demander la taille du tampon. A durcir dans un changement dedie.
+    // KNOWN GAP: writes to `b` without checking b != 0, though
+    // GetUserNameA(NULL,&n) is the normal Win32 idiom to query the required
+    // buffer size first. Left as-is to avoid changing behavior here.
     A("GetUserNameA",2,[](Cpu&c){ uint32_t b=c.arg(0),pn=c.arg(1); const char* u="player";
         c.write(b,u,7); if(pn) c.write_u32(pn,7); return 1u; });
-    // 1.14 extras (ADVAPI32): admin-membership check the installer/anti-tamper
-    // does — report TRUE so it proceeds.
+    // Admin-membership check some installers/anti-tamper routines perform —
+    // report TRUE so it proceeds.
     A("CheckTokenMembership",3,[](Cpu&c){ if(c.arg(2)) c.write_u32(c.arg(2),1); return 1u; });
 }

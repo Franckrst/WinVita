@@ -1,58 +1,42 @@
-// src/render/render.h — la couture entre une traduction d'API graphique
-// invitee (Glide, Direct3D...) et le GPU de l'hote.
+// The seam between a guest graphics API translation (Glide, Direct3D, ...)
+// and the host GPU.
 //
-// ETAT : PARTIELLE, ET ASSUMEE COMME TELLE.
-// Cette couche ne pretend pas couvrir la 3D en general. Elle couvre EXACTEMENT
-// ce que deux portages reels soumettent aujourd'hui, parce qu'elle a ete
-// deduite de leurs deux backends existants plutot qu'imaginee a l'avance. Ce
-// qui manque est liste en bas de fichier, nommement.
+// Deliberately partial: this layer doesn't try to cover 3D in general, only
+// what real consumers submit — one translates a Glide command ring to the
+// console GPU (paletted 8-bit texture atlas, palette applied in the shader),
+// another translates a Direct3D execute buffer to an OpenGL layer (ARGB1555
+// textures, a depth buffer). The vocabulary below is the real intersection
+// of both, widened where one had strictly more (depth, palette) rather than
+// forced down to the poorer one. What's missing is listed at the bottom.
 //
-// POURQUOI ELLE EXISTE
-// --------------------
-// Deux consommateurs du moteur font de la 3D, chacun avec son backend :
-//   * l'un traduit un anneau de commandes Glide vers le GPU de la console, avec
-//     un atlas de textures 8 bits palettisees et une palette appliquee dans le
-//     nuanceur ;
-//   * l'autre traduit un tampon d'execution Direct3D vers une couche OpenGL,
-//     avec des textures ARGB1555 et un tampon de profondeur.
-// Leurs deux interfaces de backend ont ete comparees champ a champ. Le
-// vocabulaire ci-dessous est leur INTERSECTION REELLE, elargie la ou l'un des
-// deux avait strictement plus (la profondeur, la palette) plutot que de forcer
-// le plus pauvre des deux.
+// Guest API decoding itself (parsing a Glide ring, a Direct3D execute
+// buffer, figuring out which states a game actually emits) is port-specific
+// and stays there. This file starts after that decoding: it deals in
+// vertices, batches, and textures, never opcodes.
 //
-// CE QUI RESTE CHEZ LE PORTAGE, ET POURQUOI
-// -----------------------------------------
-// La traduction de l'API invitee elle-meme (decoder un anneau Glide, decoder un
-// tampon d'execution Direct3D, savoir quels etats le jeu emet vraiment) est
-// specifique au jeu et le reste. Ce fichier commence APRES ce decodage : il
-// parle de sommets, de lots et de textures, jamais d'opcodes.
-//
-// CE QUI EST « VITA » ET NON « JEU »
-// ----------------------------------
-// Le GPU de la console, sa couche OpenGL, ses contraintes memoire appartiennent
-// au MOTEUR — le moteur cible cette console. Un backend concret vit donc ici,
-// pas chez le portage ; seul le decodage de l'API invitee reste la-bas.
+// The console GPU, its OpenGL layer, and their memory constraints belong to
+// the engine, which targets this console — so a concrete backend lives here,
+// not in the port.
 #pragma once
 #include <cstdint>
 
 namespace wx86 {
 namespace render {
 
-// ---- sommet ---------------------------------------------------------------
-// Position en ESPACE ECRAN. Les deux portages font leur transformation en
-// logiciel (mesure des deux cotes) : il n'y a aucune matrice a poser ici.
+// ---- vertex -----------------------------------------------------------------
+// Position in screen space. Ports do their own transform in software, so
+// there is no matrix to set here.
 //
-// `w` porte la correction de perspective : un portage 2D pose w=1 et z=0, un
-// portage 3D pose la position PREMULTIPLIEE par w. Passer la position en trois
-// composantes donnerait un texturage affine, et les surfaces se tordraient —
-// c'est pour ca que le champ existe meme si un des deux portages ne s'en sert
-// pas.
+// `w` carries perspective correction: a 2D port sets w=1 and z=0; a 3D port
+// supplies a position premultiplied by w. Passing only three components
+// would give affine texturing and warp surfaces — hence the field exists
+// even for a port that doesn't use it.
 //
-// `layer` selectionne une palette ou une couche de tableau de textures. Vaut 0
-// quand la texture porte deja ses couleurs.
+// `layer` selects a palette or a texture array layer. 0 when the texture
+// already carries its own colors.
 struct Vertex {
     float    x, y, z, w;
-    uint32_t rgba;        // octets R,G,B,A dans l'ordre memoire
+    uint32_t rgba;        // R,G,B,A bytes in memory order
     float    u, v;
     float    layer;
 };
@@ -67,93 +51,92 @@ enum class Blend : uint8_t {
 
 enum class Filter : uint8_t { Nearest = 0, Bilinear };
 
-// Drapeaux de lot. Bits volontairement stables : ils voyagent dans des traces
-// et des journaux de comparaison A/B.
+// Batch flags. Bit values are kept stable on purpose: they travel through
+// traces and A/B comparison logs.
 enum KeyFlags : uint8_t {
-    KF_ColorKey  = 1u << 0,   // le texel de cle (noir, ou index 0) est transparent
-    KF_Modulate  = 1u << 1,   // couleur = texture x couleur du sommet
-    KF_ConstAlpha= 1u << 2,   // alpha pris dans `constColor`
-    KF_AlphaTest = 1u << 3,   // rejet par seuil, voir alphaFunc/alphaRef
-    KF_ZWrite    = 1u << 4,   // ecrit dans le tampon de profondeur
+    KF_ColorKey  = 1u << 0,   // the key texel (black, or index 0) is transparent
+    KF_Modulate  = 1u << 1,   // color = texture x vertex color
+    KF_ConstAlpha= 1u << 2,   // alpha taken from `constColor`
+    KF_AlphaTest = 1u << 3,   // threshold rejection, see alphaFunc/alphaRef
+    KF_ZWrite    = 1u << 4,   // writes to the depth buffer
 };
 
-// Deux dessins de meme cle sont fusionnables ; deux dessins de cle differente
-// ne le sont pas. C'est la seule propriete que les deux backends exigent.
+// Two draws with the same key can be batched together; two draws with
+// different keys cannot. This is the only property both backends require.
 struct DrawKey {
-    uint32_t texture;      // 0 = aplat sans texture
+    uint32_t texture;      // 0 = flat fill, no texture
     uint32_t constColor;   // 0xAARRGGBB
     Blend    blend;
     Filter   filter;
     uint8_t  flags;        // KeyFlags
-    uint8_t  alphaFunc;    // 0 = defaut du backend ; sinon comparaison du portage
+    uint8_t  alphaFunc;    // 0 = backend default; otherwise the port's comparison op
     uint8_t  alphaRef;
     uint8_t  pad[3];
 };
 
-// ---- textures -------------------------------------------------------------
+// ---- textures ----------------------------------------------------------------
 enum class TexFormat : uint8_t {
-    Idx8,       // 8 bits indexes ; la palette est posee par palette_set()
+    Idx8,       // 8-bit indexed; palette is set via palette_set()
     Argb1555,
     Rgba8888,
 };
 
-// ---- le dos-d'ane que chaque cible implemente -----------------------------
-// Un backend concret (GPU de la console, couche OpenGL, comptage seul) remplit
-// cette structure. Le portage ne voit que ca.
+// ---- the interface every render target implements ---------------------------
+// A concrete backend (console GPU, OpenGL layer, counting-only) fills in
+// this struct. This is all the port ever sees.
 //
-// Aucune methode ne renvoie d'erreur autre que par `init` : un backend qui
-// echoue a l'initialisation doit rendre false, et l'appelant retombe alors sur
-// le backend de comptage — jamais sur un ecran noir.
+// No method reports failure except `init`: a backend that fails to
+// initialize must return false, and the caller then falls back to the
+// counting backend — never to a black screen.
 struct Backend {
-    // Ouvre le contexte pour une cible de `w` x `h`. false = indisponible.
+    // Opens the context for a `w` x `h` target. false = unavailable.
     bool (*init)(int w, int h);
     void (*shutdown)();
 
-    // Cree ou redimensionne une texture. `id` est choisi par l'appelant et lui
-    // sert de poignee ensuite. Rend false si la creation echoue.
+    // Creates or resizes a texture. `id` is chosen by the caller and serves
+    // as its handle afterward. Returns false if creation fails.
     bool (*texture_create)(uint32_t id, int w, int h, TexFormat fmt);
-    // Televerse un rectangle. `src` est un pointeur HOTE ; `srcPitch` est en
-    // OCTETS. Le televersement peut etre paresseux cote backend.
+    // Uploads a rectangle. `src` is a host pointer; `srcPitch` is in bytes.
+    // The upload may be lazy on the backend side.
     void (*texture_upload)(uint32_t id, int x, int y, int w, int h,
                            const void* src, int srcPitch);
-    // Palette pour les textures Idx8. `slot` correspond au `layer` du sommet.
-    // `argb256` = 256 mots 0xAARRGGBB.
+    // Palette for Idx8 textures. `slot` matches the vertex's `layer`.
+    // `argb256` = 256 words of 0xAARRGGBB.
     void (*palette_set)(int slot, const uint32_t* argb256);
 
-    // Un lot. `idx` indexe `verts`. Le backend n'a pas le droit de conserver
-    // les pointeurs au-dela de l'appel.
+    // A batch. `idx` indexes into `verts`. The backend may not retain either
+    // pointer beyond the call.
     void (*draw)(const DrawKey& key,
                  const Vertex* verts, uint32_t vertCount,
                  const uint16_t* idx, uint32_t idxCount);
 
     void (*clear_color)(uint32_t argb);
     void (*clear_depth)();
-    // Presente l'image. `frame` est le numero d'image de l'appelant : c'est lui
-    // qui date les ressources, donc lui qui sert de repere aux barrieres
-    // ci-dessous.
+    // Presents the frame. `frame` is the caller's frame number: it's what
+    // dates resources, and so what the barriers below use as a reference.
     void (*present)(uint64_t frame);
 
-    // ---- soumission en pipeline (facultative) -----------------------------
-    // PREMIERE image encore en vol (soumise, pas encore terminee par le GPU).
-    // Toute ressource utilisee par une image >= a ce numero ne doit pas etre
-    // reecrite : elle donnerait un rendu faux, de facon intermittente. Rend
-    // UINT64_MAX quand rien n'est en vol — ce que fait un backend synchrone.
+    // ---- pipelined submission (optional) ----------------------------------
+    // First frame still in flight (submitted, not yet completed by the GPU).
+    // Any resource used by a frame >= this number must not be overwritten —
+    // doing so causes intermittent rendering corruption. Returns UINT64_MAX
+    // when nothing is in flight, which is what a synchronous backend does.
     uint64_t (*in_flight_from)();
-    // Attend que tout soit presente. Une attente COMPTEE vaut mieux qu'une
-    // ressource reecrite sous le GPU.
+    // Waits until everything is presented. A bounded wait beats a resource
+    // getting overwritten under the GPU.
     void (*drain)();
 
-    // Ligne de compteurs pour un journal periodique. Rend le nombre d'octets
-    // ecrits dans `out`.
+    // Counter line for a periodic log. Returns the number of bytes written
+    // to `out`.
     int (*counters)(char* out, unsigned n);
 };
 
-// Le backend de COMPTAGE : compile partout, ne dessine rien, compte tout.
-// C'est le backend du bureau et de qemu, et le repli de tout backend dont
-// l'init echoue. Les deux portages en avaient deja un, ecrit deux fois.
+// The counting backend: compiles everywhere, draws nothing, counts
+// everything. Used on desktop and under qemu, and as the fallback for any
+// backend whose init fails.
 const Backend& null_backend();
 
-// Compteurs du backend de comptage, lisibles pour les tests.
+// Counters from the counting backend, readable by tests.
 struct NullStats {
     uint64_t frames, draws, verts, indices;
     uint64_t texCreates, texUploadBytes, paletteSets;
@@ -162,46 +145,40 @@ struct NullStats {
 const NullStats& null_stats();
 void null_stats_reset();
 
-// ---- LE PRIX DE CETTE COUTURE, MESURE ET NON ESTIME -----------------------
-// Le vocabulaire ci-dessus est l'UNION des besoins de deux portages, et une
-// union se paie : chaque portage porte les champs de l'autre sur le chemin par
-// image. Les trois sommets, comptes champ a champ :
+// ---- the cost of this shared vertex format -----------------------------------
+// The vocabulary above is the union of what a 2D and a 3D port need, and a
+// union has a cost: each port carries the other's fields down the per-frame
+// path. Vertex size, field by field:
 //
-//   portage 2D (anneau Glide)   x,y,u,v,argb,pal                24 octets
-//   portage 3D (Direct3D)       x,y,z,w,rgba,u,v                28 octets
-//   CE fichier (l'union)        x,y,z,w,rgba,u,v,layer          32 octets
+//   2D port (Glide-style ring)   x,y,u,v,argb,pal                24 bytes
+//   3D port (Direct3D-style)     x,y,z,w,rgba,u,v                28 bytes
+//   this file (the union)        x,y,z,w,rgba,u,v,layer          32 bytes
 //
-// Le portage 2D paierait +33 % de largeur de bande de sommets pour z et w dont
-// il ne se sert pas ; le portage 3D +14 % pour `layer`. Sur le premier, le
-// journal utilisateur donne 14 157 sommets par image hors du camp : 340 Kio
-// deviendraient 453 Kio par image, en recopie CPU ET en lecture GPU, sur une
-// console dont c'est la ressource rare.
+// A 2D port pays +33% vertex bandwidth for z and w it never uses; a 3D port
+// pays +14% for `layer`. At high per-frame vertex counts, on a console where
+// memory bandwidth is the scarce resource, that shows up in both CPU copy
+// and GPU read traffic.
 //
-// CONSEQUENCE PRATIQUE, a savoir avant de croire la couture gratuite : un
-// backend concret existant ne se branche pas ici sans que son format de sommet
-// GPU soit refait. Le backend GXM du premier portage declare ses quatre
-// attributs exactement sur ses 24 octets ; l'y brancher demande soit une
-// conversion par sommet a la place d'un unique memcpy, soit une declaration
-// GPU elargie et son nuanceur. Les DEUX se paient par image.
+// Practical consequence: an existing concrete backend cannot be wired in
+// here without reworking its GPU vertex format. A backend that declares its
+// attributes tightly packed on its own smaller vertex needs either a
+// per-vertex conversion (replacing a plain memcpy) or a wider GPU vertex
+// declaration and shader — both cost something every frame.
 //
-// Ce n'est pas un argument contre la couture — c'est le chiffre qu'il faut
-// avoir en main pour decider, et il n'avait jamais ete pose. La voie qui ne
-// coute rien est que le CONSTRUCTEUR DE LOTS du portage produise directement
-// le sommet de ce fichier au lieu d'en convertir un : il n'y a alors aucune
-// conversion, seulement un sommet plus large.
+// The zero-cost path is for the port's own batch builder to emit this
+// file's vertex format directly instead of converting into it — that
+// removes the conversion entirely, leaving only a wider vertex.
 //
-// ---- CE QUI N'EST PAS COUVERT, NOMMEMENT ----------------------------------
-// A ajouter quand un portage reel en aura besoin, pas avant :
-//   * les matrices et l'eclairage materiel — les deux portages font leur
-//     transformation en logiciel ;
-//   * le filtrage trilineaire et les niveaux de detail — aucun des deux n'en
-//     emet ;
-//   * les nuanceurs fournis par l'appelant — les deux backends ont un jeu
-//     d'etats ferme, volontairement ;
-//   * le rendu vers texture, le stencil, les tampons multiples ;
-//   * la compression de textures.
-// Ces manques sont des ABSENCES, pas des interdits : le vocabulaire ci-dessus
-// ne ferme la porte a aucun d'eux.
+// ---- explicitly not covered ---------------------------------------------------
+// Add these when a real port needs them, not before:
+//   * matrices and hardware lighting — ports do their own software transform;
+//   * trilinear filtering and mip levels — none currently emit them;
+//   * caller-supplied shaders — backends intentionally have a closed set of
+//     states;
+//   * render-to-texture, stencil, multiple render targets;
+//   * texture compression.
+// These are absences, not prohibitions: the vocabulary above doesn't rule
+// any of them out.
 
 }  // namespace render
 }  // namespace wx86

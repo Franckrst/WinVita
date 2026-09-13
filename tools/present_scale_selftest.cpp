@@ -1,24 +1,22 @@
-// tools/present_scale_selftest.cpp — prouve que wx86::scale_blit rend OCTET
-// POUR OCTET ce que rendait la boucle de presentation deja validee sur console.
+// Proves that wx86::scale_blit renders byte-for-byte what the presentation
+// loop already validated on console renders.
 //
-// POURQUOI CET OUTIL EXISTE
-// -------------------------
-// La couche de presentation des portages vit sous `#ifdef __vita__` : elle
-// n'est compilee ni sur bureau ni sous qemu, donc l'oracle d'identite d'image
-// du projet ne peut PAS l'exercer hors console. Deplacer ce code sans filet
-// reviendrait a modifier un chemin d'affichage critique en ne pouvant le
-// verifier que sur materiel.
+// Why this tool exists: the presentation layer lives under `#ifdef __vita__`
+// and is compiled neither on desktop nor under qemu, so the project's image-
+// identity oracle cannot exercise it off console. Moving this code without a
+// safety net would mean changing a critical display path that could only be
+// verified on hardware.
 //
-// Ce programme est ce filet. Il embarque une TRANSCRIPTION FIDELE de la boucle
-// d'origine (ref_scale ci-dessous, plein ecran, telle qu'elle existe dans le
-// portage) et la compare a la version generique du moteur sur des entrees
-// pseudo-aleatoires deterministes. Une seule difference d'octet fait echouer.
+// This program is that safety net. It embeds a faithful transcription of the
+// original loop (ref_scale below, full-screen, as it exists in the port) and
+// compares it against the engine's generic version on deterministic
+// pseudo-random inputs. A single byte difference fails the test.
 //
-// Ce qu'il prouve : l'extraction ne change pas un pixel, dans le cas plein
-// ecran qui est celui du portage aujourd'hui.
-// Ce qu'il NE prouve PAS : le comportement sur console (memoire d'affichage
-// reelle, cadence, incrustations). Ca reste a valider sur materiel le jour ou
-// le portage adoptera cette fonction.
+// What it proves: extraction doesn't change a pixel, for the full-screen
+// case (the port's case today).
+// What it does not prove: behavior on console (real display memory, frame
+// cadence, overlays). That still needs hardware validation whenever a port
+// adopts this function.
 #include "platform/present_scale.h"
 
 #include <cstdio>
@@ -28,17 +26,15 @@
 
 namespace {
 
-// ---- REFERENCE : les boucles D'ORIGINE DES PORTAGES, transcrites telles quelles
+// ---- Reference: the ports' original loops, transcribed as-is ----------------
 //
-// Deux references, pas une. La premiere version de ce fichier ne portait que le
-// cas PLEIN ECRAN du premier consommateur ; le sous-rectangle (les bandes
-// noires laterales) n'etait verifie que par des invariants de bornes, jamais
-// compare a une sortie de reference. Or c'est le cas par DEFAUT du second
-// consommateur, et c'est celui ou un arrondi ou un pas de ligne faux se voit.
+// Two references, not one: a full-screen loop and a sub-rect (letterboxed)
+// loop, since one port defaults to letterboxing, and that's exactly the case
+// where a rounding or pitch mistake would show up.
 //
-// ref_scale      — boucle plein ecran du premier consommateur (8 et 32 bits)
-// ref_scale_rect — boucle a sous-rectangle du second (8, 16 et 32 bits), avec
-//                  son cadrage proportionnel deja resolu par l'appelant.
+// ref_scale      — full-screen loop (8 and 32 bit)
+// ref_scale_rect — sub-rect loop (8, 16 and 32 bit), with its aspect-fit
+//                  rectangle already resolved by the caller.
 void ref_scale(uint32_t* dst, int SCR_W, int SCR_H,
                const uint8_t* pixels, int w, int h, int bpp, const uint8_t* pal) {
     uint32_t pal32[256];
@@ -59,7 +55,7 @@ void ref_scale(uint32_t* dst, int SCR_W, int SCR_H,
         uint32_t xacc = 0;
         if (bpp == 8) {
             int x = 0;
-            for (; x + 4 <= SCR_W; x += 4) {            // deroule 4:1
+            for (; x + 4 <= SCR_W; x += 4) {            // 4:1 unroll
                 out[x + 0] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x + 1] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x + 2] = pal32[row[xacc >> 16]]; xacc += sx;
@@ -76,8 +72,8 @@ void ref_scale(uint32_t* dst, int SCR_W, int SCR_H,
     }
 }
 
-// Boucle du SECOND consommateur (src/platform/vita_present.cpp,
-// do_scale_and_flip), transcrite au caractere pres sauf les noms d'ecran.
+// Transcribed character-for-character from src/platform/vita_present.cpp
+// (do_scale_and_flip), except for the screen variable names.
 void ref_scale_rect(uint32_t* dst, int SCR_W, int /*SCR_H*/,
                     const uint8_t* pixels, int srcW, int srcH, int bpp,
                     const uint8_t* pal, int ox, int oy, int dstW, int dstH) {
@@ -100,7 +96,7 @@ void ref_scale_rect(uint32_t* dst, int SCR_W, int /*SCR_H*/,
         uint32_t xacc = 0;
         if (bpp == 8) {
             int x = 0;
-            for (; x + 4 <= dstW; x += 4) {             // deroule 4:1
+            for (; x + 4 <= dstW; x += 4) {             // 4:1 unroll
                 out[x+0] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x+1] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x+2] = pal32[row[xacc >> 16]]; xacc += sx;
@@ -120,14 +116,14 @@ void ref_scale_rect(uint32_t* dst, int SCR_W, int /*SCR_H*/,
         } else if (bpp == 32) {
             const uint32_t* r32 = (const uint32_t*)row;
             for (int x = 0; x < dstW; ++x, xacc += sx) {
-                uint32_t bgr = r32[xacc >> 16];         // DIB 0x00RRGGBB (B,G,R,X en memoire)
+                uint32_t bgr = r32[xacc >> 16];         // DIB 0x00RRGGBB (B,G,R,X in memory)
                 out[x] = 0xFF000000u | ((bgr & 0xFF) << 16) | (bgr & 0xFF00) | ((bgr >> 16) & 0xFF);
             }
         }
     }
 }
 
-// Generateur deterministe : un echec doit etre rejouable a l'identique.
+// Deterministic generator: a failure must be reproducible exactly.
 uint32_t rng_state = 0x12345678u;
 uint32_t rnd() {
     rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17; rng_state ^= rng_state << 5;
@@ -150,8 +146,8 @@ void one_case(int scrW, int scrH, int w, int h, int bpp) {
     std::vector<uint8_t> pal(1024);
     for (auto& b : pal) b = (uint8_t)(rnd() & 0xFF);
 
-    // Fond non nul des deux cotes : une difference dans les lignes dupliquees
-    // se verrait, alors qu'un fond a zero pourrait la masquer.
+    // Nonzero background on both sides: a difference in duplicated rows would
+    // show up, whereas a zeroed background could mask it.
     std::vector<uint32_t> a((size_t)scrW * scrH, 0xDEADBEEFu);
     std::vector<uint32_t> b((size_t)scrW * scrH, 0xDEADBEEFu);
 
@@ -173,10 +169,10 @@ void one_case(int scrW, int scrH, int w, int h, int bpp) {
 }
 
 
-// Cas compare a la boucle du SECOND consommateur. `stretch` choisit entre son
-// mode plein ecran et son mode par defaut (cadrage proportionnel, bandes
-// noires) — les deux passent par le meme corps, ce qui est exactement la
-// propriete que fit_rect + scale_blit pretendent avoir.
+// Case compared against the sub-rect reference loop. `stretch` chooses
+// between full-screen mode and the default aspect-fit mode (letterboxing) —
+// both go through the same body, which is exactly the property fit_rect +
+// scale_blit are meant to have.
 void one_case_rect(int scrW, int scrH, int w, int h, int bpp, bool stretch) {
     const int bytesPerPx = bpp / 8;
     std::vector<uint8_t> src((size_t)w * h * bytesPerPx);
@@ -209,25 +205,24 @@ void one_case_rect(int scrW, int scrH, int w, int h, int bpp, bool stretch) {
 }  // namespace
 
 int main() {
-    // 960x544 est l'ecran de la console ; les autres tailles verifient que rien
-    // ne depend d'une dimension particuliere.
+    // 960x544 is the console's screen; the other sizes verify nothing
+    // depends on a specific dimension.
     const int screens[][2] = {{960, 544}, {640, 480}, {320, 200}, {1, 1}, {7, 3}};
-    // Sources : les modes reels des jeux, plus des cas degeneres (source plus
-    // grande que l'ecran, source minuscule, dimensions premieres).
+    // Sources: real game modes, plus degenerate cases (source larger than
+    // the screen, a tiny source, prime dimensions).
     const int sources[][2] = {{640, 480}, {800, 600}, {320, 240}, {1024, 768},
                               {960, 544}, {13, 7}, {1, 1}, {1280, 1024}};
 
     int cases = 0;
-    // (a) contre la boucle PLEIN ECRAN du premier consommateur. Elle ne connait
-    //     que 8 et 32 bits : le 16 bits n'a pas de reference de ce cote-la, et
-    //     l'y inventer serait ecrire soi-meme la reponse qu'on verifie.
+    // (a) against the full-screen reference loop. It only knows 8 and 32
+    //     bit: there is no 16-bit reference on this side, and inventing one
+    //     would mean writing the answer we're trying to verify.
     for (auto& s : screens)
         for (auto& g : sources)
             for (int bpp : {8, 32}) { one_case(s[0], s[1], g[0], g[1], bpp); ++cases; }
 
-    // (b) contre la boucle du second consommateur, dans SES DEUX cadrages et
-    //     sur SES TROIS formats. Le sous-rectangle n'etait jusqu'ici verifie
-    //     que par des invariants de bornes — jamais compare a une sortie.
+    // (b) against the sub-rect reference loop, in both its letterbox modes
+    //     and across all three formats.
     for (auto& s : screens)
         for (auto& g : sources)
             for (int bpp : {8, 16, 32}) {
@@ -242,7 +237,7 @@ int main() {
     std::printf("present_scale: %d cas (plein ecran ET sous-rectangle, 8/16/32 bits),"
                 " sortie identique octet pour octet\n", cases);
 
-    // Bornes du cadrage : invariant, en plus de la comparaison ci-dessus.
+    // Aspect-fit bounds: an invariant, on top of the comparison above.
     int bad = 0;
     for (auto& s : screens)
         for (auto& g : sources) {

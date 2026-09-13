@@ -1,5 +1,3 @@
-// src/runtime/guest_str.cpp — voir guest_str.h. Transcription fidele des corps
-// que les DEUX portages hebergeaient (identiques a la comparaison, 2026-09-11).
 #include "guest_str.h"
 #include "runtime/cpu.h"
 #include <cstdlib>
@@ -10,22 +8,23 @@ using namespace d2rt;
 std::string wx86_gread_mb(Cpu& c, uint32_t p, int len) {
     std::string s;
     if (len < 0) {
-        // Chemin rapide : la boucle octet par octet paie un c.read() virtuel PAR
-        // CARACTERE (wsprintf lit son format ainsi, ~79 k appels par run).
-        // strnlen sur la vue hote traverse exactement les memes octets.
+        // Fast path: the byte-by-byte loop below pays a virtual c.read() call
+        // PER CHARACTER (this is how wsprintf reads its format string), while
+        // strnlen on the host view walks the same bytes without those calls.
         //
-        // ATTENTION : hostptr() ne valide qu'UN octet. La boucle lente lit via
-        // c.read, bornee, qui rend zero hors arene et s'arrete donc au bord ;
-        // un strnlen nu sortirait dans la memoire hote. On borne le balayage a
-        // l'etendue reellement mappee. Desactive sous le garde-memoire pour que
-        // sa detection de lecture non mappee continue de fonctionner.
+        // CAUTION: hostptr() only validates ONE byte. The slow loop reads via
+        // bounded c.read(), which returns zero outside the arena and thus
+        // stops at the boundary; a raw strnlen could run off into host
+        // memory. The scan below is bounded to the actually-mapped span, and
+        // disabled under the memory guard so its unmapped-read detection
+        // keeps working.
         static const bool mg = std::getenv("WX86_MEMGUARD") || std::getenv("D2_MEMGUARD");
         if (!mg) {
             uint32_t span = 0x10000; const char* hp = nullptr;
             while (span && !(hp = (const char*)c.hostptr(p, span))) span >>= 1;
             if (hp) {
                 size_t n = strnlen(hp, span);
-                if (n < span) { s.assign(hp, n); return s; }   // zero trouve dans l'etendue sure
+                if (n < span) { s.assign(hp, n); return s; }   // null found within the safe span
             }
         }
         for (;;) { uint8_t b = 0; c.read(p++, &b, 1); if (!b) break; s.push_back((char)b); }

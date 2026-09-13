@@ -19,11 +19,10 @@
 void UpdateFlags(x86emu_t *emu)
 {
 #ifdef D2_EMITPROF
-    /* Compteur EXACT (pas echantillonne) : UpdateFlags est du C, un increment
-     * y est trivial et ne peut pas mentir. Deux chiffres, parce que le premier
-     * seul induit en erreur : la moitie des appels repartent sur `d_none`
-     * sans rien calculer — ils coutent quand meme la SORTIE du code traduit
-     * (pile, sauvegarde des drapeaux, BLX). */
+    /* EXACT counter (not sampled): UpdateFlags is plain C, so incrementing
+     * here is trivial and can't lie. Two counters, because the first alone
+     * would mislead: many calls land on `d_none` and compute nothing, yet
+     * still pay for the exit from translated code (stack, flag save, BLX). */
     ++d2ep_run_updateflags;
     if(emu->df != d_none) ++d2ep_run_updateflags_work;
 #endif

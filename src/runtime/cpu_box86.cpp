@@ -13,22 +13,18 @@
 // ESP still pointing at the pushed return address — same contract as the
 // Unicorn fetch-unmapped hook), then resumes at whatever EIP the handler set.
 // This round-trips through the dynarec prolog/epilog on every native call.
-// D2_INLINETRAP a supprime cet aller-retour (traduction du stub en appel natif
-// EN LIGNE) ; MESURE ET REFUTE sur console le 05/09/2026 — 22,82 img/s contre
-// un temoin encadrant a 22,83, avec preuve d'armement (100 % des prises
-// passees par le chemin en ligne). Retire le meme jour.
 //
-// Preemption (was TODO 6a) is implemented via the block-entry budget: every
+// Preemption is implemented via the block-entry budget: every
 // translated block's prologue decrements emu->dyn86_budget (recharged per
 // slice in run()) and exits DynaRun resumable at the block's start when it
 // expires; request_stop() zeroes the budget (plus dyn86_request_stop's flag
 // for the LinkNext seam, which covers not-yet-translated targets). Blocks
 // stay direct-linked. Residual limitation: a loop contained in a SINGLE
-// dynablock never re-enters a prologue and cannot be preempted this way (D2
-// threads yield via import traps long before that matters).
+// dynablock never re-enters a prologue and cannot be preempted this way
+// (guest threads that yield via import traps are unaffected).
 //
-// TODO (deferred to a later lot):
-//  * SMC (6b): protectDB write-protects pages holding translated code; Box86
+// TODO (deferred):
+//  * SMC: protectDB write-protects pages holding translated code; Box86
 //    normally catches the SIGSEGV of a guest self-write and invalidates.
 //    No segv handler is installed here yet; host-side Cpu::write() does call
 //    unprotectDB() first, so bridge-side writes (IAT patches...) are safe.
@@ -40,13 +36,13 @@
 
 #include <cstdint>
 #include "runtime/guest_thread.h"   // X86Context (per-thread FPU blob)
-#include "runtime/prof_map.h" // la carte des familles du profil (fournie par le portage)
+#include "runtime/prof_map.h" // address-family map for the profiler (provided by the port)
 #include "runtime/cpu.h"    // MUST be included before the Box86 headers:
                             // Box86's regs.h #defines R_EAX & friends.
-#include "runtime/gil.h"    // GIL Guard at the trap dispatch (spec D3; inert coop)
-#include "runtime/trapcnt.h"// compteur de prises par creneau: le chemin
-                            // intrinseque court-circuite le Bridge, c'est ICI
-                            // qu'il doit se compter (en-tete sans dependance)
+#include "runtime/gil.h"    // GIL guard at the trap dispatch (inert under the cooperative backend)
+#include "runtime/trapcnt.h"// per-slot acquisition counter: the intrinsic path
+                            // bypasses the Bridge, so this is where it must be
+                            // counted (dependency-free header)
 #ifndef __vita__            // Vita delivers no POSIX signals; the SIGSEGV diag
 #include <csignal>          // handler is a desktop/qemu debug aid only.
 #include <ucontext.h>
@@ -54,7 +50,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
-#include <ctime>      // coeur2 : chrono des prises contendues (D2_FILSTAT)
+#include <ctime>      // timing for contended lock acquisitions (D2_FILSTAT)
 #include <pthread.h>
 #include <cstdlib>
 #include <atomic>
@@ -81,7 +77,7 @@ extern "C" {
 #include "dynablock.h"
 #include "dynarec/dynablock_private.h"
 #include "dyn86.h"
-#include "dyn86_memintrin.h"    // D2Vita : memcpy/memset natifs (D2_MEMINTRIN)
+#include "dyn86_memintrin.h"    // native memcpy/memset intrinsics (D2_MEMINTRIN)
 
 void dynarec86_setup_emu_helpers(x86emu_t* emu);    // shim_impl.c
 }
@@ -101,129 +97,118 @@ void dynarec86_setup_emu_helpers(x86emu_t* emu);    // shim_impl.c
 
 // D2_EIPPROF sampling profiler (see run()). Buckets are C-visible so rt_boot
 // can print them; base is the guest image base (set once the exe is mapped).
-// DOIT rester au niveau FICHIER : dans le namespace anonyme de `d2rt`, GCC 15
-// (VitaSDK) donne la priorité au lien interne et décore ces symboles malgré le
-// `extern "C"` — le lien Vita échouait alors sur `undefined reference to
-// d2rt_eipprof_*` alors que le GCC 13 du build qemu passait. (2026-08-26)
+// Must stay at FILE scope: inside d2rt's anonymous namespace, GCC 15
+// (VitaSDK) gives internal linkage priority and mangles these symbols despite
+// `extern "C"`, so the Vita link fails with `undefined reference to
+// d2rt_eipprof_*` (GCC 13 in the qemu build accepts it either way).
 extern "C" {
     uint32_t d2rt_eipprof_on = 0;
     uint32_t d2rt_eipprof_base = 0;
     uint64_t d2rt_eipprof[8] = {0};
     uint64_t d2rt_eipprof_sub[32] = {0};    // 0x0f0000 + n*0x1000
     uint64_t d2rt_eipprof_sub2[32] = {0};   // 0x0d0000 + n*0x1000
-    uint64_t d2rt_eipprof_fn[16] = {0};     // 0x0fa000 + n*0x100 (zoom fonction)
-    uint64_t d2rt_eipprof_sub3[32] = {0};   // (réservé)
-    uint64_t d2rt_eipprof_all[96] = {0};    // n*0x8000 sur tout le .text
-    // Histogramme EXACT des EIP échantillonnés (= adresses de début de bloc).
-    // Les cases de 32 KiB disent « où », pas « quoi » : pour porter une
-    // fonction il faut son adresse, pas sa tranche. Table ouverte à sondage
-    // linéaire ; ~10 k échantillons pour 8192 cases, la saturation ne se
-    // produit pas — et si elle se produisait on PERD l'échantillon, on ne le
-    // ré-attribue jamais à une autre adresse.
+    uint64_t d2rt_eipprof_fn[16] = {0};     // 0x0fa000 + n*0x100 (function-level zoom)
+    uint64_t d2rt_eipprof_sub3[32] = {0};   // (reserved)
+    uint64_t d2rt_eipprof_all[96] = {0};    // n*0x8000 across the whole .text
+    // Exact histogram of sampled EIPs (= block start addresses). The 32 KiB
+    // buckets say "where", not "what": porting a function needs its address,
+    // not its slice. Open-addressed hash table; ~10k samples for 8192 slots,
+    // so saturation doesn't happen in practice — and if it did, the sample
+    // would be DROPPED, never reattributed to another address.
     uint32_t d2rt_eipprof_key[8192] = {0};
     uint64_t d2rt_eipprof_hit[8192] = {0};
 
-    // ---- D2_TIMEPROF : profil en TEMPS du code invite --------------------
-    // Contrat et raison d'etre : docs/perf/timeprof_20260907.md.
-    // D2_EIPPROF echantillonne a l'expiration d'un budget de BLOCS : ses
-    // pourcentages sont des parts d'ENTREES DE BLOC, pas de temps, et il
-    // sur-represente d'un facteur ~10 les fonctions courtes tres appelees
-    // (mesure du 07/09 : o1_intrin_console_20260907.md §3).
-    // Ici le budget est ASSERVI pour que les intervalles soient egaux en TEMPS.
+    // ---- D2_TIMEPROF: time-based profiling of guest code -------------------
+    // D2_EIPPROF samples on expiry of a BLOCK-count budget: its percentages
+    // are shares of block ENTRIES, not of time, and it over-represents short,
+    // frequently-called functions. Here the budget is servo-controlled so
+    // sampling intervals are equal in TIME instead.
     //
-    // ⚡ CE QUE CET INSTRUMENT NE FAIT PAS, ET QU'IL DEVAIT FAIRE.
-    // L'asservissement egalise la DUREE des intervalles ; il ne change pas QUEL
-    // bloc est tire a l'interieur d'un intervalle — le tirage se fait toujours
-    // a un nombre de blocs fixe. L'adresse echantillonnee reste donc distribuee
-    // proportionnellement a la FREQUENCE D'ENTREE, comme D2_EIPPROF.
-    // Mesure du 07/09, meme fenetre console : 10dd60 = 14,11 % ici contre
-    // 12,06 % la-bas, 075aa0 = 7,02 contre 6,53 — les deux profils CONCORDENT.
-    // docs/perf/timeprof_20260907.md §3.
+    // What this does NOT fix: the servo only equalizes interval DURATION; it
+    // doesn't change WHICH block gets sampled inside an interval — the sample
+    // is still drawn at a fixed block count. The sampled address therefore
+    // stays distributed proportionally to ENTRY FREQUENCY, same as
+    // D2_EIPPROF.
     //
-    // CE QU'IL APPORTE QUAND MEME : 29x plus d'echantillons (116 486 contre
-    // 3 994) et 3x plus d'adresses vues, donc un classement exploitable au-dela
-    // de la 20e place ; et l'ALIASING est ecarte (echantillonner toutes les
-    // ~8 ms dans une image de 18,5 ms groupe les releves sur certaines phases).
-    // Que les deux profils concordent malgre cela ETABLIT que les chiffres
-    // console de D2_EIPPROF n'etaient pas un artefact d'aliasing.
+    // What it adds anyway: far more samples and distinct addresses, so
+    // rankings beyond the top ~20 become usable, and periodic aliasing (a
+    // fixed sampling period beating against a periodic per-frame workload)
+    // is avoided.
     //
-    // COUT : -10,5 % sur l'image a 250 us de cible (budget ~708 blocs, soit
-    // ~28x plus d'aller-retours epilogue/prologue). JAMAIS dans une jambe de
-    // vitesse. Monter la cible a 1000 us divise le cout par ~4.
+    // Cost: significant at a small target interval (e.g. 250us) — never use
+    // a small interval in a speed-sensitive run. A larger target (e.g.
+    // 1000us) cuts the cost roughly 4x.
     //
-    // Un VRAI profil en temps demanderait d'echantillonner le PC a des instants
-    // choisis : impossible ici (l'EIP invite vit dans r14 et n'est en memoire
-    // qu'a l'epilogue) sans un compteur de cycles (PMCCNTR), inaccessible
-    // depuis l'userland Vita sans PMUSERENR pose en mode noyau.
-    uint32_t d2rt_timeprof_on = 0;       // 0 = eteint ; sinon cible en us
+    // A true time profiler would sample the PC at chosen instants; not
+    // possible here without a cycle counter (PMCCNTR, inaccessible from Vita
+    // userland without kernel-mode PMUSERENR) — the guest EIP lives in r14
+    // and is only written to memory at block epilogues.
+    uint32_t d2rt_timeprof_on = 0;       // 0 = off; else target interval in us
     uint32_t d2rt_timeprof_base = 0;
-    uint64_t d2rt_tp_key[8192] = {0};    // adresse invitee (0 = case libre)
+    uint64_t d2rt_tp_key[8192] = {0};    // guest address (0 = empty slot)
     uint64_t d2rt_tp_hit[8192] = {0};
-    uint64_t d2rt_tp_bucket[8] = {0};    // memes familles que d2rt_eipprof
-    uint64_t d2rt_tp_samples = 0;        // echantillons RETENUS
-    uint64_t d2rt_tp_susp = 0;           // intervalles rejetes (fil suspendu)
-    uint64_t d2rt_tp_us = 0;             // temps couvert par les echantillons
-    uint64_t d2rt_tp_blocks = 0;         // blocs couverts (pour le budget moyen)
+    uint64_t d2rt_tp_bucket[8] = {0};    // same families as d2rt_eipprof
+    uint64_t d2rt_tp_samples = 0;        // samples RETAINED
+    uint64_t d2rt_tp_susp = 0;           // intervals rejected (thread suspended)
+    uint64_t d2rt_tp_us = 0;             // time covered by the samples
+    uint64_t d2rt_tp_blocks = 0;         // blocks covered (for the average budget)
 
-    // ---- D2_LAGWATCH : anneau d'echantillons pour attribuer un GEL ---------
-    // Le probleme des gels ponctuels n'est pas le meme que celui du debit : ce
-    // sont des evenements RARES, pendant que l'utilisateur joue, et qu'on ne
-    // peut pas rejouer. D2_FRAMEPROF sait deja QUAND ils arrivent et attribue
-    // deja les causes HOTES (traduction JIT, synchro I-cache, lectures
-    // fichier, decompressions, changements de fil). Ce qui manque est : QUELLE
-    // FONCTION INVITEE tournait pendant le gel.
-    // Cet anneau garde les derniers echantillons (horodate, EIP, fil). Quand
-    // une image depasse le seuil, rt_boot y releve les echantillons tombes
-    // DANS cette image et publie les adresses dominantes.
-    // Cout : celui de l'echantillonneur seul (D2_TIMEPROF), donc regle par son
-    // intervalle — 2000 us par defaut sous LAGWATCH, ~1 % au lieu des 10,5 %
-    // mesures a 250 us.
-    // ⚠️ LIMITE, a dire : une boucle invitee qui tient dans UN SEUL dynablock
-    // ne re-entre jamais dans un prologue et n'est donc JAMAIS echantillonnee.
-    // Un gel de cette nature apparaitra avec « ech=0 » — ce qui est lui-meme
-    // une information, et non un silence.
-    uint32_t d2rt_lag_on = 0;            // 1 = anneau alimente
+    // ---- D2_LAGWATCH: sample ring for attributing a stall -------------------
+    // One-off stalls are a different problem from throughput: they are RARE
+    // events, happen while the user is playing, and can't be replayed.
+    // D2_FRAMEPROF already knows WHEN they happen and attributes HOST-side
+    // causes (JIT translation, I-cache sync, file reads, decompression,
+    // thread switches). What's missing is WHICH GUEST function was running
+    // during the stall.
+    // This ring keeps recent samples (timestamp, EIP, thread). When a frame
+    // exceeds the threshold, rt_boot looks up the samples that fall within
+    // that frame and reports the dominant addresses.
+    // Cost is that of the underlying sampler (D2_TIMEPROF) alone, so it is
+    // set by its interval — LAGWATCH defaults to a larger interval to keep
+    // the overhead low.
+    // Limitation: a guest loop contained in a SINGLE dynablock never
+    // re-enters a prologue and so is NEVER sampled. A stall of this kind
+    // shows up as zero samples, which is itself informative, not silence.
+    uint32_t d2rt_lag_on = 0;            // 1 = ring is being fed
     #define D2RT_LAG_RING 2048u
-    uint64_t d2rt_lag_t[D2RT_LAG_RING]  = {0};   // horodate (us)
-    uint32_t d2rt_lag_ip[D2RT_LAG_RING] = {0};   // EIP invite
-    uint32_t d2rt_lag_w = 0;                     // curseur d'ecriture, monotone
+    uint64_t d2rt_lag_t[D2RT_LAG_RING]  = {0};   // timestamp (us)
+    uint32_t d2rt_lag_ip[D2RT_LAG_RING] = {0};   // guest EIP
+    uint32_t d2rt_lag_w = 0;                     // write cursor, monotonic
 }
 
-// ⚡ CES DEFINITIONS DOIVENT RESTER AU SCOPE GLOBAL. Elles vivaient dans le
-// namespace ANONYME de ce fichier : `extern "C"` n'y donne PAS une liaison
-// externe — le symbole garde sa decoration
-// (_ZN4d2rt12_GLOBAL__N_113d2rt_b5_callsE) et rt_boot ne le trouve plus.
-// Le piege est silencieux cote qemu (g++ 13 acceptait) et n'a echoue qu'a
-// l'edition de liens VITA (arm-vita-eabi 15.2) : deux chaines d'outils, deux
-// verdicts, sur le meme source.
+// These definitions must stay at GLOBAL scope. Inside this file's anonymous
+// namespace, `extern "C"` does not give them external linkage — the symbol
+// keeps its mangled name (_ZN4d2rt12_GLOBAL__N_113d2rt_b5_callsE) and rt_boot
+// can no longer find it. g++ accepts this silently; the Vita toolchain
+// (arm-vita-eabi) rejects it at link time — same source, different verdict
+// per toolchain.
 #if defined(D2_TLSCOUNT) || defined(D2_B5CENSUS)
 extern "C" { unsigned long long d2_tls_hits = 0; }
 #endif
 extern "C" {
-    unsigned long long d2rt_b5_calls  = 0;   // entrees dans try_intrinsic
-    unsigned long long d2rt_b5_loads  = 0;   // lectures de la table
-    unsigned long long d2rt_b5_hits   = 0;   // intrinseques servies
-    unsigned long long d2rt_b5_emutls = 0;   // chaines emutls dans le corps servi
-    unsigned int       d2rt_b5_index_on = 0; // jambe armee : 1 = index direct
-    unsigned int       d2rt_b5_direct_n = 0; // creneaux couverts par l'index direct
-    unsigned int       d2rt_b5_direct_lo = 0;// VA du creneau d'indice 0
+    unsigned long long d2rt_b5_calls  = 0;   // entries into try_intrinsic
+    unsigned long long d2rt_b5_loads  = 0;   // intrinsics-table lookups
+    unsigned long long d2rt_b5_hits   = 0;   // intrinsics actually serviced
+    unsigned long long d2rt_b5_emutls = 0;   // per-thread state resolutions inside a serviced call
+    unsigned int       d2rt_b5_index_on = 0; // 1 = direct-index path armed
+    unsigned int       d2rt_b5_direct_n = 0; // slots covered by the direct index
+    unsigned int       d2rt_b5_direct_lo = 0;// VA of slot index 0
 }
 
-// ---- LA CARTE DES FAMILLES du profil d'adresses (runtime/prof_map.h) -------
-// Au SCOPE GLOBAL, pour la meme raison que les compteurs ci-dessus : ces deux
-// accesseurs sont des symboles du moteur, et les aides en ligne doivent etre
-// visibles depuis le namespace anonyme plus bas.
+// ---- Address-family map for the profiler (runtime/prof_map.h) ----------
+// At GLOBAL scope for the same reason as the counters above: these two
+// accessors are engine symbols, and the inline helpers need to see them from
+// the anonymous namespace below.
 static Wx86ProfMap g_profMap;
 void wx86_prof_set_map(const Wx86ProfMap& m) { g_profMap = m; }
 const Wx86ProfMap& wx86_prof_map() { return g_profMap; }
 
-// La CLASSIFICATION elle-meme vit dans prof_map.h (fonctions en ligne), pour
-// qu'un oracle de bureau puisse l'exercer : cette unite-ci ne se compile que
-// pour ARM/Vita. Ici, seules les trois fenetres de detail sont cablees a leurs
-// compteurs. Elles ne dependent PLUS de la famille trouvee : le code d'avant
-// testait `b == 4`, puis `b == 6 && rva dans [0x0d0000,0x0f0000)`, ce qui etait
-// exactement « rva dans la fenetre » pour la carte d'alors — deux fenetres qui
-// ne se recouvrent pas donnent les memes comptes qu'un if/else-if.
+// Classification itself lives in prof_map.h (inline functions) so a desktop
+// build can exercise it too — this translation unit only compiles for
+// ARM/Vita. Here only the three detail windows are wired to their counters.
+// They don't need to check which family matched: the windows are disjoint,
+// so testing "rva falls in this window" alone gives the same counts as
+// checking family-then-range would.
 static inline void wx86_prof_zooms(uint32_t rva) {
     const Wx86ProfMap& m = g_profMap;
     int k;
@@ -256,11 +241,10 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
         auto& mc = ((ucontext_t*)uctx)->uc_mcontext;
         pc = mc.arm_pc; lr = mc.arm_lr; sp = mc.arm_sp;
         r0 = mc.arm_r0; r1 = mc.arm_r1; r2 = mc.arm_r2;
-        // Convention box86/ARM : r4..r11 SONT les huit registres x86 VIVANTS
-        // (EAX ECX EDX EBX ESP EBP ESI EDI). emu->ip/emu->regs ne sont
-        // synchronises qu'aux frontieres de bloc : au milieu d'un dynablock ils
-        // sont PERIMES, et c'est ce qui a fait perdre du temps le 05/09. Ces
-        // huit-la sont exacts a l'instruction fautive.
+        // box86/ARM convention: r4..r11 ARE the eight live x86 registers
+        // (EAX ECX EDX EBX ESP EBP ESI EDI). emu->ip/emu->regs are only
+        // synced at block boundaries — mid-dynablock they're STALE, while
+        // these eight ARM registers are exact at the faulting instruction.
         live[0]=mc.arm_r4; live[1]=mc.arm_r5; live[2]=mc.arm_r6; live[3]=mc.arm_r7;
         live[4]=mc.arm_r8; live[5]=mc.arm_r9; live[6]=mc.arm_r10; live[7]=mc.arm_fp;
         live_ok = true;
@@ -287,14 +271,12 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
     if (dynablock_t* db = FindDynablockFromNativeAddress((void*)pc)) {
         fprintf(stderr, " | dynablock x86=%p size=%d hostoff=+0x%x",
                 db->x86_addr, db->x86_size, (unsigned)(pc - (uintptr_t)db->block));
-        // ADRESSE x86 EXACTE de l'instruction fautive. Reclamee par la
-        // relecture profonde du 2026-08-25 (« remonter du PC hote a l'adresse
-        // x86 exacte via la table instsize du dynablock plutot qu'imprimer
-        // emu->ip », qui n'est synchronise qu'aux frontieres de bloc). La
-        // table instsize donne, pour chaque instruction x86 traduite, sa
-        // taille x86 et sa taille native en mots : on marche les deux jusqu'a
-        // encadrer le PC hote. Une entree a 15 signifie « la suivante
-        // continue » (encodage 4 bits de box86).
+        // EXACT x86 address of the faulting instruction, derived by walking
+        // the dynablock's instsize table rather than printing emu->ip (which
+        // is only synced at block boundaries). For each translated x86
+        // instruction, instsize gives its x86 size and its native size in
+        // words: walk both until the host PC is bracketed. An entry value of
+        // 15 means "the next one continues" (box86's 4-bit encoding).
         if (db->instsize && db->x86_addr) {
             uintptr_t x86a = (uintptr_t)db->x86_addr, arma = (uintptr_t)db->block;
             int i = 0;
@@ -332,7 +314,7 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
     // readable in the host address space. Env D2_CODELO/HI override the range.
     if (e) {   // g_mb may be 0 (identity mmap) — gesp+g_mb is still the host ptr
         uint32_t gesp = e->regs[4].dword[0];
-        uint32_t lo = 0x01900000, hi = 0x02200000;   // compact-layout module window (9 MiB depuis le 13/09) (forced-reloc Game.exe, 2026-08-25 squeeze); override via D2_CODELO/HI
+        uint32_t lo = 0x01900000, hi = 0x02200000;   // compact-layout module window (9 MiB), sized for a forced-relocation guest image; override via D2_CODELO/HI
         if (const char* s = getenv("WX86_CODELO") ? getenv("WX86_CODELO") : getenv("D2_CODELO")) lo = (uint32_t)strtoul(s, nullptr, 16);
         if (const char* s = getenv("WX86_CODEHI") ? getenv("WX86_CODEHI") : getenv("D2_CODEHI")) hi = (uint32_t)strtoul(s, nullptr, 16);
         const uint32_t* gs = (const uint32_t*)(uintptr_t)(gesp + g_mb);
@@ -364,29 +346,27 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
 #endif // !__vita__
 
 
-// fastmmu: guest->host delta (env WX86_MEMBASE, repli D2MEMBASE; hex, low 24 bits zero; 0 =
-// identity). The guest keeps its validated D2 layout; host pages live at
-// va+g_mb — the exact Vita memory model (memblock VAs are kernel-assigned).
-// g_mb defined above (forward-declared before diag_segv); initialized here.
-// JOURNAL DU MOTEUR. Une sortie fatale precoce DOIT laisser une ligne : sur
-// materiel il n'y a pas de stderr, et un _exit silencieux se lit
-// « l'application se ferme au lancement » (rapport HW 2026-08-24 : mort pile a
-// l'allocation de l'arene compacte).
+// fastmmu: guest->host delta (env WX86_MEMBASE, falls back to D2MEMBASE; hex,
+// low 24 bits zero; 0 = identity). The guest keeps its validated memory
+// layout; host pages live at va+g_mb — the exact Vita memory model (memblock
+// VAs are kernel-assigned). g_mb is forward-declared above (before
+// diag_segv); initialized here.
 //
-// Le service appartient au moteur (platform/vita_host.h) : sur console il ecrit
-// la ligne durable, hors console il ne fait rien. L'appel est DIRECT et en lien
-// FORT — plus de reference faible a tester.
+// Engine log. An early fatal exit MUST leave a line: on hardware there is no
+// stderr, and a silent _exit reads as "the application just closes at
+// launch" with no way to tell why.
 //
-// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
-// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
-// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
-// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
-// de ses consommateurs.
+// The logging service belongs to the engine (platform/vita_host.h): on
+// console it writes the durable line, off console it's a no-op. The call is
+// DIRECT and strongly linked — a generic engine must not hard-wire a
+// specific consumer's symbol name as a weak-reference fallback, since a port
+// whose symbols don't carry that prefix would get a silently muted log with
+// no link error to flag it.
 #include "platform/vita_host.h"
 static inline void* H(uint32_t va) { return (void*)((uintptr_t)va + g_mb); }
-// C11 (deep review 2026-08-25): evaluated LAZILY, not as a pre-main static —
-// on Vita the knob arrives via env.txt which platform_init applies AFTER static
-// init, so a pre-main getenv could never see it. -1 = not yet checked.
+// Evaluated LAZILY, not as a pre-main static: on Vita the knob arrives via
+// env.txt, which platform_init applies AFTER static init, so a pre-main
+// getenv could never see it. -1 = not yet checked.
 static int g_memGuardV = -1;
 static inline bool mem_guard(){ if(g_memGuardV<0) g_memGuardV = (std::getenv("WX86_MEMGUARD")||std::getenv("D2_MEMGUARD"))?1:0; return g_memGuardV!=0; }
 // Single-arena mode (the exact Vita model): ONE host block covers the whole
@@ -394,14 +374,14 @@ static inline bool mem_guard(){ if(g_memGuardV<0) g_memGuardV = (std::getenv("WX
 // chosen); map()/set_trap() no longer host-mmap per region — the block already
 // backs them. On Vita this block is one sceKernelAllocMemBlockForVM; here it is
 // one lazy mmap (overcommit), proving the model without needing the compressed
-// hardware layout yet. Enabled by WX86_ARENA=<hex bytes> (repli D2ARENA).
+// hardware layout yet. Enabled by WX86_ARENA=<hex bytes> (falls back to D2ARENA).
 static bool     g_arena = false;
-// (compteurs D2_EIPPROF : définis AU NIVEAU FICHIER, voir avant `namespace d2rt`)
+// (D2_EIPPROF counters: defined at FILE SCOPE, see above `namespace d2rt`)
 #define g_eipProf        d2rt_eipprof_on
 #define g_eipProfBase    d2rt_eipprof_base
 #define g_eipProfBuckets d2rt_eipprof
-// C3: usable guest span behind the single block ([0, g_arena_span)). 0 = unknown
-// (sparse/identity layouts) -> the check below is skipped, exactly as before.
+// Usable guest span behind the single block ([0, g_arena_span)). 0 = unknown
+// (sparse/identity layouts): the check below is then skipped.
 static uint32_t g_arena_span = 0;
 static uint64_t g_arenaViol = 0;
 // One cheap compare per shim-side deref. A guest VA past the block would alias
@@ -422,106 +402,108 @@ class CpuBox86;
 static CpuBox86* g_self = nullptr;     // single instance (asserted in make_cpu_box86)
 
 // Native backend: per-HOST-thread current emu. Zero (=> base emu_) on the
-// main thread and under the cooperative backend — the historical single-emu
-// behaviour is the TLS default, not a mode test.
+// main thread and under the cooperative backend — the single-emu behavior is
+// simply the TLS default, not a mode test.
 #if defined(D2_TLSCOUNT) || defined(D2_B5CENSUS)
 #define D2_TLSCOUNT_HIT() (++d2_tls_hits)
-// RECENSEMENT B3 — compteur d'APPELS a E(), incremente AVANT le raccourci
-// g_multi_emu. Les deux compteurs disent deux choses differentes et il faut
-// les deux :
-//   * d2_tls_hits = chaines emutls REELLEMENT payees dans CE run. Sous coop le
-//     raccourci les met a zero : le chiffre est donc muet sur le regime livre.
-//   * d2_e_calls  = appels a E(), c'est-a-dire le nombre de chaines que le
-//     regime LIVRE (D2SCHED=native, ou g_multi_emu est vrai par construction)
-//     paierait pour le meme travail invite. C'est ce compteur qui sert de
-//     recensement, parce qu'il est INDEPENDANT DE L'ORDONNANCEUR : le banc
-//     deterministe (coop, D2_VIRTCLOCK) le rend identique au banc natif pour
-//     le meme scenario, alors que d2_tls_hits ne le peut pas.
-// Un prix unitaire n'est PAS deduit ici : ce compteur est un COMPTE, et le
-// prix de la chaine se mesure sur console, pas sous qemu.
+// Counts calls to E(), incremented BEFORE the g_multi_emu shortcut. The two
+// counters measure different things, and both are needed:
+//   * d2_tls_hits = per-thread state resolutions ACTUALLY paid in THIS run.
+//     Under the cooperative backend the shortcut keeps it at zero, so it
+//     says nothing about the production (native-scheduler) regime.
+//   * d2_e_calls  = calls to E(), i.e. the number of resolutions the
+//     PRODUCTION regime (D2SCHED=native, where g_multi_emu is true by
+//     construction) would pay for the same guest work. This is the counter
+//     to use for a census, because it is SCHEDULER-INDEPENDENT: a
+//     deterministic bench under the cooperative backend gives the same
+//     number as the native bench for the same scenario, which d2_tls_hits
+//     cannot.
+// No per-call cost is derived here: this counter is a COUNT, and the actual
+// cost per resolution has to be measured on real hardware, not under qemu.
 extern "C" { unsigned long long d2_e_calls = 0; }
 #define D2_ECALL() (++d2_e_calls)
 #else
 #define D2_TLSCOUNT_HIT() ((void)0)
 #define D2_ECALL()        ((void)0)
 #endif
-// ---- RECENSEMENT B5 (build de MESURE : -DD2_B5CENSUS, jamais livre) --------
-// Ce que chaque compteur mesure, EXACTEMENT :
-//   appels  = entrees dans try_intrinsic (= une par trap invite->hote servi ou
-//             non par le chemin rapide) ;
-//   lectures= acces a la TABLE des intrinseques (une par iteration de sondage
-//             cote heritage ; zero cote index direct quand le creneau est hors
-//             de la fenetre) ;
-//   servis  = appels ou l'intrinseque a rendu vrai (donc le trap n'est jamais
-//             entre dans le pont) ;
-//   emutls  = resolutions d'etat par fil (E()) FACTUREES pendant le corps de
-//             l'intrinseque. C'est un COMPTE, pas une estimation : E() est le
-//             seul site qui devienne __emutls_get_address sur Vita, et il est
-//             instrumente a la source. Il vaut 0 sous coop PAR CONSTRUCTION
-//             (le raccourci g_multi_emu rend emu_ sans toucher au TLS) : le
-//             recensement de ce poste ne se fait que sous D2SCHED=native.
-// Toujours DEFINIS (pour que rt_boot les imprime sans #ifdef), incrementes
-// UNIQUEMENT sous D2_B5CENSUS : un ++ inconditionnel sur ce chemin serait la
-// faute PROF_COUNTERS (4,4 % mesures console).
-// (definitions remontees au scope global — voir plus haut : dans un
-// namespace ANONYME, extern "C" ne suffit pas a donner une liaison
-// externe, et les symboles restaient decores.)
-// D2_B5INDEX=1 (ou D2_B5=1) : index DIRECT dans la repartition des
-// intrinseques, a la place du sondage lineaire. DEFAUT = ANCIEN CHEMIN.
+// ---- Census counters (measurement build only: -DD2_B5CENSUS, never shipped) ----
+// Exactly what each counter measures:
+//   calls  = entries into try_intrinsic (one per guest->host trap, whether
+//            or not the fast path services it);
+//   loads  = accesses to the intrinsics TABLE (one per probe iteration on
+//            the legacy linear-scan path; zero on the direct-index path
+//            when the slot is outside the indexed window);
+//   hits   = calls where the intrinsic returned true (so the trap never
+//            enters the bridge);
+//   emutls = per-thread state resolutions (E()) charged inside the
+//            serviced intrinsic's body. This is a COUNT, not an estimate:
+//            E() is the only site that becomes __emutls_get_address on
+//            Vita, and it is instrumented at the source. It is 0 under the
+//            cooperative backend BY CONSTRUCTION (the g_multi_emu shortcut
+//            makes E() a no-op on TLS), so this counter is only meaningful
+//            under D2SCHED=native.
+// Always DEFINED (so rt_boot can print them unconditionally), but only
+// INCREMENTED under D2_B5CENSUS: an unconditional ++ on this path would add
+// real, measurable overhead on every call — exactly what this build flag
+// exists to avoid.
+// (kept at global scope: same linkage reason as above.)
+// D2_B5INDEX=1 (or D2_B5=1): DIRECT index into the intrinsics table instead
+// of the linear probe. Default is the plain linear-scan path.
 static bool g_b5index = false;
 #ifdef D2_B5CENSUS
-// TEST D'ECHELLE du recensement (build de MESURE uniquement — ce code n'existe
-// pas dans le binaire livre). D2_B5SCALE=N refait, par intrinseque servie,
-// N-1 fois EXACTEMENT le travail que les deux compteurs pretendent mesurer :
-// une lecture de la table des cles, et une resolution d'etat par fil (E()).
-// Les compteurs doivent alors monter de (N-1) par service — un compteur qui
-// ne bouge pas ne mesure pas ce qu'il annonce.
-// AUCUN EFFET DE BORD : la lecture de ikey_[] et celle de regs[R_ESP] sont
-// pures, et le resultat part dans un puits global jamais relu.
+// Scale test for the census (measurement build only — this code doesn't
+// exist in the shipped binary). D2_B5SCALE=N repeats, per serviced
+// intrinsic, N-1 EXTRA times exactly the work the two counters claim to
+// measure: one table lookup and one per-thread state resolution (E()). The
+// counters must then increase by (N-1) per service — a counter that doesn't
+// move isn't measuring what it claims to.
+// NO SIDE EFFECTS: reading ikey_[] and regs[R_ESP] is pure, and the result
+// goes into a global sink that is never read back.
 static uint32_t g_b5scale = 1;
 extern "C" { unsigned long long d2rt_b5_sink = 0; }
 #endif
-// ⚡ ROLLBACK DES OPTIMISATIONS EMUTLS — D2_NOEMUOPT=1.
-// Sous natif, la SEULE optimisation emutls encore active dans la boucle chaude
-// est le HISSAGE : E() resolu une fois par tranche au lieu d'a chaque acces
-// (le raccourci g_multi_emu, lui, ne sert que sous coop — sous natif le
-// drapeau est vrai et l'ancien chemin reprend a l'identique). Ce drapeau le
-// demonte, et retablit l'ecriture de t_fault_addr par trap, retiree pour la
-// meme raison. But : un A/B sur console SANS quitter D2SCHED=native.
-// Lu UNE fois : un getenv par tranche couterait plus que ce qu'on mesure.
+// Rollback switch for emutls optimizations — D2_NOEMUOPT=1.
+// Under the native backend, the only emutls optimization still active in the
+// hot loop is HOISTING: E() resolved once per time slice instead of on every
+// access (the g_multi_emu shortcut only helps the cooperative backend; under
+// native the flag is true and the plain path runs unchanged). This flag
+// disables that hoist, and restores the per-trap write of t_fault_addr that
+// was removed for the same reason. Purpose: an A/B comparison without
+// leaving D2SCHED=native.
+// Read once: a getenv() per time slice would cost more than what it measures.
 static bool g_noEmuOpt = false;
-// coeur2 (06/09/2026) — D2_FILSTAT=1 : densite de traps et contention du GIL
-// PAR FIL (x86emu_t::dyn86_traps / dyn86_gilcont / dyn86_gilwait_us). Lu UNE
-// fois. Defaut ETEINT : le chemin de trap garde son gil::lock() nu, plus un
-// test de booleen global (le patron de tous les knobs de ce fichier).
-// Arme aussi par D2_COEUR_SERVEUR (l'experience porte toujours sa mesure).
+// D2_FILSTAT=1: per-thread trap density and GIL contention
+// (x86emu_t::dyn86_traps / dyn86_gilcont / dyn86_gilwait_us). Read once.
+// Default OFF: the trap path keeps a bare gil::lock() plus one global bool
+// check (the pattern used by every knob in this file). Also armed by
+// D2_COEUR_SERVEUR.
 static bool g_filstat = false;
 static __thread x86emu_t* t_emu = nullptr;
-// D2_TIMEPROF : etat de l'asservissement, PAR FIL. Au niveau fichier et non
-// membre static de la classe : un membre `static __thread` exige une definition
-// hors classe, et le namespace anonyme de `d2rt` decore alors le symbole (meme
-// piege que le pave d'avertissement en tete de ce fichier).
+// D2_TIMEPROF per-thread servo state. Kept at file scope rather than a class
+// static member: a `static __thread` member needs an out-of-class
+// definition, and d2rt's anonymous namespace would mangle the symbol (same
+// trap as the linkage note at the top of this file).
 static __thread uint64_t tp_last_us = 0;
 static __thread int      tp_budget  = 0;
-// Faux tant qu'aucun emu PAR FIL n'existe (donc tant que t_emu est nul partout,
-// cf. la demonstration au-dessus de E()). Pose une seule fois, avant tout
-// pthread_create de runner : le happens-before du pthread_create suffit, le
-// relaxed est ici de l'hygiene, pas une precaution utile.
+// False until a per-thread emu exists (i.e. while t_emu is null everywhere).
+// Set only once, before any runner's pthread_create: the happens-before edge
+// from pthread_create is enough on its own, so relaxed ordering here is just
+// hygiene, not a load-bearing precaution.
 static std::atomic<bool> g_multi_emu{false};
-// Fault/preempt state was shared members; with N host threads running run()
-// concurrently they must be per-thread (a worker's fault must not clobber the
-// main thread's pending one).
+// Fault/preempt state is per-thread: with N host threads running run()
+// concurrently, a worker's fault must not clobber the main thread's pending
+// one.
 static __thread int         t_preempt = 0;
 static __thread const char* t_fault = nullptr;
 static __thread uint32_t    t_fault_addr = 0;
 static __thread uint32_t    t_fault_err = 0;
 
-// coeur2 : prise du GIL a la fenetre de trap, avec COMPTAGE PAR FIL sous
-// D2_FILSTAT=1. Sans le knob : exactement gil::Guard (lock/unlock nus). Avec :
-// trylock d'abord ; s'il echoue la prise est CONTENDUE — on la compte et on
-// chronometre le lock bloquant (clock_gettime SEULEMENT sur ce chemin rare,
-// jamais sur une prise libre). Les compteurs vivent dans l'emu du fil : c'est
-// ce que la ligne fils: du battement famine lit (thread_emu_filstat).
+// GIL acquisition at the trap window, with PER-THREAD counting under
+// D2_FILSTAT=1. Without the knob: exactly gil::Guard (bare lock/unlock). With
+// it: try the lock first; on failure the acquisition is CONTENDED — count it
+// and time the blocking lock (clock_gettime ONLY on this rare path, never on
+// an uncontended acquisition). The counters live in the thread's emu: that's
+// what the starvation-watch "fils:" line reads (thread_emu_filstat).
 static inline uint32_t filstat_now_us() {
     timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint32_t)((uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull);
@@ -545,16 +527,15 @@ struct TrapGuard {
 class CpuBox86 : public Cpu {
 public:
     CpuBox86() {
-        // Rollback des optimisations emutls, lu UNE fois (env.txt est deja
-        // charge a la construction : les lignes « env.txt: » sortent a 0,00 s,
-        // l'arene est sondee a 1,00 s).
+        // emutls-optimization rollback flag, read ONCE: env.txt is already
+        // loaded by the time this constructor runs.
         g_noEmuOpt = getenv("WX86_NOEMUOPT") || getenv("D2_NOEMUOPT");
         {   const char* fs = getenv("WX86_FILSTAT"); if (!fs) fs = getenv("D2_FILSTAT");
             const char* cs = getenv("WX86_COEUR_SERVEUR"); if (!cs) cs = getenv("D2_COEUR_SERVEUR");
             g_filstat = (fs && fs[0] && !(fs[0]=='0' && !fs[1]))
                      || (cs && cs[0] && !(cs[0]=='0' && !cs[1])); }
-        // B5 : lu UNE fois (un getenv par trap couterait plus que ce qu'on
-        // mesure). « 0 » vaut explicitement ETEINT, comme INLINEHOT.
+        // B5 flag: read once (a getenv per trap would cost more than what it
+        // measures). "0" explicitly means OFF, same convention as INLINEHOT.
         {   auto on = [](const char* n){ const char* v = getenv(n);
                                         return v && v[0] && !(v[0]=='0' && !v[1]); };
             g_b5index = on("WX86_B5INDEX") || on("D2_B5INDEX") || on("WX86_B5") || on("D2_B5");
@@ -570,65 +551,50 @@ public:
                                  "E() resolu a chaque acces, t_fault_addr reecrit par trap");
         const char* as = getenv("WX86_ARENA"); if (!as) as = getenv("D2ARENA");
         if (as) {
-            // ⚡ 12/09 : VOIE 5.2 (jit_budget_20260908.md §5.2) TENTEE ET
-            // REFUTEE. L'idee — reserver la piscine JIT avant l'arene,
-            // agrandie du rabiot d'alignement mesure (16+13=29 Mo) — supposait
-            // qu'un bloc ForVM pouvait depasser 16 Mio. FAUX : verifie sur
-            // console, 17 Mo ET 29 Mo sont TOUS DEUX refuses
-            // (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio
-            // (0x1000000) est un PLAFOND NOYAU par bloc VM, pas un choix de ce
-            // projet. Effet revele en route, PAS introduit par cette tentative :
-            // jitpool_reserve() (mman_vita.c) marque g_jitpool_tried=1 AVANT de
-            // connaitre le resultat de l'allocation — deja le cas dans le
-            // chemin paresseux a 16 Mio, avant ce chantier. Un refus GARANTI a
-            // 29 Mio l'a juste rendu visible ; le meme bug latent reste dans le
-            // chemin a 16 Mio aujourd'hui (un refus, quelle qu'en soit la
-            // cause, y desarmerait la piscine pour le reste de la session,
-            // sans retentative, seule trace : la ligne REFUSEE). Non corrige —
-            // change un comportement, pas seulement un diagnostic. Voir
-            // docs/audit/repartition_ram_20260912.md pour la mesure complete.
-            // Le rabiot d'alignement de l'arene (13 Mio ce soir) reste donc
-            // un gachis REEL mais SANS solution a cout nul : le recuperer
-            // demanderait de rogner une autre marge deja calibree (voie 5.1).
+            // 16 MiB (0x1000000) is a KERNEL CEILING per VM memory block on
+            // this platform, not a project choice: requesting a single block
+            // larger than that fails with SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW
+            // regardless of how much free memory remains.
+            //
+            // Known latent bug: jitpool_reserve() (mman_vita.c) sets
+            // g_jitpool_tried=1 BEFORE it knows whether the allocation
+            // succeeded. If that allocation is refused for any reason, the
+            // JIT pool is disarmed for the rest of the session with no
+            // retry — the only trace is the REFUSED log line. Not fixed
+            // here: fixing it changes behavior, not just diagnostics.
+            //
+            // The arena's alignment slack (a few MB) is real waste with no
+            // zero-cost fix: recovering it would mean shrinking a different,
+            // already-calibrated margin elsewhere.
             uint64_t sz = strtoull(as, nullptr, 16);
             // Page-granular size: only the guest->host DELTA needs 16 MiB
-            // alignment, and D2ARENA already carries the 16 MiB slack for that.
-            // Rounding the SIZE up to 16 MiB too asked the kernel for 7 MB more
-            // than needed — the difference between booting and failing on real
-            // hardware (2026-08-24: free user = 294 MB vs 304 MB requested).
+            // alignment, and D2ARENA already carries that slack. Rounding the
+            // SIZE itself up to 16 MiB too would ask the kernel for several
+            // MB more than necessary — on real hardware that can be the
+            // difference between booting and failing.
             sz = (sz + 0xFFFull) & ~0xFFFull;
-            // ⚡ 08/09 : NE RESERVER QUE CE QU'IL FAUT. D2ARENA porte 16 Mio
-            // de marge dont l'unique role est de pouvoir arrondir membase au
-            // multiple de 16 Mio (contrainte du ADD imm8-ror-8). On payait ces
-            // 16 Mio A TOUS LES COUPS. Mesure sur la console :
-            //     base=0x83d00000 membase=0x84000000 span=294 Mo reserve=297 Mo
-            //     perdu-alignement=3072 Ko
-            // soit 3 Mio reellement perdus, 281 Mio necessaires, et 13 Mio de
-            // queue jamais touchee — alors que la marge libre totale est de
-            // 11 Mio et que le jeu meurt en std::bad_alloc apres quelques
-            // minutes.
+            // Reserve only the alignment slack actually needed. D2ARENA's
+            // 16 MiB of margin exists solely so membase can be rounded up to
+            // a 16 MiB multiple (the ADD imm8-ror-8 encoding constraint);
+            // paying the full 16 MiB on every allocation is wasteful when
+            // the slack actually needed is usually much smaller.
             //
-            // On essaie donc des marges CROISSANTES et on garde la premiere qui
-            // laisse l'etendue requise apres alignement. La derniere echelle
-            // vaut l'ancien comportement : le pire cas est inchange, le cas
-            // courant rend une dizaine de Mio.
-            // ⚡ 08/09, 2e passe : SONDER LA BASE PLUTOT QUE DE TIRER AU SORT.
-            // L'echelle de marges croissantes rendait 285 Mo un lancement et
-            // 297 le suivant — selon la base que le noyau veut bien donner, qui
-            // depend elle-meme des allocations precedentes. Or a 297 il ne
-            // reste que 5 Mo, le JIT ne peut plus grandir, et comme il n'y a
-            // PAS d'interpreteur (shim_impl.c), tout bloc refuse tue le fil
-            // invite. La taille de l'arene n'est donc pas un reglage de
-            // confort : elle decide si le jeu vit.
+            // The exact slack depends on the base address the kernel happens
+            // to hand back, which itself depends on prior allocations — so a
+            // fixed guess can under- or over-shoot. This matters: if the
+            // arena ends up too tight, the JIT pool can't grow, and since
+            // there is no interpreter fallback (shim_impl.c), a refused
+            // block kills the guest thread outright. Arena sizing is not a
+            // comfort tuning — it decides whether the guest survives.
             //
-            // On sonde donc l'allocateur avec un petit bloc, on lit la base
-            // qu'il propose, on en deduit la marge d'alignement EXACTE, puis on
-            // demande need+cette-marge. Le repli sur need+16 Mio (l'ancien
-            // calcul) reste en dernier ressort.
+            // So the allocator is probed with a small block first; the base
+            // it returns gives the EXACT alignment slack needed, and the
+            // real request is need+that-slack. Falling back to need+16 MiB
+            // (the old fixed calculation) remains the last resort.
             const uint64_t need = (sz > 0x1000000ull) ? sz - 0x1000000ull : sz;
             void* blk = MAP_FAILED;
             {
-                uint64_t slack = 0x1000000ull;          // defaut = ancien calcul
+                uint64_t slack = 0x1000000ull;          // default = old fixed calculation
                 void* probe = mmap(nullptr, 0x100000, PROT_READ|PROT_WRITE,
                                    MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
                 if (probe != MAP_FAILED) {
@@ -647,7 +613,7 @@ public:
                     else { munmap(t, try_sz); slack = 0x1000000ull; }
                 }
             }
-            if (blk == MAP_FAILED)      // dernier recours : exactement l'ancien calcul
+            if (blk == MAP_FAILED)      // last resort: exactly the old fixed calculation
                 blk = mmap(nullptr, sz, PROT_READ|PROT_WRITE,
                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_NORESERVE, -1, 0);
             if (blk == MAP_FAILED) { fprintf(stderr, "[cpu_box86] D2ARENA mmap %llx failed\n",
@@ -663,25 +629,25 @@ public:
             uintptr_t base = (uintptr_t)blk;
             g_mb = (base + 0xFFFFFFu) & ~(uintptr_t)0xFFFFFFu;
             g_arena = true;
-            // C3 (deep review): with a single block, H(va)=va+membase NEVER
-            // faults — a wild guest pointer silently aliases whatever host
-            // object sits there (the JIT cache, the newlib heap), so corruption
-            // surfaces far from its cause. Record the span so shim-side derefs
-            // can be range-checked (see g_arena_span / arena_check below).
+            // With a single block, H(va)=va+membase NEVER faults — a wild
+            // guest pointer silently aliases whatever host object sits there
+            // (the JIT cache, the newlib heap), so corruption surfaces far
+            // from its cause. Record the span so shim-side derefs can be
+            // range-checked (see g_arena_span / arena_check below).
             g_arena_span = (uint32_t)((base + sz > g_mb) ? (base + sz - g_mb) : 0);
-            // Rendre le gachis d'alignement VISIBLE : c'est lui qu'on cherche a
-            // supprimer, et sans ce releve on ne saurait pas s'il a coute 0 ou
-            // 16 Mio sur ce lancement.
+            // Make the alignment waste VISIBLE: this is what we're trying to
+            // eliminate, and without this readout there'd be no way to tell
+            // how much it cost on a given run.
             { char m[152];
                 snprintf(m, sizeof m, "arene: base=%p membase=%p span=%u Mo reserve=%llu Mo perdu-alignement=%u Ko",
                          (void*)base, (void*)g_mb, (unsigned)(g_arena_span>>20),
                          (unsigned long long)(sz>>20), (unsigned)((g_mb-base)>>10));
                 wx86_vita_progress_c(m); }
             dyn86_set_membase(g_mb);
-            // Meme etendue pour le garde-fou des intrinseques memcpy/memset
-            // (dyn86_memintrin.h) : le helper natif ecrit en memoire invitee
-            // sans passer par write()/arena_check, il doit donc porter la
-            // MEME borne, sinon un pointeur sauvage aliaserait le tas hote.
+            // Same span for the memcpy/memset intrinsics guard
+            // (dyn86_memintrin.h): the native helper writes to guest memory
+            // without going through write()/arena_check, so it must carry
+            // the SAME bound, or a wild pointer would alias the host heap.
             dyn86_mi_set_span(g_arena_span);
             fprintf(stderr, "[cpu_box86] arena: block=%p size=0x%llx membase=0x%lx (Vita single-block model)\n",
                     blk, (unsigned long long)sz, (unsigned long)g_mb);
@@ -716,42 +682,42 @@ public:
 
     // Current-emu accessor: the TLS binding if a native runner bound one,
     // else the base emu — every register/run/save path below goes through it.
-    // D2_TLSCOUNT : build de MESURE uniquement (jamais livre, jamais par
-    // defaut). Compte les resolutions de t_emu, c'est-a-dire EXACTEMENT ce
-    // qui devient un __emutls_get_address sur Vita (toolchain vitasdk
-    // --disable-tls). Le desassemblage de l'eboot dit qu'un appel a reg() ou
-    // set_reg() en vaut UN (les 3 sites statiques de reg() sont des chemins
-    // ALTERNATIFS : i<=7, i==8, i==9), donc ce compteur est un compte d'appels
-    // emutls, pas une estimation. C'est une BORNE INFERIEURE du total par
-    // trap : les t_* de bridge.cpp (t_redirect_eip, t_yield_pending) et
-    // t_cur de sched_native s'y ajoutent, non comptes ici.
-    // ---- Le raccourci qui supprime la chaine emutls sous coop ---------------
+    // D2_TLSCOUNT: measurement-only build (never shipped, never the
+    // default). Counts t_emu resolutions, i.e. EXACTLY what becomes a
+    // __emutls_get_address call on Vita (vitasdk toolchain --disable-tls).
+    // Disassembly confirms a call to reg() or set_reg() counts as exactly
+    // ONE (its 3 static call sites are ALTERNATIVE paths: i<=7, i==8, i==9),
+    // so this counter is a count of emutls calls, not an estimate. It's a
+    // LOWER BOUND on the per-trap total: bridge.cpp's t_* (t_redirect_eip,
+    // t_yield_pending) and sched_native's t_cur add to it and are not
+    // counted here.
+    // ---- The shortcut that removes the emutls chain under the cooperative backend ----
     //
-    // MESURE QUI MOTIVE CECI (audit t12 §27.5) : E() est appele 16,81 fois par
-    // trap Bridge sous coop — le defaut LIVRE — et chaque appel resout t_emu.
-    // Sur Vita la chaine du toolchain vitasdk (--disable-tls) est
+    // Why this exists: under the cooperative backend (the shipped default),
+    // E() is called several times per Bridge trap, and each call resolves
+    // t_emu. On Vita, the toolchain's TLS chain (--disable-tls) is
     // __emutls_get_address -> pthread_getspecific -> pte_osTlsGetValue ->
-    // sceKernelGetTLSAddr, un appel INTER-MODULE facture 1,29 us au banc
-    // console du 2026-08-30. Dix-sept par trap, ~178 traps par image.
+    // sceKernelGetTLSAddr — an inter-module call, not a cheap TLS read.
     //
-    // L'INVARIANT QUI REND LE RACCOURCI SUR, et il se prouve en trois pas :
-    //   1. t_emu n'est jamais rendu non nul que par thread_emu_bind(emu != 0) ;
-    //   2. le SEUL appelant avec un emu non nul est NativeScheduler::runner
-    //      (sched_native.cpp:501) — le main se lie a nullptr (:902) ;
-    //   3. un emu par fil ne peut venir que de thread_emu_create(), et le seul
-    //      site hors NativeScheduler est la sonde de rt_boot.cpp:2744, qui est
-    //      A L'INTERIEUR de la branche D2SCHED=native.
-    // Donc : tant que thread_emu_create() n'a jamais ete appele, t_emu vaut
-    // nullptr sur TOUS les fils, et « t_emu ? *t_emu : emu_ » vaut emu_ par
-    // construction. Le raccourci ne choisit pas une valeur differente : il
-    // evite de DEMANDER une valeur dont la reponse est deja connue.
+    // THE INVARIANT THAT MAKES THE SHORTCUT SAFE, proven in three steps:
+    //   1. t_emu is only ever made non-null by thread_emu_bind(emu != 0);
+    //   2. the ONLY caller that binds a non-null emu is
+    //      NativeScheduler::runner (sched_native.cpp:501) — main binds
+    //      nullptr (:902);
+    //   3. a per-thread emu can only come from thread_emu_create(), and the
+    //      only call site outside NativeScheduler is the probe at
+    //      rt_boot.cpp:2744, which is INSIDE the D2SCHED=native branch.
+    // Therefore: as long as thread_emu_create() has never been called,
+    // t_emu is nullptr on ALL threads, and `t_emu ? *t_emu : emu_` equals
+    // emu_ by construction. The shortcut doesn't choose a different value:
+    // it avoids ASKING for a value whose answer is already known.
     //
-    // COUT DU RACCOURCI : un chargement global relaxed et un branchement,
-    // contre ~570 cycles. Sous natif, rien ne change — le drapeau est vrai et
-    // l'ancien chemin reprend a l'identique.
+    // Cost of the shortcut: one relaxed global load and a branch, far
+    // cheaper than the TLS chain it replaces. Under the native backend,
+    // nothing changes — the flag is true and the old path runs unchanged.
     //
-    // L'invariant n'est pas seulement affirme : thread_emu_bind le VERIFIE
-    // (plus bas), sur un chemin froid, et le crie s'il tombe.
+    // The invariant isn't just asserted: thread_emu_bind VERIFIES it (below),
+    // on a cold path, and aborts loudly if it's ever violated.
     x86emu_t& E() {
         D2_ECALL();
         if (!g_multi_emu.load(std::memory_order_relaxed)) return emu_;
@@ -793,8 +759,8 @@ public:
         // run survives and the culprit address is visible instead of a core dump.
         // custommem's protection map is keyed by GUEST address (setProtection in
         // map(), and the dynarec's getProtection/protectDB all use guest VAs), so
-        // query `va` — NOT H(va). Under membase!=0 (Vita) the old H(va) key found
-        // nothing and made every guarded read return zeros. (C11, deep review.)
+        // query `va` — NOT H(va). Under membase!=0 (Vita), keying on H(va)
+        // instead would find nothing and make every guarded read return zeros.
         if (mem_guard() && getProtection((uintptr_t)va) == 0) {
             static int rn = 0;
             if (rn++ < 64) std::fprintf(stderr,
@@ -802,14 +768,14 @@ public:
             std::memset(dst, 0, n);
             return false;
         }
-        if (!arena_check(va, n, "read")) { std::memset(dst, 0, n); return false; }   // C3
+        if (!arena_check(va, n, "read")) { std::memset(dst, 0, n); return false; }
         std::memcpy(dst, (const void*)H(va), n);
         return true;
     }
     bool write(uint32_t va, const void* src, uint32_t n) override {
         // A translated page is host-write-protected (protectDB); lift it and
         // mark the affected dynablocks dirty before the host-side write.
-        if (!arena_check(va, n, "write")) return false;                              // C3
+        if (!arena_check(va, n, "write")) return false;
         if (isprotectedDB(va, n)) unprotectDB(va, n, 1);
         std::memcpy(H(va), src, n);
         return true;
@@ -821,14 +787,14 @@ public:
         if (size == 0) size = 1;
         if (isprotectedDB(va, size)) unprotectDB(va, size, 1);
     }
-    // Voir runtime/cpu.h : DESTRUCTION inconditionnelle, pas un marquage
-    // conditionne a isprotectedDB. cleanDBFromAddressRange est cle par ADRESSE
-    // INVITEE (cf. dynarec/dynarec_arm_functions.c:399).
+    // See runtime/cpu.h: unconditional DESTRUCTION, not a marking that's
+    // conditioned on isprotectedDB. cleanDBFromAddressRange is keyed by
+    // GUEST ADDRESS (see dynarec/dynarec_arm_functions.c:399).
     void discard_code(uint32_t va, uint32_t size) override {
         if (size == 0) return;
         cleanDBFromAddressRange((uintptr_t)va, (size_t)size, 1 /* destroy */);
     }
-    // C3: callers use hostptr for bulk shim I/O (ReadFile, gzero, present) — a
+    // Callers use hostptr for bulk shim I/O (ReadFile, gzero, present) — a
     // wild VA there would memcpy straight into a host object. Null makes every
     // caller fall back to read()/write(), which are themselves range-checked.
     void* hostptr(uint32_t va, uint32_t n = 1) override {
@@ -836,7 +802,7 @@ public:
         return H(va); }
     // custommem tracks every map()ed region via setProtection — zero means no
     // guest region covers this address (a raw garbage pointer from the guest).
-    bool mapped(uint32_t va) override { return getProtection((uintptr_t)va) != 0; }   // guest-keyed (C11)
+    bool mapped(uint32_t va) override { return getProtection((uintptr_t)va) != 0; }   // guest-keyed
     const uint32_t* ip_ptr() const override { return &E().ip.dword[0]; }
 
     uint32_t reg(int r) override {
@@ -857,11 +823,12 @@ public:
         }
     }
 
-    // Surcharges groupees (cf. cpu.h) : UNE resolution d'emu au lieu de cinq.
-    // R_ESP est dans la plage des registres generaux (cpu.h l. 21), donc
-    // e.regs[R_ESP] est bien le meme emplacement que celui qu'ecrivait
-    // set_reg(R_ESP, ...). read_u32 ne resout rien : il passe par read()/hostptr.
-    // Lecture groupee des huit generaux (cf. cpu.h) : UNE resolution d'emu.
+    // Batched overrides (see cpu.h): ONE emu resolution instead of five.
+    // R_ESP falls within the general-register range (cpu.h, enum Reg), so
+    // e.regs[R_ESP] is the same slot that set_reg(R_ESP, ...) writes.
+    // read_u32 resolves nothing itself: it goes through read()/hostptr.
+    // Batched read of the eight general registers (see cpu.h): ONE emu
+    // resolution.
     void regs_gp(uint32_t* out) override {
         const x86emu_t& e = E();
         for (int r = R_EAX; r <= R_EDI; ++r) out[r] = e.regs[r].dword[0];
@@ -875,10 +842,10 @@ public:
         e.regs[R_ESP].dword[0] += esp_add;
         e.ip.dword[0]           = eip;
     }
-    // B5 : trap stdcall argc=0 — UNE resolution d'emu pour la lecture de
-    // l'adresse de retour ET les trois ecritures, au lieu de deux (une par
-    // trap_retaddr(), une par trap_epilogue()). read_u32 ne resout rien : il
-    // passe par read()/hostptr, jamais par E().
+    // B5: stdcall trap with argc=0 — ONE emu resolution for both the
+    // return-address read AND the three writes, instead of two (one per
+    // trap_retaddr(), one per trap_epilogue()). read_u32 resolves nothing
+    // itself: it goes through read()/hostptr, never E().
     void trap_ret0(uint32_t eax) override {
         x86emu_t& e = E();
         const uint32_t esp = e.regs[R_ESP].dword[0];
@@ -899,7 +866,7 @@ public:
     // decrements emu->dyn86_budget (recharged in run()) and exits resumable
     // when it expires. Same ~8 guest insns/block scale as the old LinkNext
     // chains, but blocks stay DIRECT-LINKED (no arm_next round-trip per
-    // transition). Residual (unchanged): a loop inside ONE dynablock never
+    // transition). Residual limitation: a loop inside ONE dynablock never
     // re-enters the prologue and cannot be preempted this way.
     void set_run_limit(uint64_t n) override {
         limit_blocks_ = n ? (uint32_t)((n / 8) ? (n / 8) : 1) : 0;
@@ -910,40 +877,40 @@ public:
     // both identically: slice over, thread still Ready.
     bool take_limit_hit() override { int p = t_preempt; t_preempt = 0; return p != 0; }
 
-    // Warden-safe per-slot fast path (docs/perf, Tier 1). Ce test s'execute sur
-    // TOUTES les traversees invite->hote (3400 a 4500 par image), pas seulement
-    // sur les quelques-unes qui touchent : le balayage lineaire d'avant faisait
-    // donc payer la table entiere a chaque trap qui ne trouve rien.
-    // Remplace par une table de hachage a ADRESSAGE OUVERT (sondage lineaire),
-    // figee apres l'amorcage : une seule lecture dans le cas courant.
-    //   * cle = la VA du slot ; 0 = case libre. Une VA de trap n'est JAMAIS 0
-    //     (le pont les alloue depuis trap_base_, toujours > 0), donc 0 est un
-    //     sentinel sur.
-    //   * dispersion = va >> 4 : le pont espace les slots de 16 octets, cette
-    //     division rend donc des indices CONSECUTIFS — la meilleure repartition
-    //     possible, aucun agregat.
-    //   * la table est dimensionnee a 4x le nombre max d'intrinseques (16), donc
-    //     au plus 25 % pleine : le sondage s'arrete sur une case libre en une ou
-    //     deux etapes, et NE PEUT PAS boucler (il reste toujours des vides).
-    // Semantique inchangee : meme ensemble de slots, meme fonction appelee.
+    // Warden-safe per-slot fast path (see docs/perf, Tier 1). This check runs
+    // on EVERY guest->host crossing (thousands per frame), not just the few
+    // that hit — so a miss must be cheap.
+    // Open-ADDRESSED hash table (linear probing), frozen after warm-up: one
+    // read in the common case.
+    //   * key = the slot's VA; 0 = empty slot. A trap VA is NEVER 0 (the
+    //     bridge allocates them from trap_base_, always > 0), so 0 is a safe
+    //     sentinel.
+    //   * hash = va >> 4: the bridge spaces slots 16 bytes apart, so this
+    //     division yields CONSECUTIVE indices — the best possible spread, no
+    //     clustering.
+    //   * the table is sized at 4x the max number of intrinsics (16), so at
+    //     most 25% full: probing stops at an empty slot within one or two
+    //     steps, and CANNOT loop forever (there's always a gap).
+    // Semantics unchanged: same set of slots, same function called.
     static constexpr uint32_t kIntrinMax  = 16;
-    static constexpr uint32_t kIntrinMask = 63;   // table de 64 cases (>= 4x kIntrinMax)
-    // ---- B5 : l'INDEX DIRECT (D2_B5INDEX=1), et pourquoi il enleve du travail
-    // Le sondage lineaire ci-dessus paie, sur CHAQUE trap invite->hote (3400 a
-    // 4500 par image), une lecture dans ikey_[] — donc une ligne de cache — au
-    // seul but de decouvrir que le creneau n'est PAS un intrinseque, ce qui est
-    // le cas de l'ecrasante majorite d'entre eux.
-    // Le pont alloue les creneaux tous les 16 octets a partir de trap_base_ :
-    // l'ensemble des intrinseques enregistres occupe donc une FENETRE CONTIGUE
-    // de VA, etroite (deux creneaux aujourd'hui). Une soustraction non signee
-    // et une comparaison la testent SANS AUCUN ACCES MEMOIRE — un slot en
-    // dessous de idir_lo_ enroule vers un entier enorme, donc rejete par la
-    // meme comparaison. Dans la fenetre, l'indice est exact : plus de sondage,
-    // plus de comparaison de cle, et UNE SEULE table au lieu de deux (ikey_ et
-    // ifn_ etaient deux lignes de cache distinctes sur un succes).
-    // Si la fenetre depassait kDirectMax creneaux, l'index n'est PAS arme et le
-    // sondage reprend : idir_n_ == 0 rejette tout (voir rebuild_direct).
-    static constexpr uint32_t kDirectMax = 256;   // 256 creneaux = 4 Ko de VA
+    static constexpr uint32_t kIntrinMask = 63;   // 64-slot table (>= 4x kIntrinMax)
+    // ---- B5: the DIRECT INDEX (D2_B5INDEX=1), and why it saves work --------
+    // The linear probe above pays, on EVERY guest->host trap, a read of
+    // ikey_[] — a cache line — for the sole purpose of discovering that the
+    // slot is NOT an intrinsic, which is true for the overwhelming majority
+    // of them.
+    // The bridge allocates slots every 16 bytes starting at trap_base_, so
+    // the set of registered intrinsics occupies a single CONTIGUOUS VA
+    // window (narrow: two slots today). An unsigned subtraction and one
+    // comparison test membership with NO MEMORY ACCESS AT ALL: a slot below
+    // idir_lo_ wraps to a huge integer and is rejected by that same
+    // comparison. Inside the window, the index is exact: no more probing, no
+    // more key comparison, and a SINGLE table instead of two (ikey_ and ifn_
+    // were two separate cache lines on a hit).
+    // If the window exceeded kDirectMax slots, the index is NOT armed and the
+    // probe path takes over: idir_n_ == 0 rejects everything (see
+    // rebuild_direct).
+    static constexpr uint32_t kDirectMax = 256;   // 256 slots = 4 KiB of VA
 
     inline bool try_intrinsic(uint32_t slot) {
         if (no_intrinsics_) return false;
@@ -953,17 +920,17 @@ public:
 #endif
         bool served = false;
         if (g_b5index) {
-            const uint32_t d = (slot - idir_lo_) >> 4;   // non signe : sous lo => enorme
+            const uint32_t d = (slot - idir_lo_) >> 4;   // unsigned: below lo wraps to huge
             if (d < idir_n_) {
 #ifdef D2_B5CENSUS
                 ++d2rt_b5_loads;
 #endif
                 if (IntrinsicFn fn = idir_[d]) {
-                    // MEME COMPTABILITE QUE LA JAMBE HERITAGE (ne pas retirer) :
-                    // un creneau servi ici ne repasse jamais par
-                    // Bridge::trap_handler, c'est donc le seul endroit ou il
-                    // puisse etre compte ; et si fn rend faux, le trap part
-                    // dans le pont, qui comptera lui-meme.
+                    // SAME ACCOUNTING AS THE LEGACY PATH (do not remove): a
+                    // slot serviced here never goes back through
+                    // Bridge::trap_handler, so this is the only place it can
+                    // be counted; if fn returns false, the trap falls
+                    // through to the bridge, which counts it there instead.
                     served = fn(*this, slot);
                     if (served) d2rt::trapcnt::bump(slot);
                 }
@@ -976,25 +943,26 @@ public:
 #endif
                 uint32_t k = ikey_[i];
                 if (k == slot) {
-                    // Comptabiliser SEULEMENT quand l'intrinseque a reellement
-                    // servi : un creneau servi ici ne repasse jamais par
-                    // Bridge::trap_handler, c'est donc le seul endroit ou il peut
-                    // etre compte ; et si fn rend faux, le trap part dans le pont,
-                    // qui comptera lui-meme (sinon on compterait deux fois).
+                    // Count ONLY when the intrinsic actually served the
+                    // call: a slot serviced here never goes back through
+                    // Bridge::trap_handler, so this is the only place it can
+                    // be counted; if fn returns false, the trap falls
+                    // through to the bridge, which counts it there instead
+                    // (otherwise it would be counted twice).
                     served = ifn_[i](*this, slot);
                     if (served) d2rt::trapcnt::bump(slot);
                     break;
                 }
-                if (!k) break;                     // case libre => absent
+                if (!k) break;                     // empty slot => not present
                 i = (i + 1) & kIntrinMask;
             }
         }
 #ifdef D2_B5CENSUS
         if (served) {
-            for (uint32_t x = 1; x < g_b5scale; ++x) {     // test d'echelle
+            for (uint32_t x = 1; x < g_b5scale; ++x) {     // scale test
                 ++d2rt_b5_loads;
                 d2rt_b5_sink += ikey_[(slot >> 4) & kIntrinMask];
-                d2rt_b5_sink += E().regs[R_ESP].dword[0];  // UNE resolution par tour
+                d2rt_b5_sink += E().regs[R_ESP].dword[0];  // one resolution per iteration
             }
             ++d2rt_b5_hits; d2rt_b5_emutls += d2_tls_hits - tls0;
         }
@@ -1002,20 +970,20 @@ public:
         return served;
     }
     void set_intrinsic(uint32_t va, IntrinsicFn fn) override {
-        if (!va) return;                           // 0 est le sentinel « case libre »
+        if (!va) return;                           // 0 is the "empty slot" sentinel
         uint32_t i = (va >> 4) & kIntrinMask;
         for (uint32_t probe = 0; probe <= kIntrinMask; ++probe, i = (i + 1) & kIntrinMask) {
-            if (ikey_[i] == va) { ifn_[i] = fn; rebuild_direct(); return; }   // remplacement
+            if (ikey_[i] == va) { ifn_[i] = fn; rebuild_direct(); return; }   // replace existing
             if (!ikey_[i]) {
-                if (intrin_n_ >= (int)kIntrinMax) return;        // meme plafond qu'avant
+                if (intrin_n_ >= (int)kIntrinMax) return;        // respects the kIntrinMax cap
                 ikey_[i] = va; ifn_[i] = fn; ++intrin_n_; rebuild_direct(); return;
             }
         }
     }
-    // Reconstruit l'index direct depuis la table de hachage — chemin FROID
-    // (deux appels au demarrage). La table de hachage reste la source de
-    // verite : l'index n'en est qu'une projection, donc les deux jambes
-    // servent EXACTEMENT le meme ensemble de creneaux et la meme fonction.
+    // Rebuilds the direct index from the hash table — a COLD path (a couple
+    // of calls at startup). The hash table remains the source of truth: the
+    // index is only a projection of it, so both paths serve EXACTLY the same
+    // set of slots and the same function.
     void rebuild_direct() {
         uint32_t lo = 0xFFFFFFFFu, hi = 0;
         for (uint32_t i = 0; i <= kIntrinMask; ++i)
@@ -1023,7 +991,7 @@ public:
         idir_n_ = 0; d2rt_b5_direct_n = 0;
         if (!hi) return;
         const uint32_t span = ((hi - lo) >> 4) + 1;
-        if (span > kDirectMax) return;             // fenetre trop large : index NON arme
+        if (span > kDirectMax) return;             // window too wide: index NOT armed
         idir_lo_ = lo;
         for (uint32_t d = 0; d < span; ++d) idir_[d] = nullptr;
         for (uint32_t i = 0; i <= kIntrinMask; ++i)
@@ -1061,33 +1029,30 @@ public:
         // calls this; `quit` also covers "not currently running".
         // Remaining limitation: a loop inside ONE dynablock can't be stopped.
         dyn86_request_stop();
-        // Comptabiliser la tranche AVANT de casser le budget — meme discipline
-        // que nudge_thread_budget ci-dessous, et pour la meme raison, mais ici
-        // elle manquait. CE QUE CA CORRIGE : le budget zerote rend le garde
-        // `b > 0` de thread_emu_blocks faux, donc tout lecteur POSTERIEUR au
-        // shutdown ne recoit plus que dyn86_blocks, sans le delta de la tranche
-        // en cours. Sous coop c'etait sans effet visible (les tranches sont
-        // courtes et deja accumulees) ; sous NATIF le budget vaut 0x7FFFFFFF et
-        // n'expire jamais, donc la tranche en cours EST tout le travail du fil
-        // depuis son dernier reveil. Un recensement de fin de partie lisait
-        // ainsi ~24 000 blocs la ou le jeu en avait execute des millions, et
-        // seize fois plus d'images ne bougeaient ce chiffre que de 0,8 % — la
-        // signature exacte d'un compteur fige, pas d'une mesure.
-        // Famille « diagnostic qui ment » : le chiffre existait, il etait faux,
-        // et rien dans la ligne ne le disait.
+        // Account for the current slice BEFORE zeroing the budget — same
+        // discipline as nudge_thread_budget below, and for the same reason,
+        // but it was missing here. Without it, zeroing the budget makes
+        // thread_emu_blocks()'s `b > 0` guard false, so any reader AFTER
+        // shutdown sees only dyn86_blocks, missing the current slice's
+        // delta. This has no visible effect under the cooperative backend
+        // (slices are short and already accumulated); under NATIVE the
+        // budget is 0x7FFFFFFF and never expires on its own, so the current
+        // slice IS the entire work the thread has done since it last woke
+        // up — omitting it here would silently understate the thread's true
+        // block count after shutdown.
         save_slice(&emu_);
         emu_.dyn86_budget = 0; emu_.quit = 1;
         for (x86emu_t* e : emus_) { save_slice(e); e->dyn86_budget = 0; e->quit = 1; }
     }
 
-    // Sauve la tranche en cours dans le total cumule, et DESARME pour qu'elle
-    // ne soit pas comptee deux fois. Extrait de nudge_thread_budget, ou
-    // l'ordre a ete etabli et commente ; request_stop l'a longtemps omis.
-    // ORDRE LOAD-BEARING : (1) desarmer, ce qui annule le delta lu par un
-    // observateur, PUIS (2) accumuler. Un releve tombe entre les deux
-    // SOUS-estime d'une tranche ; l'ordre inverse ferait apparaitre un bond,
-    // lu « ce fil galope » — le sens FAUX. `volatile` : cet ordre doit
-    // survivre a l'optimiseur.
+    // Saves the current slice into the cumulative total, and DISARMS it so
+    // it isn't counted twice. Factored out of nudge_thread_budget, which
+    // establishes and documents the ordering.
+    // LOAD-BEARING ORDER: (1) disarm, which cancels the delta an observer
+    // would read, THEN (2) accumulate. A read that lands between the two
+    // UNDER-estimates by one slice; the reverse order would show a jump,
+    // misread as "this thread is racing ahead" — the wrong sense. `volatile`:
+    // this order must survive the optimizer.
     static void save_slice(x86emu_t* e) {
         volatile int*      pa = &e->dyn86_armed;
         volatile uint32_t* pn = &e->dyn86_blocks;
@@ -1097,55 +1062,57 @@ public:
         if (b > 0 && a >= b) *pn = *pn + (uint32_t)(a - b);          // (2)
     }
 
-    // Filet anti-famine (spec 2026-08-29 §3.3) : décalque du zérotage de
-    // budget de request_stop ci-dessus, SANS quit ni g_stop (monotones,
-    // shutdown-only — contrat cpu.h). Store atomique relaxed : le prologue
-    // de bloc fait load-décrément-store sur dyn86_budget ; un zéro écrit
-    // entre son load et son store est perdu — bénin, rattrapé à la fenêtre
-    // de détection suivante. Appelant sous GIL (registre emus_ append-only).
+    // Anti-starvation valve: mirrors the budget-zeroing in request_stop
+    // above, but WITHOUT quit or g_stop (those are monotonic, shutdown-only
+    // — see the contract in cpu.h). Relaxed atomic store: the block prologue
+    // does a load-decrement-store on dyn86_budget; a zero written between
+    // its load and its store is lost — benign, caught at the next
+    // starvation-detection pass. Caller must hold the GIL (emus_ registry is
+    // append-only).
     void nudge_thread_budget(void* emu) override {
-        x86emu_t* e = emu ? (x86emu_t*)emu : &emu_;   // nullptr = emu de base (main)
-        // Comptabilise la tranche AVANT de la casser (vivacité par fil, cpu.h) :
-        // le poke détruit l'information « combien de blocs ce fil a exécuté »,
-        // donc c'est ici, et nulle part ailleurs, qu'elle peut être sauvée.
-        // ORDRE : (1) armed <- budget courant, ce qui annule le delta lu par un
-        // observateur, (2) accumulation, (3) le poke. Un relevé tombé entre (1)
-        // et (2) SOUS-estime d'une tranche ; aucun ordre ne fait apparaître un
-        // bond de +2^31, ce qui serait lu comme « ce fil galope » — le sens FAUX.
-        // (mêmes accès `volatile`, même raison qu'en (2) de run() : l'ordre
-        // désarmer -> accumuler -> poker doit survivre à l'optimiseur.)
-        save_slice(e);                                               // (1) desarmer + (2) sauver
-        __atomic_store_n(&e->dyn86_budget, 0, __ATOMIC_RELAXED);     // (3) le poke lui-meme
+        x86emu_t* e = emu ? (x86emu_t*)emu : &emu_;   // nullptr = base emu (main)
+        // Accounts for the slice BEFORE breaking it (per-thread liveness,
+        // cpu.h): the poke destroys the information "how many blocks has
+        // this thread executed", so it must be saved here, and nowhere else.
+        // ORDER: (1) armed <- current budget, which cancels the delta an
+        // observer would read, (2) accumulate, (3) the poke itself. A read
+        // that lands between (1) and (2) UNDER-estimates by one slice; no
+        // ordering here can produce a +2^31 jump, which would misread as
+        // "this thread is racing ahead" — the wrong sense.
+        // (same `volatile` accesses, same reason as in run()'s ordering:
+        // disarm -> accumulate -> poke must survive the optimizer.)
+        save_slice(e);                                               // (1) disarm + (2) save
+        __atomic_store_n(&e->dyn86_budget, 0, __ATOMIC_RELAXED);     // (3) the poke itself
     }
 
     // ---- Native-scheduler support: one x86emu_t per guest thread --------
     void* thread_emu_create() override {
-        // ARME le chemin TLS de E() (demonstration complete au-dessus de E()).
-        // Pose ICI et pas dans thread_emu_bind : la creation precede
-        // NECESSAIREMENT la liaison, donc le drapeau est vrai avant qu'un seul
-        // fil puisse observer un t_emu non nul. Sous coop cette fonction n'est
-        // jamais appelee — la sonde de rt_boot.cpp:2744 est dans la branche
-        // D2SCHED=native — et le drapeau reste faux pour toute la partie.
+        // Arms the TLS path of E() (full argument above E()). Set HERE and
+        // not in thread_emu_bind: creation NECESSARILY precedes binding, so
+        // the flag is true before any thread can observe a non-null t_emu.
+        // Under the cooperative backend this function is never called — the
+        // probe at rt_boot.cpp:2744 is inside the D2SCHED=native branch — so
+        // the flag stays false for the whole run.
         g_multi_emu.store(true, std::memory_order_relaxed);
         x86emu_t* e = new x86emu_t();
         std::memset(e, 0, sizeof *e);
         e->context = &ctx_;
         dynarec86_setup_emu_helpers(e);
         e->df = d_none;
-        // FPU: inherit the BASE emu's current state — the long-validated
-        // "inherit" semantics of the cooperative first slice (see
-        // load_context's C12 field-regression note). Never a zero blob.
+        // FPU: inherit the BASE emu's current state — matches the
+        // cooperative backend's first-slice "inherit" semantics. Never a
+        // zero blob.
         X87Blob b; blob_from_emu(b, emu_); blob_to_emu(*e, b);
         emus_.push_back(e);            // caller holds the GIL (native ctor path)
         return e;
     }
     void thread_emu_bind(void* e) override {
-        // GARDE DE L'INVARIANT de E() : lier un emu NON NUL alors que le
-        // drapeau est faux voudrait dire qu'un emu par fil est apparu sans
-        // passer par thread_emu_create — et E() rendrait alors l'emu de BASE a
-        // un fil qui a le sien, c'est-a-dire une corruption silencieuse et
-        // totale. Chemin FROID (une fois par fil invite), donc la garde est
-        // gratuite ; et elle CRIE au lieu de deriver.
+        // GUARDS the invariant in E(): binding a NON-NULL emu while the flag
+        // is false would mean a per-thread emu appeared without going
+        // through thread_emu_create — and E() would then hand the BASE emu
+        // to a thread that has its own, i.e. silent, total corruption. This
+        // is a COLD path (once per guest thread), so the guard is free; and
+        // it ABORTS LOUDLY instead of drifting silently.
         if (e && !g_multi_emu.load(std::memory_order_relaxed)) {
             std::fprintf(stderr, "FATAL: thread_emu_bind(non nul) sans thread_emu_create — invariant E() rompu\n");
             wx86_vita_progress_c("FATAL: invariant E() rompu (bind sans create)");
@@ -1156,15 +1123,16 @@ public:
     const uint32_t* thread_emu_ip(void* e) override {
         return e ? &((x86emu_t*)e)->ip.dword[0] : &emu_.ip.dword[0];
     }
-    // Vivacité par fil (cpu.h) : blocs traduits exécutés depuis le boot,
-    // MONOTONE. Dérivé du budget de blocs (décrémenté par le prologue de chaque
-    // bloc traduit) : coût nul sur le chemin chaud, et il bouge même quand le
-    // fil ne franchit aucun trap — c'est ce qui distingue un tourniquet en code
-    // traduit d'un fil réellement bloqué. nullptr = emu de base (main).
-    // `volatile` : les écrivains sont du code généré et un store atomique
-    // relaxed ; la course formelle disparaît pour zéro instruction de plus.
+    // Per-thread liveness (see cpu.h): translated blocks executed since
+    // boot, MONOTONIC. Derived from the block budget (decremented by every
+    // translated block's prologue): zero cost on the hot path, and it moves
+    // even when the thread crosses no trap — which is what distinguishes a
+    // spin in translated code from a genuinely blocked thread. nullptr =
+    // base emu (main).
+    // `volatile`: the writers are generated code plus a relaxed atomic
+    // store; the formal race disappears for zero extra instructions.
     bool thread_emu_filstat(void* e, uint32_t* traps, uint32_t* cont, uint32_t* wait_us) override {
-        if (!g_filstat) return false;                 // champ ABSENT sans le knob
+        if (!g_filstat) return false;                 // field ABSENT without the knob
         const x86emu_t* em = e ? (const x86emu_t*)e : &emu_;
         const volatile uint32_t* pt = &em->dyn86_traps;
         const volatile uint32_t* pc = &em->dyn86_gilcont;
@@ -1177,31 +1145,30 @@ public:
         const volatile uint32_t* pn = &em->dyn86_blocks;
         const volatile int*      pa = &em->dyn86_armed;
         const volatile int*      pb = &em->dyn86_budget;
-        // ORDRE DE LECTURE LOAD-BEARING (cpu.h) : total, PUIS armement, PUIS
-        // budget. Couplé à « désarmer avant d'accumuler » côté écrivain, il
-        // interdit de compter deux fois une tranche, donc tout bond en avant.
+        // LOAD-BEARING READ ORDER (cpu.h): total, THEN armed, THEN budget.
+        // Paired with "disarm before accumulating" on the writer side, this
+        // forbids double-counting a slice, and so forbids any forward jump.
         uint32_t n = *pn; int a = *pa; int b = *pb;
-        // budget <= 0 : tranche épuisée ou fil poké — le delta est déjà dans n.
+        // budget <= 0: slice exhausted or thread poked — the delta is already in n.
         if (out) *out = (b > 0 && a >= b) ? n + (uint32_t)(a - b) : n;
         return true;
     }
 
-    // NOTE natif : appelé HORS gil::Guard et compteurs mono-écrivain — sûr en
-    // coop seulement ; inatteignable en natif (budget armé infini, bbreak ne
-    // tire jamais). Ne pas activer D2_EIPPROF+native sans repenser ceci.
-    // D2_EIPPROF: échantillonneur de temps CPU. IMPORTANT — on n'échantillonne
-    // QUE sur expiration du budget de blocs, c'est-à-dire quand le thread a
-    // réellement consommé sa tranche à CALCULER. Échantillonner à la reprise
-    // (première version) sur-représentait massivement le code qui CÈDE souvent
-    // la main : 86 % des relevés tombaient dans la boucle de messages 0x4fa590
-    // (PeekMessage/Sleep), qui ne brûle pourtant aucun CPU.
+    // NATIVE NOTE: called OUTSIDE gil::Guard, with single-writer counters —
+    // safe under the cooperative backend only; unreachable under native
+    // (budget is armed infinite, bbreak never fires). Don't enable
+    // D2_EIPPROF+native without rethinking this.
+    // D2_EIPPROF: CPU-time sampler. IMPORTANT — sampling happens ONLY on
+    // block-budget expiry, i.e. when the thread has actually consumed its
+    // slice computing. Sampling on resume instead heavily over-represents
+    // code that yields often, such as a message/wait loop that burns no CPU.
     void eipprof_sample(uint32_t ip) {
         uint32_t rva = ip - g_eipProfBase;
         ++g_eipProfBuckets[wx86_prof_family(g_profMap, rva)];
         wx86_prof_zooms(rva);
-        // Histogramme PLEINE PORTÉE : 96 cases de 32 KiB couvrant tout le .text
-        // (0..0x300000). Les zones nommées ci-dessus ne couvraient que 8 % du
-        // temps réel — il faut chercher sans a priori.
+        // FULL-RANGE histogram: 96 buckets of 32 KiB covering the whole
+        // .text (0..0x300000). The named zones above cover only a fraction
+        // of real time — this scans without assumptions.
         if ((rva >> 15) < 96) ++d2rt_eipprof_all[rva >> 15];
         { uint32_t h = (ip * 2654435761u) >> 19;           // 13 bits -> 8192 cases
           for (int p = 0; p < 24; ++p) {
@@ -1211,29 +1178,30 @@ public:
           } }
     }
 
-    // ---- D2_TIMEPROF : echantillonnage UNIFORME EN TEMPS ------------------
-    // Appele au meme endroit que eipprof_sample (expiration du budget), seul
-    // moment ou emu->ip est a jour : entre deux epilogues, EIP vit dans r14 et
-    // la memoire est perimee.
+    // ---- D2_TIMEPROF: sampling UNIFORM IN TIME ------------------------------
+    // Called at the same point as eipprof_sample (budget expiry), the only
+    // moment emu->ip is current: between epilogues, EIP lives in r14 and
+    // memory is stale.
     //
-    // ASSERVISSEMENT. On mesure l'intervalle reel et on corrige le budget du
-    // prochain pas pour viser `d2rt_timeprof_on` microsecondes. Un facteur
-    // borne a [1/4, 4] par pas : la correction converge en quelques pas sans
-    // osciller quand une scene change brutalement de cout par bloc.
+    // SERVO. The real interval is measured and the next step's budget is
+    // corrected to target `d2rt_timeprof_on` microseconds. The correction
+    // factor is bounded to [1/4, 4] per step, so it converges within a few
+    // steps without oscillating when a scene's per-block cost changes
+    // abruptly.
     //
-    // INTERVALLES SUSPENDUS. Sous D2SCHED=native le fil peut etre depossede du
-    // coeur entre deux expirations : l'intervalle mesure contient alors du
-    // temps ou ce fil ne calculait PAS, et l'attribuer a l'adresse echantillonnee
-    // serait un mensonge. Au-dela de 8x la cible, l'echantillon est REJETE et
-    // compte a part (`suspendus=`). Un instrument qui cache ce qu'il a jete ne
-    // prouve rien.
+    // SUSPENDED INTERVALS. Under D2SCHED=native the thread can be preempted
+    // from the core between two expiries: the measured interval then
+    // includes time this thread was NOT computing, and attributing it to the
+    // sampled address would be a lie. Beyond 8x the target, the sample is
+    // REJECTED and counted separately (`suspended=`). An instrument that
+    // hides what it discarded proves nothing.
     void timeprof_sample(uint32_t ip, int consumed) {
         const uint64_t now = dyn86_jp_now_us();
         const uint64_t target = d2rt_timeprof_on;
         if (!tp_last_us) { tp_last_us = now; tp_budget = 2048; return; }
         const uint64_t dt = now - tp_last_us;
         tp_last_us = now;
-        if (!dt) return;                      // sous la resolution de l'horloge
+        if (!dt) return;                      // below clock resolution
 
         // Correction du budget : viser `target` us par intervalle.
         {   int nb = tp_budget;
@@ -1245,7 +1213,7 @@ public:
             if (nb > 1000000) nb = 1000000;
             tp_budget = nb; }
 
-        if (dt > target * 8) { ++d2rt_tp_susp; return; }   // fil suspendu
+        if (dt > target * 8) { ++d2rt_tp_susp; return; }   // thread was suspended
 
         ++d2rt_tp_samples;
         d2rt_tp_us += dt;
@@ -1253,7 +1221,7 @@ public:
 
         const uint32_t rva = ip - d2rt_timeprof_base;
         ++d2rt_tp_bucket[wx86_prof_family(g_profMap, rva)];
-        if(d2rt_lag_on) {                 // anneau d'attribution des gels
+        if(d2rt_lag_on) {                 // stall-attribution ring
             const uint32_t w = d2rt_lag_w;
             d2rt_lag_t[w % D2RT_LAG_RING] = now;
             d2rt_lag_ip[w % D2RT_LAG_RING] = ip;
@@ -1270,39 +1238,39 @@ public:
     bool run(uint32_t eip, const char** fault) override {
         dyn86_slice_begin();           // clear stop flag + break marker (native
                                        // mode: dyn86_set_native keeps the stop)
-        // ---- L'emu du fil, resolu UNE fois pour toute la tranche ------------
-        // POURQUOI : sous natif, chaque acces via l'accesseur est un
-        // __emutls_get_address -> pthread_getspecific -> pte_osTlsGetValue ->
-        // sceKernelGetTLSAddr, un appel INTER-MODULE facture 0,43-0,58 us au
-        // banc console (audit t12 §26.7 ; NE PAS confondre avec les 1,29 us de
-        // §26.6, qui mesurent sceKernelGetProcessTimeWide -- lecture d'horloge
-        // en plus -- et qui MAJORE). Le desassemblage du binaire livre en
-        // comptait QUATORZE dans le seul corps de run(), dont SIX par tour de
-        // boucle : donc six par prise de GIL, puisque le Guard plus bas est
-        // pris DANS la boucle.
+        // ---- The thread's emu, resolved ONCE for the whole slice ------------
+        // WHY: under the native backend, each access through the accessor is
+        // a __emutls_get_address -> pthread_getspecific -> pte_osTlsGetValue
+        // -> sceKernelGetTLSAddr chain — an inter-module call, not a cheap
+        // TLS read. Disassembly of the shipped binary counted FOURTEEN such
+        // calls in run()'s body alone, SIX of them per loop iteration — so
+        // six per GIL acquisition, since the Guard further down is taken
+        // INSIDE the loop.
         //
-        // POURQUOI C'EST CORRECT, et pas un cache : t_emu n'est ecrit que par
-        // thread_emu_bind, qui a exactement DEUX appelants (sched_native.cpp
-        // l. 501 et l. 902), tous deux AVANT run_guest -- donc avant tout run()
-        // sur ce fil hote. Sous coop l'accesseur rend emu_, un membre. Dans les
-        // deux cas il designe le MEME objet pendant toute l'activation de
-        // run() : on ne memorise pas une valeur, on nomme une reference.
+        // WHY THIS IS CORRECT, and not just a cache: t_emu is written only by
+        // thread_emu_bind, which has exactly TWO callers (sched_native.cpp
+        // l.501 and l.902), both BEFORE run_guest — i.e. before any run() on
+        // this host thread. Under the cooperative backend the accessor
+        // returns emu_, a member. In both cases it names the SAME object for
+        // the entire duration of this run() activation: this doesn't cache a
+        // value, it names a reference.
         //
-        // CE QUE LA REFERENCE NE CHANGE PAS : e.quit et e.dyn86_bbreak sont
-        // ecrits par d'AUTRES fils (request_stop). Une reference ne retient que
-        // l'ADRESSE, jamais le contenu : chaque lecture retourne en memoire,
-        // exactement comme avant. Et DynaRun reste un appel externe opaque que
-        // le compilateur ne peut pas traverser (pas de -flto sur ce fichier,
-        // build_rt_boot_vpk.sh l. 94). Le jour ou -flto arriverait, relire ceci.
+        // WHAT THE REFERENCE DOES NOT CHANGE: e.quit and e.dyn86_bbreak are
+        // written by OTHER threads (request_stop). A reference only holds an
+        // ADDRESS, never a copy of the content: every read still goes to
+        // memory, exactly as before. And DynaRun remains an opaque external
+        // call the compiler cannot see through (no -flto on this file,
+        // build_rt_boot_vpk.sh l.94). Re-read this note if -flto is ever
+        // enabled here.
         //
-        // DETTE A SURVEILLER : si thread_emu_bind devenait un jour appelable
-        // depuis un corps de shim, le hissage deviendrait faux ET MUET. Le
-        // garde-fou n'est pas un assert (il ne vivrait que sous -DD2_TLSCOUNT,
-        // jamais dans le binaire joue) : c'est le NOMBRE D'APPELANTS, a
-        // reverifier si l'on touche a thread_emu_bind.
-        // Pointeur EPINGLE pour la tranche, ou nullptr si le rollback est
-        // demande — chaque acces repasse alors par E(), donc par la chaine
-        // emutls complete, exactement comme avant l'optimisation.
+        // DEBT TO WATCH: if thread_emu_bind ever became callable from inside
+        // a shim body, this hoist would become wrong AND SILENT. The guard
+        // against that isn't an assert (it would only live under
+        // -DD2_TLSCOUNT, never in the shipped binary): it's the NUMBER OF
+        // CALLERS, to re-verify whenever thread_emu_bind is touched.
+        // Pointer PINNED for the slice, or nullptr when the rollback flag is
+        // set — every access then goes back through E(), i.e. through the
+        // full emutls chain, exactly as before this optimization.
         x86emu_t* const pin_ = g_noEmuOpt ? nullptr : &E();
         auto EMU = [&]() -> x86emu_t& { return pin_ ? *pin_ : E(); };
         EMU().ip.dword[0] = eip;
@@ -1310,39 +1278,41 @@ public:
                                        // runner's fault must not ghost into a
                                        // later slice on the same emu
         // Recharge the block-entry preemption budget for this slice.
-        // Vivacité par fil (cpu.h) : la tranche qui s'achève est comptabilisée
-        // ici, et `armed` mémorise la valeur rechargée — le lecteur n'a donc
-        // AUCUNE constante 0x7FFFFFFF à supposer (elle deviendrait fausse le
-        // jour où le natif armerait une limite via set_run_limit).
-        // armed == 0 <=> tranche déjà comptabilisée par nudge_thread_budget (ou
-        // toute première entrée) ; budget <= 0 <=> tranche consommée jusqu'au
-        // bout (préemption par expiration du budget) : elle compte en entier.
+        // Per-thread liveness (cpu.h): the ending slice is accounted for
+        // here, and `armed` remembers the recharged value — so the reader
+        // never has to assume any 0x7FFFFFFF constant (which would become
+        // wrong the day native arms a real limit via set_run_limit).
+        // armed == 0 <=> slice already accounted for by nudge_thread_budget
+        // (or this is the very first entry); budget <= 0 <=> the slice was
+        // consumed to the end (preempted by budget expiry): it counts in
+        // full.
         //
-        // ORDRE DES ÉCRITURES — c'est ce qui rend le champ honnête. Le lecteur
-        // (thread_emu_blocks) lit blocks, PUIS armed, PUIS budget, sans verrou.
-        // On DÉSARME donc AVANT d'accumuler : tant que armed vaut 0, aucun
-        // delta n'est ajouté au total lu, donc aucun lecteur ne peut compter
-        // DEUX FOIS la tranche qui vient de s'achever. Un lecteur tombé dans
-        // la fenêtre sous-estime d'une tranche ; il ne voit JAMAIS un bond en
-        // avant — un bond serait lu « ce fil galope », c'est-à-dire le sens
-        // FAUX (famine annoncée là où il y a arrêt). L'ordre inverse rendait
-        // ce bond possible, sur quelques instructions par tranche.
-        // Accès `volatile` : interdit au compilateur de réordonner ces quatre
-        // écritures entre elles. Coût nul (une fois par TRANCHE), et sous
-        // natif tous les fils sont sur un seul cœur (USER_0) : pas de
-        // réordonnancement matériel à couvrir en plus.
+        // WRITE ORDER — this is what makes the field honest. The reader
+        // (thread_emu_blocks) reads blocks, THEN armed, THEN budget, without
+        // a lock. So this DISARMS BEFORE accumulating: while armed is 0, no
+        // delta is added to the total a reader sees, so no reader can count
+        // the just-finished slice TWICE. A reader caught in the window
+        // under-estimates by one slice; it never sees a forward jump — a
+        // jump would misread as "this thread is racing ahead," the wrong
+        // sense (starvation reported where there was a stop). The reverse
+        // order would make that jump possible, for a few instructions per
+        // slice.
+        // `volatile` access: forbids the compiler from reordering these four
+        // writes among themselves. Zero cost (once per SLICE), and under
+        // native all threads run on a single core (USER_0), so there's no
+        // extra hardware reordering to cover.
         {   volatile int*      pa = &EMU().dyn86_armed;
             volatile uint32_t* pn = &EMU().dyn86_blocks;
             volatile int*      pb = &EMU().dyn86_budget;
             const int a = *pa, b = *pb;
-            *pa = 0;                                                    // (1) plus aucun delta à lire
-            if (a > 0) *pn = *pn + (uint32_t)(a - (b > 0 ? b : 0));     // (2) la tranche est sauvée
-            // D2_TIMEPROF : le budget est celui que l'asservissement a calcule
-            // pour le fil courant, et non la tranche d'ordonnancement.
+            *pa = 0;                                                    // (1) no more delta to read
+            if (a > 0) *pn = *pn + (uint32_t)(a - (b > 0 ? b : 0));     // (2) the slice is saved
+            // D2_TIMEPROF: use the budget the servo computed for the
+            // current thread, not the scheduling slice's.
             const int fresh = d2rt_timeprof_on ? (tp_budget ? tp_budget : 2048)
                             : (limit_blocks_ ? (int)limit_blocks_ : 0x7FFFFFFF);
-            *pb = fresh;                                                // (3) budget de la tranche
-            *pa = fresh;                                                // (4) les deltas reprennent
+            *pb = fresh;                                                // (3) this slice's budget
+            *pa = fresh;                                                // (4) deltas resume
         }
         EMU().dyn86_bbreak = 0;
         for (;;) {
@@ -1353,19 +1323,15 @@ public:
             // Block-budget expiry: preempted, exactly resumable at EIP =
             // the start of the block that was about to run.
             if (EMU().dyn86_bbreak) { EMU().dyn86_bbreak = 0; t_preempt = 2;
-                // ⚡ CE N'EST PAS UN PROFIL DE TEMPS. Le budget se decremente a
-                // chaque ENTREE DE BLOC (prologue emis), donc l'echantillonnage
-                // est uniforme EN ENTREES DE BLOC. Une fonction courte et tres
-                // appelee est massivement sur-representee ; une boucle longue
-                // tenant dans un seul bloc est sous-comptee (biais inverse deja
-                // consigne dans profil_code_emis_20260905.md §0).
-                // Mesure du 07/09 : Game+0x10dd60 pesait 12,55 % de ce profil ;
-                // remplacer entierement son corps n'a deplace l'image que de
-                // 0,265 ms sur 18,55 (et dans le mauvais sens), la ou 12,55 %
-                // en vaudrait 2,3 — facteur ~10.
-                // docs/perf/o1_intrin_console_20260907.md §3.
-                if (g_eipProf) eipprof_sample(ip);   // profil par ENTREES DE BLOC
-                if (d2rt_timeprof_on)                // profil en TEMPS
+                // NOT a time profile. The budget decrements on every BLOCK
+                // ENTRY (prologue emitted), so sampling is uniform in block
+                // entries, not time. A short, frequently-called function is
+                // massively over-represented; a long loop that fits in a
+                // single block is under-counted. Treat this profiler's
+                // percentages as a rough entry-frequency ranking, not a cost
+                // ranking — the two can disagree by an order of magnitude.
+                if (g_eipProf) eipprof_sample(ip);   // block-entry-based profile
+                if (d2rt_timeprof_on)                // time-based profile
                     timeprof_sample(ip, tp_budget ? tp_budget : 2048);
                 return true; }
             // LinkNext seam break (request_stop seen at a not-yet-linked seam):
@@ -1380,21 +1346,22 @@ public:
             }
             uint32_t slot = ip & ~0xFu;    // exit stub leaves EIP inside the slot
             if (slot >= trap_lo_ && slot < trap_hi_ && trap_fn_) {
-                TrapGuard gg(EMU());       // native: serialize shims/intrinsics (spec D3) ; = gil::Guard sans D2_FILSTAT
-                // PLUS de « t_fault_addr = slot » ici. C'etait une ecriture dans
-                // une variable __thread, donc UNE chaine emutls complete
-                // (__emutls_get_address -> pthread_getspecific -> pte_osTlsGetValue
-                // -> sceKernelGetTLSAddr, inter-module) A CHAQUE TRAP — sur les
-                // 9,39 chaines par prise mesurees par D2VPK_TLSWRAP.
-                // ELLE NE PERD RIEN : tous les lecteurs de fault_addr() sont sur
-                // un chemin de FAUTE (sched_native.cpp:430/435/442/453,
-                // sched_cooperative.cpp:310/314, rt_boot.cpp:7194), et l'unique
-                // « return false » de run() est la branche de faute plus haut,
-                // qui pose t_fault_addr = ip elle-meme. Si une faute survient
-                // DANS un shim, la ligne suivante a deja publie le slot dans
-                // e.ip, donc cpu_->reg(R_EIP) — imprime cote a cote avec
-                // faultAddr sur CHACUN de ces sites — porte la meme information.
-                if (g_noEmuOpt) t_fault_addr = slot;   // ecriture par trap RETABLIE
+                TrapGuard gg(EMU());       // native: serialize shims/intrinsics; equivalent to gil::Guard without D2_FILSTAT
+                // No "t_fault_addr = slot" here. That used to be a write to a
+                // __thread variable, i.e. a full emutls chain
+                // (__emutls_get_address -> pthread_getspecific ->
+                // pte_osTlsGetValue -> sceKernelGetTLSAddr, inter-module) ON
+                // EVERY TRAP.
+                // NOTHING IS LOST: every reader of fault_addr() is on a FAULT
+                // path (sched_native.cpp:430/435/442/453,
+                // sched_cooperative.cpp:310/314, rt_boot.cpp:7194), and the
+                // only "return false" in run() is the fault branch above,
+                // which sets t_fault_addr = ip itself. If a fault happens
+                // INSIDE a shim, the next line has already published the
+                // slot into e.ip, so cpu_->reg(R_EIP) — printed side by side
+                // with faultAddr at each of those sites — carries the same
+                // information.
+                if (g_noEmuOpt) t_fault_addr = slot;   // per-trap write RESTORED (rollback path)
                 EMU().ip.dword[0] = slot;      // consistent state, like CpuUnicorn
                 if (try_intrinsic(slot)) continue;   // fast path: never enters the Bridge
                 bool resume = trap_fn_(*this, slot);
@@ -1406,7 +1373,7 @@ public:
         }
     }
     uint32_t fault_addr() const override { return t_fault_addr; }
-    // Precise Windows exception code for the SEH dispatcher (audit p8). UNIMPL is
+    // Precise Windows exception code for the SEH dispatcher. UNIMPL is
     // an emulator gap, NOT a guest fault -> return 0 so the dispatcher skips it
     // (a __except "succeeding" on an emulator gap would mask it and diverge from
     // real hardware). NOTE: some genuine guest AVs arrive tagged ERR_ILLEGAL via
@@ -1455,16 +1422,15 @@ public:
     void load_context(const X86Context& c) override {
         Cpu::load_context(c);
         // First slice of a never-run thread (fpu_valid=false): INHERIT the
-        // current emu FPU state — the long-validated semantics. The C12 attempt
-        // to load an all-zero "pristine" blob here was a FIELD REGRESSION
-        // (2026-08-25, real Vita): cw=0 means x87 precision control = single
-        // and tags != TAGS_EMPTY, so the DCC sprite decode (x87-heavy) went
-        // subtly wrong on every thread's first slice — including MAIN, whose
-        // pre-scheduler CRT state (cw=0x27F) got clobbered — ending in the
-        // CelDataHash.cpp:1420 Halt at game load. A truly correct power-on
-        // blob would be reset_fpu() semantics (cw=0x37F, tags=TAGS_EMPTY,
-        // mxcsr=0x1F80) applied to WORKERS only, and must be validated on
-        // hardware before it ships; until then, inherit.
+        // current emu's FPU state — this is the long-validated semantics.
+        // Loading an all-zero "pristine" blob here instead is a known
+        // regression: cw=0 means x87 precision control = single and
+        // tags != TAGS_EMPTY, so x87-heavy guest code (e.g. sprite decoding)
+        // goes subtly wrong on every thread's first slice — including MAIN,
+        // whose pre-scheduler CRT state (cw=0x27F) would get clobbered. A
+        // correct power-on blob would use reset_fpu() semantics (cw=0x37F,
+        // tags=TAGS_EMPTY, mxcsr=0x1F80) applied to WORKER threads only, and
+        // must be validated on hardware before it ships; until then, inherit.
         if (c.fpu_valid) {
             X87Blob b; std::memcpy(&b, c.fpu, sizeof b);
             blob_to_emu(E(), b);
@@ -1491,13 +1457,13 @@ private:
     TrapFn trap_fn_;
     // Per-slot Warden-safe intrinsics (docs/perf, Tier 1): a tiny fixed table of
     // {trap VA -> inline handler}. Only a few ultra-hot trivial imports qualify.
-    // Adressage ouvert (cf. try_intrinsic) : ikey_[i]==0 => case libre.
+    // Open addressing (see try_intrinsic): ikey_[i]==0 => empty slot.
     uint32_t    ikey_[kIntrinMask + 1] = {};
     IntrinsicFn ifn_ [kIntrinMask + 1] = {};
-    int    intrin_n_ = 0;                          // occupation (plafond kIntrinMax)
-    // B5 : projection en INDEX DIRECT de la table ci-dessus (cf. rebuild_direct).
-    // idir_n_ == 0 => index non arme : la comparaison `d < idir_n_` rejette
-    // tout, y compris avant tout enregistrement.
+    int    intrin_n_ = 0;                          // occupancy (capped at kIntrinMax)
+    // B5: DIRECT-INDEX projection of the table above (see rebuild_direct).
+    // idir_n_ == 0 => index not armed: the `d < idir_n_` comparison rejects
+    // everything, including before any registration.
     uint32_t    idir_lo_ = 0;
     uint32_t    idir_n_  = 0;
     IntrinsicFn idir_[kDirectMax] = {};

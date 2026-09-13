@@ -1,84 +1,81 @@
-// src/runtime/win32_shims_memory.h — LE PLAN MEMOIRE vu du programme invite :
-// tas (Heap/Local/Global), arene d'adresses virtuelles (Virtual*), inventaire
-// des regions (VirtualQuery) et description de la machine (GetSystemInfo,
+// src/runtime/win32_shims_memory.h — the memory map as seen by the guest
+// program: heap (Heap/Local/Global), virtual-address arena (Virtual*),
+// region inventory (VirtualQuery), and machine description (GetSystemInfo,
 // GlobalMemoryStatus).
 //
-// POURQUOI C'EST DU MOTEUR. Un programme Win32 alloue et libere ; sur une
-// vraie machine c'est le systeme qui repond, ici c'est le moteur qui incarne
-// le systeme. Les quinze corps rassembles ici sont IDENTIQUES au caractere
-// pres chez les deux consommateurs du moteur (verifies un par un ; le seul
-// ecart est le NOM d'un alias d'allocation). Ce n'est pas un raisonnement,
-// c'est une constatation.
+// Why this lives in the engine: a Win32 program allocates and frees; on a
+// real machine the OS answers, here the engine stands in for the OS. The
+// bodies gathered here are byte-identical across both consumers of this
+// engine (checked one by one; the only difference is the NAME of an
+// allocation alias).
 //
-// CE QUI RESTE AU CONSOMMATEUR, ET POURQUOI. Le PLAN lui-meme : ou commence le
-// tas, quelle taille lui donner, ou vit l'arene, comment decrire les regions.
-// Cela depend de la console et du portage (guest_region.h le dit deja pour
-// l'allocateur). Le consommateur le fournit par Wx86MemoryPlan.
+// What stays with the consumer, and why: the PLAN itself — where the heap
+// starts, how large it is, where the arena lives, how regions are described.
+// That depends on the target platform and port (guest_region.h already says
+// so for the allocator). The consumer supplies it via Wx86MemoryPlan.
 //
-// L'INSTRUMENTATION NE SUIT PAS LES CORPS. Les compteurs d'occupation, les
-// lignes de journal « [VirtualAlloc 4096 KB ...] », le nommage du site fautif
-// dans un journal de plantage : rien de tout cela ne DECIDE quoi que ce soit.
-// Ce sont des observateurs, et ils passent par wx86_mem_set_observer(). Le
-// moteur raconte, il ne demande jamais d'avis — meme regle que l'observateur
-// de synchronisation (guest_sync.h) et l'observateur reseau.
+// Instrumentation does not follow the bodies: occupancy counters, log lines,
+// naming the faulting site in a crash log — none of that DECIDES anything.
+// These are observers, reached through wx86_mem_set_observer(). The engine
+// reports; it never asks for permission — same rule as the synchronization
+// observer (guest_sync.h) and the network observer.
 #pragma once
 #include <cstdint>
 
 namespace d2rt { class Bridge; class Cpu; }
 namespace wx86 { class GuestRegion; }
 
-// ---- Remplissage a zero d'une plage INVITEE ---------------------------------
-// Vit ici parce que c'est la garantie Win32 de ces shims-la (HEAP_ZERO_MEMORY,
-// LMEM_ZEROINIT, MEM_COMMIT) qui l'exige, et parce que les deux portages en
-// portaient la meme copie. Passe par hostptr + une barriere d'invalidation de
-// code quand c'est possible (strictement equivalent a une boucle de write(),
-// moins un appel virtuel et une copie par tranche), repli sur write() sinon.
+// ---- Zero-filling a GUEST range ---------------------------------------------
+// Lives here because it's a Win32 guarantee these shims make (HEAP_ZERO_MEMORY,
+// LMEM_ZEROINIT, MEM_COMMIT). Goes through hostptr plus a code-invalidation
+// barrier when possible (equivalent to a write() loop, minus the virtual
+// call and per-chunk copy each iteration), falls back to write() otherwise.
 void wx86_gzero(d2rt::Cpu& c, uint32_t va, uint32_t n);
 
-// ---- Le plan que le consommateur concede ------------------------------------
+// ---- The plan the consumer provides -----------------------------------------
 struct Wx86MemoryPlan {
-    // Region servant le tas invite (HeapAlloc/HeapFree/Local*/Global*).
+    // Region backing the guest heap (HeapAlloc/HeapFree/Local*/Global*).
     wx86::GuestRegion* heap = nullptr;
-    // Region servant l'arene d'adresses virtuelles (VirtualAlloc/VirtualFree).
+    // Region backing the virtual-address arena (VirtualAlloc/VirtualFree).
     wx86::GuestRegion* va   = nullptr;
-    // Description d'une region pour VirtualQuery. Le moteur connait le FORMAT
-    // (MEMORY_BASIC_INFORMATION, 28 octets) ; il ne peut pas connaitre le plan.
-    // Rend false pour ce que Windows refuse d'introspecter (espace noyau).
+    // Describes a region for VirtualQuery. The engine knows the FORMAT
+    // (MEMORY_BASIC_INFORMATION, 28 bytes) but not the plan itself. Returns
+    // false for anything Windows itself refuses to introspect (kernel space).
     bool (*vquery)(uint32_t addr, uint32_t& base, uint32_t& size, uint32_t& state,
                    uint32_t& type, uint32_t& protect, uint32_t& allocbase) = nullptr;
 };
 
-// ---- Observateur -------------------------------------------------------------
+// ---- Observer -----------------------------------------------------------------
 enum {
-    WX86_MEM_VA_COMMIT_IN = 0,  // MEM_COMMIT a l'interieur d'une reservation existante
-    WX86_MEM_VA_RESERVE,        // MEM_RESERVE (hors reservation existante)
-    WX86_MEM_VA_COMMIT_FRESH,   // MEM_COMMIT hors de toute reservation
-    WX86_MEM_VA_BIG,            // demande >= 1 MiB : le consommateur en fait une ligne
-    WX86_MEM_VA_GARBAGE,        // demande >= 2 GiB : valeur manifestement corrompue
-    WX86_MEM_VA_FAIL,           // l'arene a refuse
-    WX86_MEM_VA_RELEASE,        // MEM_RELEASE honore
-    WX86_MEM_VA_RELEASE_MISS,   // MEM_RELEASE tombe a cote : fuite d'arene
-    WX86_MEM_VA_DECOMMIT,       // MEM_DECOMMIT (le support reste, un recommit zerotera)
+    WX86_MEM_VA_COMMIT_IN = 0,  // MEM_COMMIT inside an existing reservation
+    WX86_MEM_VA_RESERVE,        // MEM_RESERVE (outside any existing reservation)
+    WX86_MEM_VA_COMMIT_FRESH,   // MEM_COMMIT outside any reservation
+    WX86_MEM_VA_BIG,            // request >= 1 MiB: worth a log line
+    WX86_MEM_VA_GARBAGE,        // request >= 2 GiB: clearly a corrupted size
+    WX86_MEM_VA_FAIL,           // the arena refused
+    WX86_MEM_VA_RELEASE,        // MEM_RELEASE honored
+    WX86_MEM_VA_RELEASE_MISS,   // MEM_RELEASE missed its target: arena leak
+    WX86_MEM_VA_DECOMMIT,       // MEM_DECOMMIT (backing kept, a later recommit zeroes it)
 };
 struct WxMemEvent {
     int         kind;
-    d2rt::Cpu*  cpu;      // CPU au site d'appel
-    uint32_t    addr;     // adresse concernee (hint, bloc libere, premiere page)
-    uint32_t    size;     // octets concernes
-    uint32_t    type;     // dwAllocationType / dwFreeType d'origine
-    uint32_t    protect;  // flProtect d'origine (0 quand sans objet)
-    uint32_t    ra;       // adresse de retour de l'appelant invite (0 si non lue)
+    d2rt::Cpu*  cpu;      // CPU at the call site
+    uint32_t    addr;     // address involved (hint, freed block, first page)
+    uint32_t    size;     // bytes involved
+    uint32_t    type;     // original dwAllocationType / dwFreeType
+    uint32_t    protect;  // original flProtect (0 when not applicable)
+    uint32_t    ra;       // guest caller's return address (0 if not read)
 };
 typedef void (*WxMemObserverFn)(const WxMemEvent&);
-// UN SEUL observateur, comme partout ailleurs : un second appel REMPLACE le
-// premier plutot que de s'ajouter en silence.
+// A SINGLE observer, as elsewhere: a second call REPLACES the first rather
+// than silently adding to it.
 void wx86_mem_set_observer(WxMemObserverFn cb);
 
-// ---- Memoire physique annoncee ----------------------------------------------
-// GlobalMemoryStatus dit au jeu combien de RAM la machine a. Beaucoup de jeux
-// dimensionnent leurs caches la-dessus, donc la valeur est une DECISION du
-// portage, pas une constante universelle : il la pose ici. Defaut 256 MiB,
-// la valeur qu'avaient les deux portages.
+// ---- Reported physical memory ------------------------------------------------
+// GlobalMemoryStatus tells the guest how much RAM the machine has. Many
+// games size their caches off this, so the value is a DECISION for the
+// consumer to make, not a universal constant — it sets it here. Default
+// 256 MiB.
 void wx86_mem_set_total_phys_mb(uint32_t mb);
 
 void win32_shims_memory_install(d2rt::Bridge& br, const Wx86MemoryPlan& plan);

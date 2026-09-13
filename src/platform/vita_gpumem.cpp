@@ -1,9 +1,9 @@
-// src/platform/vita_gpumem.cpp — voir vita_gpumem.h.
+// See vita_gpumem.h.
 //
-// Les corps sont la TRANSCRIPTION du code eprouve d'un portage reel : memes
-// granularites d'alignement, memes replis, memes messages d'echec. Rien n'a ete
-// « ameliore » au passage — un transfert de propriete ne se melange pas a un
-// changement de comportement, sinon plus personne ne sait ce qui a casse.
+// These bodies are a direct transcription of proven allocation code: same
+// alignment granularities, same fallbacks, same failure messages. Moving the
+// ownership of code must never be mixed with changing its behavior, or
+// nobody can tell what broke.
 #ifdef __vita__
 #include "platform/vita_gpumem.h"
 #include "platform/vita_host.h"
@@ -23,7 +23,7 @@ bool gpu_prefers_cdram() { return g_prefer_cdram; }
 bool gpu_alloc(GpuBlock& b, SceKernelMemBlockType type, uint32_t size,
                uint32_t attribs, const char* name) {
     const bool isCd = (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW);
-    // La CDRAM s'aligne sur 256 Kio, la RAM utilisateur sur 4 Kio.
+    // CDRAM aligns to 256 KiB, user RAM to 4 KiB.
     const uint32_t gran = isCd ? (256u << 10) : (4u << 10);
     b.size  = align_up(size, gran);
     b.cdram = isCd;

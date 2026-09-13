@@ -1,33 +1,30 @@
-// src/runtime/win32_shims_window.cpp — see win32_shims_window.h. Split out
-// of d2vita's tools/rt_boot.cpp "real window semantics" USER32 group
-// (2026-09-10): fake handles, honest no-ops, and pure geometry — the parts
-// of that group with zero window-subclass/message-queue/wndproc-dispatch
-// state and no dependency on any d2vita-hosted helper.
+// src/runtime/win32_shims_window.cpp — see win32_shims_window.h. Fake
+// handles, honest no-ops, and pure geometry — the parts of the USER32
+// window-semantics group with zero window-subclass/message-queue/
+// wndproc-dispatch state and no dependency on any consumer-hosted helper.
 //
-// Left d2vita-side (win32_shims_window_d2.cpp is NOT created — these stay
-// inline in tools/rt_boot.cpp), each for a concrete, checked reason, not a
-// blanket "too entangled":
+// Stays on the consumer side, each for a concrete reason, not a blanket
+// "too entangled":
 //   - RegisterClassA/RegisterClassExA/UnregisterClassA/CreateWindowExA:
 //     CreateWindowExA builds its guest WM_NCCREATE/WM_CREATE dispatch stub
-//     via misc(), d2vita's arena allocator bound by g_miscLimit (set from
-//     D2's compact memory layout) and diagnosed via d2_crashlog — not a
-//     generic winx86 primitive.
-//   - ShowWindow (win_activate_once)/PeekMessageA/GetMessageA/
-//     DispatchMessageA/SetFocus: share g_msgQ/g_hwnd/g_wndProc with the
-//     window-creation quartet above, plus DispatchMessageA hardcodes
-//     `g_wndCallEcx = *(g_d2base+0x3d55d8)` — a literal RVA into Game.exe's
-//     own wndproc hook-chain check, found by disassembly specifically for
-//     this binary. PeekMessageA also drives d2vita's real-clock scheduler
-//     wait, $D2CMDFILE remote control (cmd_poll) and the physical-input tick.
-//   - GetKeyState/GetAsyncKeyState/GetKeyboardState: g_keyState[256] is
-//     written directly by d2vita's scripted-input injection code at 6+
-//     call sites (mouse/keydown/keyup/chr) — input handling has a real
-//     regression history in this codebase (window-activation/focus bugs,
-//     select-pump starvation); not worth multiplying that surface tonight.
+//     via a consumer-owned arena allocator bound to the guest's memory
+//     layout and diagnosed via the consumer's crash log — not a generic
+//     winx86 primitive.
+//   - ShowWindow/PeekMessageA/GetMessageA/DispatchMessageA/SetFocus: share
+//     window/message-queue/wndproc state with the window-creation quartet
+//     above, plus DispatchMessageA hardcodes a literal RVA into one guest
+//     binary's own wndproc hook-chain check, found by disassembly for that
+//     specific binary. PeekMessageA also drives the consumer's real-clock
+//     scheduler wait, remote control, and physical-input tick.
+//   - GetKeyState/GetAsyncKeyState/GetKeyboardState: the key-state table is
+//     written directly by the consumer's scripted-input injection code at
+//     several call sites — input handling has a real regression history in
+//     this codebase (window-activation/focus bugs, select-pump starvation),
+//     so it stays put rather than multiplying that surface.
 //
-// DISCLOSED BEHAVIOR CHANGE: same as the other extractions — the original
-// `U` helper's TRACE/TRACEAFTER diagnostic wrapper is dropped; functional
-// behavior is unchanged, only the TRACE=1 debug log loses coverage.
+// No consumer-side tracing here either (see the other extractions):
+// functional behavior is unchanged, only debug-log coverage of these calls
+// lives on the consumer side.
 #include "win32_shims_window.h"
 #include "win32_shims_gdi32.h"   // wx86_screen_w/h
 #include "runtime/bridge.h"
@@ -121,10 +118,10 @@ void win32_shims_window_install(Bridge& br){
     U("SystemParametersInfoA",4,[](Cpu&){ return 1u; });
     U("GetSystemMetrics",1,[](Cpu&c){ uint32_t i=c.arg(0);
         if(i==0) return wx86_screen_w(); if(i==1) return wx86_screen_h(); return 0u; });
-    // MapVirtualKeyA rendait 0 pour TOUTE conversion (« cette touche
-    // n'existe pas ») — D2Win s'en sert pour passer du code de touche au
-    // code de scan et inversement. MAPVK_VK_TO_VSC=0, MAPVK_VSC_TO_VK=1,
-    // MAPVK_VK_TO_CHAR=2.
+    // Without this shim, MapVirtualKeyA returned 0 for EVERY conversion
+    // ("this key doesn't exist") — some callers use it to convert between
+    // virtual-key and scan codes in both directions. MAPVK_VK_TO_VSC=0,
+    // MAPVK_VSC_TO_VK=1, MAPVK_VK_TO_CHAR=2.
     U("MapVirtualKeyA",2,[](Cpu&c)->uint32_t{ uint32_t code=c.arg(0),type=c.arg(1);
         if(type==0) return wx86_scan_code((int)code);
         if(type==1){ for(int v=1;v<256;v++) if(wx86_scan_code(v)==code) return (uint32_t)v; return 0u; }

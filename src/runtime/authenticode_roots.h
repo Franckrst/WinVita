@@ -1,22 +1,20 @@
-// src/runtime/authenticode_roots.h — racines de confiance EMBARQUEES par
-// authenticode.cpp. Inclus UNIQUEMENT par authenticode.cpp.
+// src/runtime/authenticode_roots.h — trusted roots EMBEDDED by
+// authenticode.cpp. Included ONLY by authenticode.cpp.
 //
-// POURQUOI DES RACINES DANS LE MOTEUR. WinVerifyTrust n'accorde sa confiance
-// qu'a une chaine qui aboutit a une racine du magasin systeme « Root ». Ici le
-// systeme n'existe pas : le moteur l'incarne, donc il porte le sous-ensemble du
-// magasin dont il a besoin. Un certificat racine est PUBLIC (c'est une cle
-// publique signee par elle-meme) : l'embarquer ne revele aucun secret.
+// WHY ROOTS LIVE IN THE ENGINE. WinVerifyTrust only trusts a chain that
+// terminates at a root in the system "Root" store. There is no system here:
+// the engine stands in for it, so it carries the subset of that store it
+// needs. A root certificate is PUBLIC (a self-signed public key): embedding
+// it reveals no secret.
 //
-// PROVENANCE. Octets DER extraits du paquet Debian/Ubuntu ca-certificates
-// 20240203 (magasin Mozilla, /etc/ssl/certs), le 2026-09-13. Ce sont les MEMES
-// certificats que ceux du magasin Microsoft : empreintes SHA-1 identiques a
-// celles publiees par le programme de racines Microsoft (rappelees ci-dessous),
-// et la verification des signatures intermediaires des binaires cibles par ces
-// cles le prouve a chaque passage des tests.
+// PROVENANCE. DER bytes extracted from the Debian/Ubuntu ca-certificates
+// package 20240203 (Mozilla store, /etc/ssl/certs). These are the SAME
+// certificates as Microsoft's store: SHA-1 fingerprints match those
+// published by the Microsoft root program (reproduced below).
 //
-// LISTE MINIMALE, pas un magasin complet : seulement les racines qui ancrent
-// des chaines effectivement rencontrees. Le consommateur en ajoute d'autres par
-// wx86::ac::add_trusted_root() (cf. authenticode.h), sans toucher ce fichier.
+// MINIMAL LIST, not a full store: only the roots that anchor chains actually
+// encountered. The consumer adds others via wx86::ac::add_trusted_root()
+// (see authenticode.h), without touching this file.
 #pragma once
 #include <cstddef>
 #include <cstdint>
@@ -150,16 +148,15 @@ static const uint8_t globalsign_root_ca[889] = {
 // Thawte Timestamping CA
 //   SHA-1   BE36A4562FB2EE05DBB3D32323ADF445084ED656
 //   SHA-256 6B6C1E01F590F5AFC5FCF85CD0B9396884048659FC2C6D1170D68B045216C3FD
-//   PROVENANCE : telecharge le 2026-09-13 depuis le point de distribution
-//   officiel du programme de racines Microsoft (celui qu'interroge la mise a
-//   jour automatique des racines de Windows) :
+//   PROVENANCE: downloaded from the official distribution point of the
+//   Microsoft root program (the one Windows root auto-update queries):
 //   http://ctldl.windowsupdate.com/msdownload/update/v3/static/trustedr/en/BE36A4562FB2EE05DBB3D32323ADF445084ED656.crt
-//   empreinte SHA-1 recalculee = nom du fichier.
-//   PROPRIETES du programme (authroot.stl du meme jour, entree de cette racine) :
-//     EKU autorise (1.3.6.1.4.1.311.10.11.9)      = Time Stamping seulement
-//     NotBefore (1.3.6.1.4.1.311.10.11.126)       = 2021-02-01 (feuilles emises apres : refusees)
-//     Desactivation (1.3.6.1.4.1.311.10.11.104)   = 2023-02-01
-//   Voir kEmbedded pour la facon dont elles sont appliquees, et pourquoi.
+//   recomputed SHA-1 fingerprint matches the file name.
+//   PROPERTIES from the Microsoft root program's authroot.stl entry for this root:
+//     Allowed EKU (1.3.6.1.4.1.311.10.11.9)       = Time Stamping only
+//     NotBefore (1.3.6.1.4.1.311.10.11.126)       = 2021-02-01 (leaves issued after this date are rejected)
+//     Disabled (1.3.6.1.4.1.311.10.11.104)        = 2023-02-01
+//   See kEmbedded for how these are applied, and why.
 static const uint8_t thawte_timestamping_ca[677] = {
     0x30,0x82,0x02,0xa1,0x30,0x82,0x02,0x0a,0xa0,0x03,0x02,0x01,0x02,0x02,0x01,0x00,
     0x30,0x0d,0x06,0x09,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x01,0x04,0x05,0x00,0x30,
@@ -205,16 +202,16 @@ static const uint8_t thawte_timestamping_ca[677] = {
     0x84,0x91,0xb7,0x58,0x01,0x30,0x14,0x38,0xaf,0x28,0xca,0xfc,0xb1,0x50,0x19,0x19,
     0x09,0xac,0x89,0x49,0xd3,
 };
-// Proprietes du programme de racines Microsoft (authroot.stl) portees par une
-// racine. 0 / nullptr = propriete absente.
-//   eku_only     : seul usage pour lequel la racine ancre une chaine.
-//   not_before   : une FEUILLE emise (notBefore) apres cette date n'est pas ancree.
-//   disabled_at  : la racine cesse d'ancrer a partir de cette date, comparee a la
-//                  DATE D'EVALUATION de la chaine (date d'horodatage si horodate).
-//                  CALIBRE PAR MESURE : sur un Windows a jour du 2026-09-13,
-//                  Get-AuthenticodeSignature rend « Valid » pour Game.exe 1.14d,
-//                  dont l'horodatage (2016) remonte a cette racine desactivee en
-//                  2023 — Windows ne la juge donc pas a la date courante.
+// Properties of the Microsoft root program (authroot.stl) carried by a
+// root. 0 / nullptr = property absent.
+//   eku_only    : the only usage for which the root anchors a chain.
+//   not_before  : a leaf issued (notBefore) after this date is not anchored.
+//   disabled_at : the root stops anchoring chains from this date on, compared
+//                 against the chain's EVALUATION DATE (the timestamp date, if
+//                 timestamped) -- Windows evaluates root disablement against
+//                 the signature's timestamp date, not the current date: a
+//                 2016 timestamp stays valid even if the root was later
+//                 disabled in 2023.
 struct RootProps { const char* eku_only; int64_t not_before; int64_t disabled_at; };
 struct Embedded { const uint8_t* der; size_t len; const char* label; RootProps props; };
 static const Embedded kEmbedded[] = {

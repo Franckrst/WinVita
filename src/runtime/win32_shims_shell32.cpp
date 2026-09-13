@@ -1,9 +1,8 @@
-// src/runtime/win32_shims_shell32.cpp — see win32_shims_shell32.h. Split out
-// of d2vita's tools/rt_boot.cpp SHELL32 shim group (2026-09-10): these two
-// bodies carry no D2/Blizzard-specific literal or behavior (SHAppBarMessage
+// src/runtime/win32_shims_shell32.cpp — see win32_shims_shell32.h. These two
+// bodies carry no guest-specific literal or behavior (SHAppBarMessage
 // always reports "not handled"; ShellExecuteA always reports success),
 // unlike SHGetFolderPathA in the same original group, which hardcodes a
-// game install path and stays a d2vita-side shim.
+// game install path and stays a consumer-side shim.
 #include "win32_shims_shell32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"

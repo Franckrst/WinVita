@@ -1,11 +1,9 @@
-// src/runtime/win32_shims_psapi.cpp — see win32_shims_psapi.h. Split out of
-// d2vita's tools/rt_boot.cpp "couverture complete des imports" catch-all
-// section (2026-09-10): these four entry points only ever read Bridge's own
-// module table (load_base/image_size), never a guest-specific hardcoded
-// path or literal, so they generalize cleanly. GetModuleFileNameEx*/
-// GetModuleFileName* and the VERSION.dll trio stayed d2vita-side (or moved
-// separately) because they resolve a MODULE PATH STRING, which is where the
-// guest-specific "C:\Diablo II\..." fiction lives.
+// src/runtime/win32_shims_psapi.cpp — see win32_shims_psapi.h. These four
+// entry points only ever read Bridge's own module table (load_base/
+// image_size), never a guest-specific hardcoded path or literal, so they
+// generalize cleanly. GetModuleFileNameEx*/GetModuleFileName* and the
+// VERSION.dll trio stay on the consumer side because they resolve a MODULE
+// PATH STRING, which is where a guest's install-path fiction lives.
 #include "win32_shims_psapi.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"

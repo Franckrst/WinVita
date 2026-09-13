@@ -1,13 +1,12 @@
-// src/render/render_null.cpp — le backend de COMPTAGE.
+// The counting backend.
 //
-// Il ne dessine rien et compte tout. Deux usages, tous deux reels :
-//   * sur bureau et sous qemu, ou il n'y a pas de GPU de console : le
-//     constructeur de lots du portage tourne quand meme, et TOUS ses compteurs
-//     restent mesurables — seule la soumission manque ;
-//   * comme repli d'un backend dont l'initialisation echoue, pour qu'un GPU
-//     indisponible donne une image sans acceleration plutot qu'un ecran noir.
-//
-// Les deux portages consommateurs du moteur avaient chacun ecrit le leur.
+// Draws nothing, counts everything. Two uses:
+//   * on desktop and under qemu, where there is no console GPU: the port's
+//     batch builder still runs, and every one of its counters stays
+//     measurable — only submission is missing;
+//   * as the fallback for a backend whose initialization fails, so an
+//     unavailable GPU produces an unaccelerated frame instead of a black
+//     screen.
 #include "render.h"
 
 #include <cstdio>
@@ -25,9 +24,9 @@ void null_shutdown() {}
 bool null_texture_create(uint32_t, int, int, TexFormat) { ++g_stats.texCreates; return true; }
 
 void null_texture_upload(uint32_t, int, int, int w, int h, const void*, int srcPitch) {
-    // On compte les octets REELLEMENT presentes, pas la surface : un pas de
-    // ligne plus large que le rectangle est un cas courant, et confondre les
-    // deux fausserait toute comparaison de debit.
+    // Counts bytes actually passed, not the rectangle's area: a row pitch
+    // wider than the rectangle is common, and conflating the two would skew
+    // any bandwidth comparison.
     if (w > 0 && h > 0 && srcPitch > 0)
         g_stats.texUploadBytes += (uint64_t)h * (uint64_t)srcPitch;
 }
@@ -45,7 +44,7 @@ void null_clear_color(uint32_t) { ++g_stats.clearColors; }
 void null_clear_depth() { ++g_stats.clearDepths; }
 void null_present(uint64_t) { ++g_stats.frames; }
 
-// Rien n'est jamais en vol : le comptage est synchrone par construction.
+// Nothing is ever in flight: counting is synchronous by construction.
 uint64_t null_in_flight_from() { return ~(uint64_t)0; }
 void null_drain() {}
 

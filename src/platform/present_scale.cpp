@@ -1,11 +1,10 @@
-// src/platform/present_scale.cpp — voir present_scale.h pour le pourquoi.
+// See present_scale.h for the rationale.
 //
-// Les boucles ci-dessous sont une TRANSCRIPTION, pas une reecriture : le
-// deroulage 4:1, la duplication de ligne par memcpy et l'ordre exact des
-// operations viennent du code de presentation deja valide sur console. Toute
-// « amelioration » ici doit etre prouvee par l'oracle d'identite d'image, pas
-// par le raisonnement — la couche de presentation est un chemin ou une
-// difference d'un seul octet se voit a l'ecran.
+// These loops are a direct transcription, not a rewrite: the 4:1 unroll, the
+// memcpy-based row duplication, and the exact operation order all come from
+// console-validated presentation code. Any change here must be verified
+// against a pixel-identity oracle rather than reasoned about — a single byte
+// difference in this path is visible on screen.
 #include "present_scale.h"
 
 #include <cstring>
@@ -13,9 +12,9 @@
 namespace wx86 {
 
 namespace {
-// Expansion de la palette des DIB Windows (B,G,R,0) vers 0xAARRGGBB opaque.
-// Refaite a chaque image, comme dans l'existant : 256 iterations ne se mesurent
-// pas, et une table persistante serait un etat cache de plus.
+// Expands a Windows DIB palette (B,G,R,0) to opaque 0xAARRGGBB.
+// Recomputed every frame: 256 iterations cost nothing measurable, and a
+// persistent table would be one more piece of hidden state.
 inline void expand_palette(const uint8_t* palette, uint32_t out[256]) {
     for (int i = 0; i < 256; ++i) {
         const uint8_t* p = palette + i * 4;        // B,G,R,0
@@ -40,7 +39,7 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
     for (int y = 0; y < r.h; ++y) {
         const int srcy = (int)(((uint32_t)y * sy) >> 16);
         uint32_t* out = dst + (size_t)(r.y + y) * dstPitch + r.x;
-        // Ligne repetee : on recopie la ligne DEJA ECRITE juste au-dessus.
+        // Repeated row: copy the row already written just above.
         if (srcy == prev_srcy) {
             std::memcpy(out, out - dstPitch, (size_t)r.w * 4);
             continue;
@@ -50,7 +49,7 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
         uint32_t xacc = 0;
         if (fmt == SrcFormat::Pal8) {
             int x = 0;
-            for (; x + 4 <= r.w; x += 4) {             // deroule 4:1
+            for (; x + 4 <= r.w; x += 4) {             // 4:1 unroll
                 out[x + 0] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x + 1] = pal32[row[xacc >> 16]]; xacc += sx;
                 out[x + 2] = pal32[row[xacc >> 16]]; xacc += sx;
@@ -58,9 +57,7 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
             }
             for (; x < r.w; ++x, xacc += sx) out[x] = pal32[row[xacc >> 16]];
         } else if (fmt == SrcFormat::Rgb555) {
-            // Transcription de la boucle deja en service chez le second
-            // consommateur. Le DIB est de haut en bas (biHeight negatif) :
-            // aucun retournement ici non plus.
+            // The DIB is top-down (negative biHeight), so no vertical flip here.
             const uint16_t* r16 = (const uint16_t*)row;
             for (int x = 0; x < r.w; ++x, xacc += sx) {
                 const uint32_t p = r16[xacc >> 16];
@@ -73,7 +70,7 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
         } else {
             const uint32_t* r32 = (const uint32_t*)row;
             for (int x = 0; x < r.w; ++x, xacc += sx) {
-                const uint32_t bgr = r32[xacc >> 16];   // 0x00RRGGBB, soit B,G,R,X en memoire
+                const uint32_t bgr = r32[xacc >> 16];   // 0x00RRGGBB, i.e. B,G,R,X in memory
                 out[x] = 0xFF000000u | ((bgr & 0xFF) << 16) | (bgr & 0xFF00) | ((bgr >> 16) & 0xFF);
             }
         }
@@ -82,9 +79,9 @@ void scale_blit(uint32_t* dst, int dstPitch, const DstRect& r,
 
 DstRect fit_rect(int srcW, int srcH, int dstW, int dstH, bool stretch) {
     if (stretch || srcW <= 0 || srcH <= 0) return DstRect{0, 0, dstW, dstH};
-    int w = (int)(((long long)srcW * dstH) / srcH);     // hauteur pleine d'abord
+    int w = (int)(((long long)srcW * dstH) / srcH);     // try full height first
     int h = dstH;
-    if (w > dstW) {                                      // trop large : largeur pleine
+    if (w > dstW) {                                      // too wide: use full width instead
         w = dstW;
         h = (int)(((long long)srcH * dstW) / srcW);
     }

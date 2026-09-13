@@ -1,5 +1,5 @@
-/* dyn86_emitprof.c — voir dyn86_emitprof.h pour le pourquoi et le contrat.
- * Entierement sous -DD2_EMITPROF : sans lui, ce fichier est vide. */
+/* dyn86_emitprof.c — see dyn86_emitprof.h for the why and the contract.
+ * Entirely under -DD2_EMITPROF: without it, this file is empty. */
 #include "dyn86_emitprof.h"
 
 #ifdef D2_EMITPROF
@@ -21,14 +21,14 @@ uint64_t      d2ep_run_updateflags = 0;
 uint64_t      d2ep_run_updateflags_work = 0;
 
 static int d2ep_pending_mem = 0;
-/* Idiome le plus frequent du x86 : une operation qui pose les drapeaux
- * IMMEDIATEMENT suivie du saut conditionnel qui les lit. ARM a deja le
- * resultat dans CPSR apres le SUBS ; le traducteur le deverse pourtant dans
- * le registre xFlags a la disposition x86, puis le RECONSTRUIT a coups de
- * EOR/ORR pour tester la condition. On mesure la paire ENTIERE, c'est elle
- * qui serait remplacee par « SUBS + Bcond ». */
+/* The most common x86 idiom: an operation that sets flags IMMEDIATELY
+ * followed by the conditional branch that reads them. ARM already has the
+ * result in CPSR right after SUBS, yet the translator still spills it into
+ * the x86-visible xFlags register, then RECONSTRUCTS it via EOR/ORR to test
+ * the condition. We measure the WHOLE pair, since that's what a "SUBS +
+ * Bcond" fusion would replace. */
 static int d2ep_pending_jcc = 0;
-static int d2ep_prev_alu = 0;      /* l'instruction precedente posait-elle les drapeaux */
+static int d2ep_prev_alu = 0;      /* did the previous instruction set flags */
 static int d2ep_prev_bytes = 0;
 
 int d2ep_alloc(uintptr_t x86_addr)
@@ -48,9 +48,9 @@ void d2ep_begin(int idx)
     d2ep_prev_alu = 0; d2ep_prev_bytes = 0; d2ep_pending_jcc = 0;
 }
 
-/* Cloture la fenetre courante a l'offset `pos` et bascule sur `fam`.
- * C'est CE mecanisme qui rend le controle croise exact : chaque octet emis
- * appartient a exactement une fenetre, et la somme des fenetres est arm_size. */
+/* Closes the current window at offset `pos` and switches to `fam`.
+ * This is what makes the cross-check exact: every emitted byte belongs to
+ * exactly one window, and the sum of windows equals arm_size. */
 void d2ep_switch(int fam, int pos)
 {
     if(!d2ep_cur) { d2ep_cur_fam = fam; d2ep_last_pos = pos; return; }
@@ -107,10 +107,10 @@ void d2ep_closeinst(int pos, int x86len)
     d2ep_pending_jcc = 0;
 }
 
-/* Un site qui n'emet RIEN n'est pas un site : fpu_purgecache est appele a
- * chaque barriere et ne produit du code que si la pile x87 est chargee.
- * Compter ces appels a vide gonflerait le nombre de sites d'un facteur ~10
- * et rendrait le cout par site faux. */
+/* A site that emits NOTHING is not a site: fpu_purgecache is called at every
+ * barrier and only produces code if the x87 stack is loaded. Counting these
+ * no-op calls would inflate the site count by roughly an order of magnitude
+ * and skew the per-site cost. */
 void d2ep_sub(int k, int bytes, int n)
 {
     if(!d2ep_cur || k<0 || k>=D2EP_S_NSUB || bytes<=0) return;
@@ -131,12 +131,12 @@ void d2ep_end(int idx, int pos, int x86_bytes, int ninsts)
 }
 
 /* ------------------------------------------------------------------ */
-/* Classement d'une instruction x86 par famille.                       */
-/* Le but n'est pas d'etre un desassembleur : c'est de repartir 100 %  */
-/* des instructions en familles dont le COUT DE TRADUCTION differe.    */
+/* Classifies an x86 instruction into a family.                        */
+/* The goal is not to be a disassembler: it's to bucket 100% of        */
+/* instructions into families whose TRANSLATION COST differs.          */
 /* ------------------------------------------------------------------ */
 
-/* has-modrm pour les opcodes un octet (0x00..0xff) */
+/* has-modrm table for one-byte opcodes (0x00..0xff) */
 static const uint8_t d2ep_modrm1[256] = {
 /*0*/ 1,1,1,1,0,0,0,0, 1,1,1,1,0,0,0,0,
 /*1*/ 1,1,1,1,0,0,0,0, 1,1,1,1,0,0,0,0,
@@ -173,7 +173,7 @@ int d2ep_classify(const uint8_t* p, int* hasmem)
         }
         break;
     }
-    ++p;                                   /* p pointe l'octet suivant l'opcode */
+    ++p;                                   /* p now points at the byte following the opcode */
     if(b == 0x0f) {
         uint8_t c = *p++;
         int fam;
@@ -189,8 +189,8 @@ int d2ep_classify(const uint8_t* p, int* hasmem)
         else if((c>=0x10&&c<=0x17)||(c>=0x28&&c<=0x2f)||(c>=0x50&&c<=0x7f)
               ||(c>=0xc2&&c<=0xc6)||(c>=0xd0)) fam = D2EP_SSE;
         else fam = D2EP_OTHER;
-        /* presque tous les 0F pertinents portent un modrm ; les exceptions
-         * (0F 05/31/A2/C8-CF/0B) tombent dans OTHER ou BSWAP sans modrm */
+        /* almost every relevant 0F opcode carries a modrm; the exceptions
+         * (0F 05/31/A2/C8-CF/0B) fall into OTHER or BSWAP, which have no modrm */
         if(!(c==0x05||c==0x0b||c==0x31||c==0xa2||(c>=0xc8&&c<=0xcf)
              ||(c>=0x80&&c<=0x8f)))
             *hasmem = ((*p) >> 6) != 3;
@@ -198,8 +198,8 @@ int d2ep_classify(const uint8_t* p, int* hasmem)
     }
     if(d2ep_modrm1[b]) *hasmem = ((*p) >> 6) != 3;
 
-    if(b < 0x40 && (b&7) <= 5) {                    /* groupe ALU 00..3D     */
-        if(!(b&1)) return D2EP_ALU8;                /* w=0 : 8 bits          */
+    if(b < 0x40 && (b&7) <= 5) {                    /* ALU group 00..3D      */
+        if(!(b&1)) return D2EP_ALU8;                /* w=0: 8-bit            */
         return opsz16 ? D2EP_ALU8 : D2EP_ALU32;
     }
     if(b >= 0x40 && b <= 0x4f) return opsz16 ? D2EP_ALU8 : D2EP_ALU32; /* INC/DEC */
@@ -250,7 +250,7 @@ int d2ep_classify(const uint8_t* p, int* hasmem)
 }
 
 /* ------------------------------------------------------------------ */
-/* Rapport                                                             */
+/* Report                                                               */
 /* ------------------------------------------------------------------ */
 static const char* d2ep_famname[D2EP_NFAM1] = {
     "ALU32","ALU8/16","MOV/LEA","CALL/RET/JMP","x87","SSE/MMX",
@@ -312,10 +312,11 @@ void d2ep_report(void (*out)(const char*))
     snprintf(L,sizeof L,"UpdateFlags EXECUTE: appels=%llu dont travail-reel=%llu",
         (unsigned long long)d2ep_run_updateflags,
         (unsigned long long)d2ep_run_updateflags_work); out(L);
-    /* La sonde d'execution est du code EMIS : elle gonfle l'expansion et le
-     * total pondere. On la deduit ICI, une fois, et on publie les deux
-     * chiffres — annoncer 6,14x quand le traducteur produit 5,25x serait le
-     * genre d'erreur qui se propage ensuite dans tout le document. */
+    /* The execution probe is itself EMITTED code: it inflates both the
+     * expansion ratio and the weighted total. Subtract it HERE, once, and
+     * publish both figures -- reporting an inflated expansion ratio here
+     * would be the kind of error that then propagates through the whole
+     * document. */
     { uint64_t pb=0, pw=0; int q;
       for(q=0;q<d2ep_nblocks;++q){ d2ep_block_t* r=&d2ep_blocks[q]; if(!r->valid) continue;
           pb += r->sub_b[D2EP_S_PROBE]; pw += (uint64_t)r->sub_b[D2EP_S_PROBE]*r->exec; }
@@ -362,7 +363,7 @@ void d2ep_report(void (*out)(const char*))
             (unsigned long long)wsn[f],(unsigned long long)wsb[f],c2); out(L);
     }
 
-    /* Les blocs les plus CHAUDS (exec x octets ARM), et leur composition. */
+    /* The HOTTEST blocks (exec x ARM bytes), and their composition. */
   for(int mode=0; mode<2; ++mode) {
     out(mode? "--- BLOCS LES PLUS COUTEUX (tri sur exec x octets ARM) ---"
             : "--- BLOCS LES PLUS EXECUTES (tri sur exec) ---");
@@ -398,9 +399,9 @@ void d2ep_report(void (*out)(const char*))
     out("=== FIN PROFIL DU CODE EMIS ===");
 }
 
-/* Vidage BRUT des N blocs les plus couteux : mots ARM emis, octets x86
- * d'origine et correspondance instruction par instruction. Destine a
- * arm-linux-gnueabihf-objdump ; qemu seulement. */
+/* Raw dump of the N most expensive blocks: emitted ARM words, original x86
+ * bytes, and the instruction-by-instruction mapping. Meant for
+ * arm-linux-gnueabihf-objdump; qemu only. */
 void d2ep_dump(const char* path, int topn)
 {
     FILE* f = fopen(path, "w");
@@ -438,9 +439,9 @@ void d2ep_dump(const char* path, int topn)
     fclose(f);
 }
 
-/* Vidage CSV de TOUS les blocs livres (« x86,x86len,armlen,ninsts,exec ») :
- * c'est ce que le rapport (top N) et d2ep_dump (top 512) ne donnent pas, et
- * ce qu'il faut pour sommer les executions PAR FONCTION (tools/eip_fils.py). */
+/* CSV dump of ALL delivered blocks ("x86,x86len,armlen,ninsts,exec"): this is
+ * what the report (top N) and d2ep_dump (top 512) don't give you, and what's
+ * needed to sum executions PER FUNCTION (tools/eip_fils.py). */
 void d2ep_csv(const char* path)
 {
     FILE* f = fopen(path, "w");

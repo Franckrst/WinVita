@@ -1,10 +1,8 @@
-// src/runtime/poll_gil.cpp — see poll_gil.h. Body copied byte-for-byte from
-// d2vita's tools/rt_boot.cpp d2rt_poll_gilfree_n/d2rt_poll_gilfree
-// (2026-09-11), only the g_schedNative-guarded shutdown check simplified: a
-// non-null g_native_sched already implies the native scheduler is active
-// (nothing else ever constructs it), so the separate d2vita-local
-// g_schedNative bool it used to be paired with added no information here —
-// dropping it removes a d2vita-only dependency this file has no business on.
+// src/runtime/poll_gil.cpp — see poll_gil.h.
+//
+// A non-null g_native_sched implies the native scheduler is active (nothing
+// else ever constructs it), so checking it directly is sufficient — no
+// separate "is the native scheduler active" flag is needed.
 #include "runtime/poll_gil.h"
 #include "runtime/gil.h"
 #include "runtime/sched_native.h"

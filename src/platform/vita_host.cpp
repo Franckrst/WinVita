@@ -1,13 +1,9 @@
-// src/platform/vita_host.cpp — services de la console Vita (voir vita_host.h).
-//
-// Transcription des blocs qui vivaient en double chez les deux portages. Les
-// commentaires sont conserves : ils portent des mesures faites sur materiel
-// qu'on ne veut pas redecouvrir, et un commentaire perdu se repaie en heures.
+// Console services for the Vita (see vita_host.h).
 #include "platform/vita_host.h"
 
-// Tout ce fichier n'existe que sur cible : hors console il n'y a ni coeurs a
-// repartir, ni horloge Sony, ni journal durable a tenir. Meme convention que
-// platform/vita_audio.cpp.
+// This entire file only exists on-target: off console there are no cores to
+// place threads on, no Sony clock, and no durable log to maintain. Same
+// convention as platform/vita_audio.cpp.
 #ifdef __vita__
 
 #include <cstdio>
@@ -19,19 +15,18 @@
 #include <psp2/kernel/cpu.h>
 
 // ===========================================================================
-//  JOURNAL DE PROGRESSION DURABLE
+//  DURABLE PROGRESS LOG
 // ===========================================================================
-// Verrou STATIQUE a initialiseur constant : pas d'initialisation paresseuse,
-// donc pas de __cxa_guard_acquire — precisement la famille de pieges que la
-// garde `nm` des scripts de build existe pour attraper.
+// Static lock with a constant initializer, so no lazy init and no
+// __cxa_guard_acquire — the class of trap the build script's `nm` guard
+// exists to catch.
 static pthread_mutex_t g_progress_mx = PTHREAD_MUTEX_INITIALIZER;
 
 void wx86_vita_progress(const char* msg) {
-    // Pas de chemin = pas de journal. Deviner un chemin ferait ecrire deux
-    // portages dans le meme fichier, ce qui est exactement le defaut que le
-    // verrou ci-dessous existe pour empecher. Le cas ne se produit que si un
-    // portage a omis la definition — le lien echoue alors, ce qui est le bon
-    // moment pour l'apprendre.
+    // No path means no log. Guessing one would let two ports write to the
+    // same file, exactly what the lock below exists to prevent. This only
+    // happens if a port omitted the definition, in which case the link
+    // fails — the right moment to find out.
     if (!wx86_vita_progress_path) return;
     pthread_mutex_lock(&g_progress_mx);
     FILE* f = std::fopen(wx86_vita_progress_path, "a");
@@ -43,30 +38,28 @@ void wx86_vita_progress(const char* msg) {
     pthread_mutex_unlock(&g_progress_mx);
 }
 
-// Alias a liaison C pour que le code C du dynarec (reference faible) l'atteigne.
+// C-linkage alias so the dynarec's C code (weak reference) can reach it.
 extern "C" void wx86_vita_progress_c(const char* m) { wx86_vita_progress(m); }
 
 // ===========================================================================
-//  SOMMEIL REEL
+//  REAL SLEEP
 // ===========================================================================
-// L'horloge monotone a sa place dans runtime/host_clock.h : elle a un sens
-// hors console. La garder ici en aurait fait un DEUXIEME exemplaire dans le
-// moteur, ce qui est precisement le defaut que ce chantier traque.
+// The monotonic clock belongs in runtime/host_clock.h since it's meaningful
+// off console too; keeping a copy here would duplicate it in the engine.
 void wx86_vita_sleep_ms(uint32_t ms) { if (ms) sceKernelDelayThread(ms * 1000u); }
 
 // ===========================================================================
-//  REPARTITION DES FILS HOTES SUR LES COEURS USER
+//  HOST THREAD PLACEMENT ACROSS USER CORES
 // ===========================================================================
 namespace {
 struct CoreEnt { char nom[14]; int uid; unsigned wanted; int rc; };
-// 16 et non 10 : chez le consommateur de reference, presentateur, tube de
-// presentation, chien de garde, battement anti-famine, trois fils de cellules,
-// rejeu 60 Hz, chien GXM et fil audio SATURAIENT la table — et un fil non
-// inscrit disparait de la seule ligne qui dit quel fil vit sur quel coeur.
+// Sized with headroom above what a single consumer typically registers — a
+// thread that isn't registered disappears from the one line that shows which
+// thread lives on which core.
 CoreEnt g_core[16];
 int     g_coreN = 0;
 
-// Schema lu UNE FOIS. Defaut « 222 » = la repartition historique a l'octet pres.
+// Read once. Default is "222".
 const char* core_scheme() {
     static const char* s_sch = nullptr;
     static bool s_done = false;
@@ -91,21 +84,20 @@ const char* core_scheme() {
 int wx86_vita_core_mask(int who) {
     if (who < 0 || who > 2) return SCE_KERNEL_CPU_MASK_USER_2;
     const char c = core_scheme()[who];
-    // Le battement sur USER_0 : accepte, mais DENONCE. Verdict noyau
-    // RUN-TO-BLOCK — un filet anti-famine pose sur le coeur des runners invites
-    // n'est pas elu quand un runner ne bloque plus, c'est a dire exactement
-    // quand il sert. Un filet inerte EN SILENCE est le mode de panne que ce
-    // projet paie le plus cher (« diagnostic qui ment »).
+    // Heartbeat on USER_0 is accepted but flagged: this kernel is RUN-TO-BLOCK,
+    // so an anti-starvation heartbeat sharing a core with guest runner threads
+    // won't get scheduled once a runner stops blocking — exactly when it's
+    // needed. A silently inert safety net is the worst failure mode here.
     if (who == 2 && c == '0') {
         static bool s_said = false;
         if (!s_said) { s_said = true; wx86_vita_progress(
             "coeurs: ATTENTION battement anti-famine demande sur USER_0 — sous RUN-TO-BLOCK"
             " le filet ne sera PAS elu quand un runner invite cesse de bloquer (filet inerte)"); }
     }
-    // Le chiffre `3` demande le QUATRIEME coeur (0x00080000). Jamais prouve sur
-    // console : si le noyau le refuse, le rc de l'epinglage est publie dans la
-    // ligne « coeurs: » et le fil reste ou il etait. Ne PAS l'employer avant
-    // que la sonde de la meme ligne ait rendu « rc0 » sur materiel.
+    // Digit `3` requests the fourth core (0x00080000). If the kernel refuses
+    // it, the pin's rc is published in the "cores:" line and the thread stays
+    // where it was. Don't rely on it until that line's probe reports rc0 on
+    // hardware.
     return c == '0' ? SCE_KERNEL_CPU_MASK_USER_0
          : c == '1' ? SCE_KERNEL_CPU_MASK_USER_1
          : c == '3' ? WX86_CPU_MASK_USER_3
@@ -119,9 +111,9 @@ void wx86_vita_core_register(const char* nom, int uid, unsigned wanted, int pin_
     e.uid = uid; e.wanted = wanted; e.rc = pin_rc;
 }
 
-// Nombre de fils hotes DEJA inscrits. Sert au contexte imprime avant la
-// creation d'un fil : « quota de fils epuise » et « memoire epuisee » ne se
-// separent pas avec le seul rc de sceKernelCreateThread.
+// Number of host threads registered so far. Used as context before creating
+// a thread: an exhausted thread quota and exhausted memory can't be told
+// apart from sceKernelCreateThread's rc alone.
 int wx86_vita_core_count() { return g_coreN; }
 
 extern "C" int wx86_vita_pin_self(int mask, unsigned* relu) {
@@ -134,26 +126,26 @@ extern "C" int wx86_vita_pin_self(int mask, unsigned* relu) {
 
 extern "C" int wx86_vita_pin_thread(int thread_uid, int mask, unsigned* relu) {
     const int rc = sceKernelChangeThreadCpuAffinityMask((SceUID)thread_uid, mask);
-    // Relecture SEULEMENT si l'appelant la demande : voir vita_host.h.
+    // Read back only if the caller asked for it — see vita_host.h.
     if (relu) { const int r = sceKernelGetThreadCpuAffinityMask((SceUID)thread_uid);
                 *relu = (r < 0) ? 0u : (unsigned)r; }
     return rc;
 }
 
 namespace {
-// SONDE DU QUATRIEME COEUR, jouee UNE FOIS a la premiere fenetre de 10 s.
+// Fourth-core probe, run once on the first 10-second window.
 //
-// Ce qu'elle fait, et ce qu'elle ne fait PAS. Elle cree un fil et NE LE DEMARRE
-// JAMAIS : elle ne mesure donc que ce que le NOYAU ACCEPTE (rc du
-// ChangeThreadCpuAffinityMask + masque relu), jamais qu'un coeur execute. Un
-// fil demarre sur un coeur inexistant ne serait jamais elu, et le nettoyer
-// demanderait un WaitThreadEnd borne puis un abandon — un risque gratuit pour
-// une question a laquelle le rc repond deja. `activeCpuMask` du noyau est lu au
-// passage : c'est LUI qui a dit « quatre bits » et qui a ouvert la question.
+// It creates a thread but never starts it, so it only measures what the
+// kernel ACCEPTS (rc of ChangeThreadCpuAffinityMask + mask read back), never
+// whether a core actually executes something. A thread started on a
+// nonexistent core would never get scheduled, and cleaning it up would need
+// a bounded WaitThreadEnd plus an abandon — a needless risk for a question
+// the rc already answers. `activeCpuMask` is read for reference, since it's
+// the kernel's own count of active cores.
 //
-// Trois masques essayes : USER_2 (TEMOIN — un masque dont on SAIT qu'il est
-// accepte ; sans lui, un « rc<0 » sur 0x80000 ne se distinguerait pas d'une
-// sonde cassee), 0x00080000 (le 4e coeur seul) et 0x000F0000 (les quatre).
+// Three masks are tried: USER_2 (a witness mask known to be accepted —
+// without it, an `rc<0` on 0x80000 wouldn't be distinguishable from a broken
+// probe), 0x00080000 (the 4th core alone), and 0x000F0000 (all four).
 void core_probe_cpu3() {
     SceKernelSystemInfo si; std::memset(&si, 0, sizeof si); si.size = sizeof si;
     const int rsys = sceKernelGetSystemInfo(&si);
@@ -173,7 +165,7 @@ void core_probe_cpu3() {
         rc[i]   = sceKernelChangeThreadCpuAffinityMask(th, (int)masks[i]);
         relu[i] = (unsigned)sceKernelGetThreadCpuAffinityMask(th);
     }
-    sceKernelDeleteThread(th);          // jamais demarre : Delete suffit
+    sceKernelDeleteThread(th);          // never started, so Delete alone is enough
     char m[224];
     std::snprintf(m, sizeof m,
         "coeurs: sonde 4e coeur — activeCpuMask=0x%08x (rc=0x%08x) |"
@@ -182,10 +174,9 @@ void core_probe_cpu3() {
         rsys < 0 ? 0u : (unsigned)si.activeCpuMask, (unsigned)rsys,
         (unsigned)rc[0], relu[0], (unsigned)rc[1], relu[1], (unsigned)rc[2], relu[2]);
     wx86_vita_progress(m);
-    // Rappel de lecture, ecrit une fois pour ne pas avoir a le redecouvrir :
-    // un masque RELU a 0 ne prouve RIEN sur ce firmware. Seul le rc distingue
-    // « accepte » de « refuse », et le temoin 0x40000 dit si la sonde
-    // elle-meme fonctionne.
+    // A mask that reads back as 0 proves nothing on this firmware — only the
+    // rc distinguishes accepted from refused, and the 0x40000 witness confirms
+    // whether the probe itself works.
     if (rc[0] < 0)
         wx86_vita_progress("coeurs: sonde 4e coeur NON CONCLUANTE — le temoin USER_2 lui-meme est refuse");
     else if (rc[1] >= 0)
@@ -196,18 +187,18 @@ void core_probe_cpu3() {
 }
 } // namespace
 
-// Publie pour CHAQUE fil hote :
-//   v=<n>   coeur DEMANDE (0/1/2/3), deduit du masque
-//   rc      rc de sceKernelChangeThreadCpuAffinityMask (ok = 0)
-//   m=<hex> masque RELU par sceKernelGetThreadCpuAffinityMask
-//   c=<n>   currentCpuId  (sceKernelGetThreadInfo)
-//   d=<n>   lastExecutedCpuId — LE chiffre qui tranche
+// Published for each host thread:
+//   v=<n>   requested core (0/1/2/3), derived from the mask
+//   rc      sceKernelChangeThreadCpuAffinityMask's rc (0 = ok)
+//   m=<hex> mask read back by sceKernelGetThreadCpuAffinityMask
+//   c=<n>   currentCpuId (sceKernelGetThreadInfo)
+//   d=<n>   lastExecutedCpuId — the field that actually settles it
 //
-// PRECAUTION, mesuree sur console : sceKernelGetThreadCpuAffinityMask rend
-// 0x00000000 MEME pour un fil epingle avec succes sur ce firmware. Un « m=0x0 »
-// n'est donc PAS une preuve d'echec — c'est pour ca que la ligne publie AUSSI
-// le rc de la demande et surtout lastExecutedCpuId, qui dit sur quel coeur
-// PHYSIQUE le fil a reellement tourne.
+// Caveat: on this firmware, sceKernelGetThreadCpuAffinityMask reads back
+// 0x00000000 even for a thread pinned successfully. So "m=0x0" is not proof
+// of failure — the line also publishes the request's rc and, more
+// importantly, lastExecutedCpuId, which says which physical core the thread
+// actually ran on.
 void wx86_vita_core_window_line() {
     if (!g_coreN) return;
     static bool s_probed = false;
@@ -239,25 +230,17 @@ void wx86_vita_core_window_line() {
 }
 
 #else  // ---------------------------------------------------------------------
-//  HORS CONSOLE : le journal existe quand meme, et il ne fait rien
+//  OFF CONSOLE: the log exists but does nothing
 // ---------------------------------------------------------------------------
-// Le corps GENERIQUE du moteur (bridge, cpu_box86, les deux ordonnanceurs, le
-// mappeur de memoire) journalise sa progression. Ce corps se compile aussi pour
-// le harnais qemu/bureau, ou il n'y a ni console ni fichier durable a tenir.
+// The engine's generic body (bridge, cpu_box86, both schedulers, the memory
+// mapper) logs its progress, and that body also compiles for the qemu/desktop
+// harness, where there is no console and no durable file to maintain.
 //
-// Avant ce fichier, chacune de ces unites declarait une reference FAIBLE vers
-// un symbole au prefixe du PREMIER consommateur et testait sa nullite avant
-// d'appeler : le lien se faisait partout, et tout portage dont les symboles ne
-// portent pas ce prefixe heritait d'un journal muet SANS erreur de lien. Le
-// moteur nommait ses consommateurs, et se taisait pour les autres.
+// These two no-ops stand in for all of the portability needed: callers link
+// strongly with no null check, and off console nothing happens.
 //
-// Deux no-op tiennent lieu de toute la portabilite : les appelants appellent en
-// lien FORT sans test, et hors console il ne se passe rien — exactement ce que
-// produisait la reference faible non resolue. Aucune regression possible sur ce
-// chemin : le comportement observable hors console est le meme silence.
-//
-// wx86_vita_progress_path N'EST PAS LU ICI, et c'est deliberé : un portage
-// n'a donc RIEN a definir pour que son build bureau se lie.
+// wx86_vita_progress_path is deliberately not read here, so a port has
+// nothing to define for its desktop build to link.
 
 void wx86_vita_progress(const char*) {}
 extern "C" void wx86_vita_progress_c(const char*) {}

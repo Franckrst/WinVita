@@ -1,6 +1,3 @@
-// src/runtime/guest_files.cpp — voir guest_files.h.
-// Porte depuis tools/rt_boot.cpp de d2vita (2026-09-11) ; carn-vita, l'autre
-// consommateur, declarait les memes tables avec les memes types.
 #include "guest_files.h"
 
 std::map<uint32_t,FILE*>& wx86_files(){

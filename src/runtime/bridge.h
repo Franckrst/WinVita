@@ -17,7 +17,7 @@
 #pragma once
 #include "runtime/cpu.h"
 #include "runtime/pe_image.h"
-#include "runtime/trapcnt.h"   // compteur de prises PAR CRENEAU (intrinseques comprises)
+#include "runtime/trapcnt.h"   // per-slot trap counter (including intrinsics)
 
 #include <cstdint>
 #include <functional>
@@ -72,11 +72,10 @@ public:
     // GetProcAddress resolve dynamically-loaded SYSTEM dlls to their shims.
     // Returns 0 if no shim is registered under dll!name.
     uint32_t shim_trap(const std::string& dll, const std::string& name);
-    // Comme shim_trap, mais SANS RIEN ALLOUER : rend le creneau seulement s'il
-    // existe deja (import reellement lie), 0 sinon. Necessaire pour armer un
-    // intrinseque sans deplacer la numerotation des creneaux suivants — sinon
-    // la jambe « knob arme » d'un A/B differerait de la jambe temoin par autre
-    // chose que le knob.
+    // Like shim_trap, but allocates nothing: returns the slot only if it
+    // already exists (import actually bound), 0 otherwise. Needed to probe
+    // or arm a single intrinsic without shifting the numbering of
+    // subsequent slots.
     uint32_t shim_trap_existing(const std::string& dll, const std::string& name) const;
 
     // A single catch-all shim used for any unresolved import (logs + returns 0).
@@ -127,34 +126,33 @@ public:
     // PROF_COUNTERS: print the top-N shims by cumulative shim-body time
     // (tag, calls, total ms, µs/call). No-op in default builds.
     void dump_prof(int topn) const;
-    // PROF_COUNTERS : top-K des shims par temps ecoule DEPUIS LE DERNIER APPEL,
-    // formate dans `out` (" tag=Nms tag=Nms ..."). C'est la version fenetree de
-    // dump_prof : sur console on joue pendant des minutes, un cumul depuis
-    // l'amorcage ne dit rien de ce qui coute PENDANT le deplacement. Rend le
-    // nombre d'octets ecrits. Sans PROF_COUNTERS : ecrit "" et rend 0.
+    // PROF_COUNTERS: top-K shims by time elapsed since the last call,
+    // formatted into `out` (" tag=Nms tag=Nms ..."). Windowed variant of
+    // dump_prof: a since-startup cumulative total says nothing about what a
+    // specific stretch of play costs. Returns the number of bytes written;
+    // writes "" and returns 0 without PROF_COUNTERS.
     int prof_window(char* out, unsigned n, int topk);
 
-    // Top-N des creneaux par NOMBRE DE PRISES (voir runtime/trapcnt.h). Rien a
-    // voir avec dump_prof : ce compte-la est dans le binaire LIVRE et il
-    // comptabilise aussi les creneaux servis en intrinseque, que le Bridge ne
-    // voit jamais passer. Publie par wx86_vita_progress_c (sur console, printf
-    // n'atteint aucun journal) ET par printf (qemu/host, ou le journal est un
-    // no-op).
+    // Top-N slots by NUMBER OF TRAPS (see runtime/trapcnt.h). Unrelated to
+    // dump_prof: this counter is present in shipping builds and also counts
+    // slots served as intrinsics, which the Bridge never sees go by.
+    // Published via wx86_vita_progress_c (console, where printf reaches no
+    // log) and via printf (qemu/host).
     void dump_trap_counts(int topn) const;
-    // D2_NATPROF=1 : TEMPS par creneau (us cumulees dans le corps de shim),
-    // publie par fenetre de 10 s. C'est l'instrument qui manquait : les
-    // portages natifs et les shims sont du code HOTE, invisibles au profil
-    // du dynarec par construction. Cout connu : deux lectures d'horloge par
-    // traversee (~1,3 us piece sur Vita, ~900 traversees/image => ~2,3 ms,
-    // ~5 %) — un instrument de MESURE, jamais arme en jeu.
+    // D2_NATPROF=1: per-slot TIME (µs accumulated in the shim body),
+    // published in 10s windows. Native ports and shims are host code,
+    // invisible to the dynarec's own profiler by construction. Known
+    // overhead: two clock reads per crossing (~1.3 µs each on Vita, ~900
+    // crossings/frame => ~2.3 ms, ~5%) — a measurement instrument, never
+    // enabled during normal play.
     int natprof_window(char* out, unsigned n, int topk);
 
-    // RECENSEMENT B3 — top-N des creneaux par APPELS A E() (resolutions d'etat
-    // par fil, cf. cpu_box86.cpp d2_e_calls) et, surtout, par appels PAR
-    // TRAVERSEE : c'est ce ratio qui dit combien de resolutions un crochet
-    // natif paie, et il est le seul chiffre sur lequel un groupage puisse se
-    // decider. Ne rend rien hors build -DD2_TLSCOUNT (les compteurs y sont
-    // tous nuls) — il l'annonce alors au lieu d'imprimer des zeros.
+    // Top-N slots by calls to E() (per-thread state resolution, see
+    // cpu_box86.cpp d2_e_calls) and, more usefully, by calls PER CROSSING:
+    // this ratio is what a native hook costs in resolutions, and the only
+    // number a batching decision can be based on. Reports nothing outside a
+    // -DD2_TLSCOUNT build (where the counters are always zero) rather than
+    // printing all-zero data.
     void dump_tls_counts(int topn) const;
 
     // Cooperative-threading hooks. A shim calls request_yield() to make the
@@ -190,25 +188,24 @@ private:
     };
     // One trap slot per distinct native target. prof_* are only written under
     // PROF_COUNTERS builds (per-shim call count + cumulative shim-body time).
-    // tagc : le MÊME texte que shim.tag, mais sous forme de pointeur STABLE —
-    // il vise la clé de slot_by_tag_ (un std::map : ses nœuds ne bougent
-    // jamais, et rien n'y est effacé). shim.tag lui-même ne convient PAS pour
-    // l'observabilité du GIL : slots_ est un vector, une croissance à chaud
-    // (GetProcAddress / LoadLibrary) déplace les TrapSlot et un tag court
-    // (« ws2_32.dll!#18 ») vit en SSO — son c_str() serait alors pendouillant.
+    // tagc: the same text as shim.tag, but as a STABLE pointer — it points
+    // into the key of slot_by_tag_ (a std::map: nodes never move, nothing is
+    // ever erased from it). shim.tag itself does not work here: slots_ is a
+    // vector, a hot-path growth (GetProcAddress / LoadLibrary) relocates the
+    // TrapSlots, and a short tag ("ws2_32.dll!#18") lives in SSO — its
+    // c_str() would then dangle.
     struct TrapSlot { Shim shim; uint32_t va; const char* tagc = nullptr;
                       uint64_t prof_calls = 0, prof_ns = 0;
-                      // RECENSEMENT B3 (build -DD2_TLSCOUNT) : appels a E()
-                      // imputables a CE creneau — la traversee complete, du
-                      // trap_retaddr d'entree au trap_epilogue de sortie,
-                      // corps de shim inclus. Les champs existent TOUJOURS
-                      // (deux mots par creneau, quelques centaines de
-                      // creneaux) pour que la disposition de TrapSlot ne
-                      // depende pas d'un -D : un en-tete dont la taille change
-                      // avec un drapeau est une ODR violation qui attend son
-                      // heure. Seul l'INCREMENT est conditionnel.
+                      // (build -DD2_TLSCOUNT) calls to E() attributable to
+                      // THIS slot — the full crossing, from the entry
+                      // trap_retaddr to the exit trap_epilogue, shim body
+                      // included. The fields always exist (two words per
+                      // slot, a few hundred slots) so TrapSlot's layout does
+                      // not depend on a -D flag: a struct whose size changes
+                      // with a build flag is an ODR violation waiting to
+                      // happen. Only the INCREMENT is conditional.
                       uint64_t tls_calls = 0, tls_traps = 0; };
-    // Instantane du prof_ns de chaque slot au dernier prof_window() (fenetrage).
+    // Snapshot of each slot's prof_ns at the last prof_window() call (for windowing).
     std::vector<uint64_t> prof_prev_;
 
     Cpu* cpu_;
@@ -221,12 +218,12 @@ private:
     std::map<std::string, uint32_t> slot_by_tag_;  // tag → trap va
 
     uint32_t next_base_ = 0x30000000;   // module load bases grow from here
-    uint32_t module_limit_ = 0;         // 0 = pas de borne ; sinon fin EXCLUE de la fenetre modules
+    uint32_t module_limit_ = 0;         // 0 = no bound; otherwise the (exclusive) end of the module window
 public:
-    // Borne haute de la fenetre des modules auto-places. Un module qui la
-    // depasserait est REFUSE (add_module rend null + err) au lieu d'etre pose
-    // par-dessus la region voisine du plan memoire de l'hote — ce qui, le
-    // 2026-09-13, ecrasait en silence les talons de rappel invites.
+    // Upper bound of the auto-placed module window. A module that would
+    // exceed it is REFUSED (add_module returns null + err) instead of being
+    // placed over the neighboring region of the host memory map, silently
+    // overwriting guest callback stubs there.
     void set_module_limit(uint32_t end) { module_limit_ = end; }
 private:
     uint32_t trap_base_ = 0x7F000000;   // native-thunk window

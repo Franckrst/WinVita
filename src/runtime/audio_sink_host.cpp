@@ -1,8 +1,8 @@
-// src/runtime/audio_sink_host.cpp — puits WAV et puits NUL, portables.
+// src/runtime/audio_sink_host.cpp — portable WAV sink and null sink.
 //
-// Compilés dans TOUS les binaires (hôte, oracle ARM, eboot Vita) : le puits WAV
-// est la preuve hors console du chantier son, et il doit donc exister dans le
-// binaire de l'oracle qemu, pas seulement dans l'eboot.
+// Compiled into ALL binaries (host, ARM oracle, Vita eboot): the WAV sink is
+// the off-console evidence for the audio path, so it must exist in the qemu
+// oracle binary too, not just the eboot.
 #include "runtime/audio_sink.h"
 
 #include <cstdio>
@@ -37,9 +37,8 @@ public:
         const size_t n = (size_t)frames * (size_t)ch_;
         if (std::fwrite(pcm, sizeof(int16_t), n, f_) != n) return;
         data_ += (uint32_t)(n * sizeof(int16_t));
-        // Ré-écrire l'en-tête toutes les ~64 Kio : un run tué (timeout, Halt)
-        // laisse alors un fichier LISIBLE au lieu d'un RIFF de taille 0. Le
-        // fichier de preuve est justement celui qu'on perd le plus souvent.
+        // Rewrite the header every ~64 KiB: a killed run (timeout, Halt)
+        // then leaves a READABLE file instead of a zero-size RIFF.
         if (data_ - lastHdr_ >= 64u * 1024u) { lastHdr_ = data_; refresh_header(); }
     }
     void close() override {
@@ -71,7 +70,7 @@ private:
     }
     char  path_[256] = {0};
     FILE* f_ = nullptr;
-    int   freq_ = 0, ch_ = 2;      // posés par open(), jamais devinés ici
+    int   freq_ = 0, ch_ = 2;      // set by open(), never guessed here
     uint32_t data_ = 0, lastHdr_ = 0;
 };
 
@@ -89,29 +88,29 @@ Sink* make_wav_sink(const char* path) { return new WavSink(path); }
 Sink* make_null_sink() { return new NullSink(); }
 
 #ifndef __vita__
-// Pas de fil hote hors console : le socle retombe sur le puits TIRE par le tick
-// d'image du jeu. C'est voulu — sous qemu, un fil temps reel sous-alimenterait
-// le puits et la preuve WAV serait pleine de trous.
+// No host thread outside the console: the mixer falls back to the sink
+// PULLED by the game's frame tick. Deliberate — under qemu, a real-time
+// thread would starve the sink and the WAV evidence would be full of gaps.
 bool thread_start(void (*)(void)) { return false; }
 bool thread_retry(void) { return false; }
 bool thread_stop(void) { return true; }
 
-// Hors console il n'y a pas de sceAudioOut : la fabrique existe pour que
-// ds_emul.cpp compile partout à l'identique, et rend null (le socle retombe
-// alors sur le puits nul, en le DISANT dans le journal).
+// Outside the console there's no sceAudioOut: this factory exists so
+// ds_emul.cpp compiles identically everywhere, and returns null (the mixer
+// then falls back to the null sink, and SAYS so in the log).
 Sink* make_vita_sink() { return nullptr; }
 #endif
 
 // ---------------------------------------------------------------------------
-// ANALYSE SPECTRALE — le seul test qui distingue de la MUSIQUE d'un BRUIT BLANC.
-// FFT radix-2 sur place, 1024 points réels traités comme complexes (partie
-// imaginaire nulle) : ~30 lignes, aucune dépendance, et elle tourne dans le
-// binaire de l'oracle sous qemu comme dans l'eboot.
+// SPECTRAL ANALYSIS — the only test that tells MUSIC apart from WHITE NOISE.
+// In-place radix-2 FFT, 1024 real points treated as complex (zero imaginary
+// part): ~30 lines, no dependency, and it runs in the oracle binary under
+// qemu just like in the eboot.
 namespace {
 constexpr int kFftN = 1024;
 
 void fft1024(double* re, double* im) {
-    // permutation binaire inverse
+    // bit-reversal permutation
     for (int i = 1, j = 0; i < kFftN; i++) {
         int bit = kFftN >> 1;
         for (; j & bit; bit >>= 1) j ^= bit;
@@ -137,15 +136,15 @@ void fft1024(double* re, double* im) {
     }
 }
 
-// Accumulateur : on lui pousse des échantillons MONO (moyenne des voies) et il
-// moyenne le spectre de puissance de chaque fenêtre pleine.
+// Accumulator: fed MONO samples (channel average), it averages the power
+// spectrum of each full window.
 struct Spectrum {
     double win[kFftN] = {0};
     double pow_[kFftN/2] = {0};
     double hann[kFftN];
     int    fill = 0;
     uint32_t nwin = 0;
-    uint32_t skip = 0, seen = 0;      // n'analyser qu'une fenêtre sur `skip+1`
+    uint32_t skip = 0, seen = 0;      // only analyze one window out of every `skip+1`
     Spectrum() { for (int i = 0; i < kFftN; i++)
                      hann[i] = 0.5 - 0.5 * std::cos(2.0 * 3.14159265358979323846 * i / (kFftN - 1)); }
     void push(double v) {
@@ -159,8 +158,8 @@ struct Spectrum {
         for (int k = 0; k < kFftN/2; k++) pow_[k] += re[k]*re[k] + im[k]*im[k];
         nwin++;
     }
-    // Part de l'énergie dans les 20 raies dominantes, DC exclu (une composante
-    // continue n'est pas du son et gonflerait la mesure).
+    // Share of energy in the 20 dominant bins, DC excluded (a constant
+    // component isn't sound and would inflate the measurement).
     double concentration(int rate, int* top_hz) const {
         double tot = 0, best = 0; int bestk = 0;
         for (int k = 1; k < kFftN/2; k++) { tot += pow_[k];
@@ -198,11 +197,11 @@ bool wav_check(const char* path, WavStats* out, char* report, unsigned n, int wa
 
     uint64_t nz = 0, tot = 0, clipped = 0; double acc = 0; int peak = 0;
     int16_t buf[2048];
-    uint64_t left = dataLen / 2;   // échantillons annoncés
+    uint64_t left = dataLen / 2;   // declared samples
     static Spectrum sp; sp = Spectrum();
-    // Borner le travail : au plus ~1500 fenêtres analysées, réparties sur tout le
-    // fichier. Un WAV de 600 s en porte 12 900 ; sous qemu, les analyser toutes
-    // coûterait plus cher que le run qui l'a produit.
+    // Bound the work: at most ~1500 windows analyzed, spread across the
+    // whole file. A 600 s WAV holds 12,900; under qemu, analyzing all of
+    // them would cost more than the run that produced it.
     { const uint64_t frames_tot = st.channels ? (dataLen / 2) / (uint64_t)st.channels : 0;
       const uint64_t wtot = frames_tot / kFftN;
       sp.skip = (uint32_t)(wtot > 1500 ? (wtot / 1500) : 0); }
@@ -217,7 +216,7 @@ bool wav_check(const char* path, WavStats* out, char* report, unsigned n, int wa
             if (v >= 32767 || v <= -32767) clipped++;
             acc += (double)v * (double)v;
         }
-        // silence par TRAME (toutes voies nulles) + alimentation du spectre
+        // per-FRAME silence check (all channels zero) + feeding the spectrum
         for (size_t i = 0; i + (size_t)st.channels <= got; i += (size_t)st.channels) {
             bool z = true; double mono = 0;
             for (int c = 0; c < st.channels; c++) { if (buf[i+c]) z = false; mono += buf[i+c]; }
@@ -241,8 +240,8 @@ bool wav_check(const char* path, WavStats* out, char* report, unsigned n, int wa
     else if (peak == 0)                           why = "SILENCE TOTAL (amplitude crete nulle)";
     else if (st.silence_frac > 0.999)             why = "99,9 % de trames muettes";
     else if (clipped * 100 > (tot * (uint64_t)st.channels))  why = "SATURATION (>1 % d'echantillons ecretes)";
-    // Le test qui manquait : un bruit blanc passe TOUS les precedents. 20 raies
-    // sur 512 valent 3,9 % pour du bruit blanc ; on refuse sous 8 %.
+    // The missing test: white noise passes ALL the previous checks. 20 bins
+    // out of 512 amount to 3.9% for white noise; reject below 8%.
     else if (sp.nwin >= 8 && st.tone_frac < 0.08)  why = "BRUIT LARGE BANDE (energie etalee, pas un signal structure)";
     st.ok = (why == nullptr);
     say("%s: %.2f s  %u Hz  %dch/%d bits  trames=%llu  crete=%d (%.1f%% pleine echelle)  rms=%.0f  silence=%.1f%%"

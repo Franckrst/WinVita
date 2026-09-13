@@ -4,8 +4,8 @@
 #include <stdint.h>
 typedef struct x86emu_s x86emu_t;
 void my_cpuid(x86emu_t* emu, uint32_t tmp32u);
-/* Les bits de la feuille 1, tels que my_cpuid les annonce. Publies pour que les
-   shims Win32 qui decrivent le processeur (IsProcessorFeaturePresent) en
-   DERIVENT leurs reponses au lieu d'en choisir de nouvelles. */
+/* CPUID leaf-1 feature bits as reported by my_cpuid, exposed so Win32 shims
+   describing the processor (IsProcessorFeaturePresent) derive their answers
+   from these instead of inventing new ones. */
 void wx86_cpuid_features(uint32_t* edx, uint32_t* ecx);
 #endif

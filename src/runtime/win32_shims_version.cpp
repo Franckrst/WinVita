@@ -1,14 +1,13 @@
-// src/runtime/win32_shims_version.cpp — see win32_shims_version.h. Split out
-// of d2vita's tools/rt_boot.cpp "couverture complete des imports" catch-all
-// section (2026-09-10). The VS_FIXEDFILEINFO scan/repack (build_verinfo) is
-// a plain PE-resource parser with zero guest-specific content; the only
-// guest-specific piece is turning a guest file NAME into real bytes, which
-// stays entirely on the consumer's side via Bridge::set_version_resource_source
-// (a single registration, no override, same pattern as Cpu::set_alternate /
-// Bridge::register_shim). GetModuleFileNameEx*/GetModuleFileName* stayed
-// d2vita-side: they resolve a full MODULE PATH string, which is where the
-// guest's install-path fiction (e.g. "C:\Diablo II\...") actually lives —
-// this file never sees or needs that.
+// src/runtime/win32_shims_version.cpp — see win32_shims_version.h. The
+// VS_FIXEDFILEINFO scan/repack (build_verinfo) is a plain PE-resource
+// parser with zero guest-specific content; the only guest-specific piece is
+// turning a guest file NAME into real bytes, which stays entirely on the
+// consumer's side via Bridge::set_version_resource_source (a single
+// registration, no override, same pattern as Cpu::set_alternate /
+// Bridge::register_shim). GetModuleFileNameEx*/GetModuleFileName* stay on
+// the consumer side: they resolve a full MODULE PATH string, which is where
+// a guest's install-path fiction actually lives — this file never sees or
+// needs that.
 #include "win32_shims_version.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"

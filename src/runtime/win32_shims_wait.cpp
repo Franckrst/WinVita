@@ -1,10 +1,8 @@
-// src/runtime/win32_shims_wait.cpp — voir win32_shims_wait.h.
+// src/runtime/win32_shims_wait.cpp — see win32_shims_wait.h.
 //
-// Corps deplaces MOT POUR MOT depuis tools/rt_boot.cpp de d2vita, commentaires
-// compris. Seule l'instrumentation change de cote : chaque trace, compteur ou
-// chronometre d'origine devient une notification emise AU MEME ENDROIT, dans
-// le MEME ORDRE. Un observateur non arme = aucune trace, ce qui est deja
-// l'etat de ces interrupteurs par defaut.
+// Every trace, counter, or timer is a notification emitted at the same
+// point, in the same order it would have logged. No observer armed means no
+// trace — the same as these switches being off by default.
 #include "win32_shims_wait.h"
 #include "guest_sync.h"
 #include "guest_thread_ctx.h"
@@ -20,8 +18,8 @@ static WxWaitObserverFn g_obs = nullptr;
 void wx86_wait_set_observer(WxWaitObserverFn cb){ g_obs = cb; }
 static inline void note(const WxWaitEvent& e){ if(g_obs) g_obs(e); }
 
-// Le « jamais signale » partage : un evenement manuel qu'on ne signale pas,
-// donc une attente qui ne peut se terminer que par son delai.
+// The shared "never signaled" event: a manual event that's never signaled,
+// so a wait on it can only end via its timeout.
 static WxEvent* never_event(){
     static WxEvent* nv=nullptr;
     if(!nv){ nv=new WxEvent(); nv->manual=true; nv->signaled=false; }
@@ -42,11 +40,11 @@ void win32_shims_wait_install(Bridge& br){
 
     K("WaitForSingleObject",2,[](Cpu&c)->uint32_t{
         ThreadScheduler* sch=wx86_sched(); if(!sch) return 0u;
-        const uint32_t h=c.arg(0), to=c.arg(1);   // deux arg(), plus neuf (cf. EnterCriticalSection)
+        const uint32_t h=c.arg(0), to=c.arg(1);   // two arg()s, nine more (see EnterCriticalSection)
         Waitable* itw=wx86_handle_find(h);
-        // Handle INCONNU => « signale » immediatement, SANS attendre. Si un
-        // chargeur asynchrone attend sur un tel handle, le consommateur ne
-        // bloque jamais => course. On le raconte pour qu'il puisse le savoir.
+        // UNKNOWN handle => reported "signaled" immediately, WITHOUT waiting.
+        // If an async loader waits on such a handle it never blocks, which
+        // is a race — reported so the consumer can find out.
         if(!itw){ note({WX86_WAIT_SINGLE_UNKNOWN,&c,nullptr,h,to,0,0,0,0}); return 0u; }
         note({WX86_WAIT_SINGLE_ENTER,&c,itw,h,to,0,0,0,0});
         uint32_t r=sch->wait(itw,to);
@@ -56,22 +54,19 @@ void win32_shims_wait_install(Bridge& br){
     K("WaitForMultipleObjects",4,[](Cpu&c)->uint32_t{
         ThreadScheduler* sch=wx86_sched(); if(!sch) return 0u;
         uint32_t n=c.arg(0),pa=c.arg(1),all=c.arg(2),to=c.arg(3);
-        // C13 (leak) -> T11 (use-after-free): ONE WxMultiWait, REUSED per guest
-        // thread. The C13 delete-after-wait freed the object while the COOP
-        // scheduler still referenced it: coop wait() on the blocked path sets
-        // cur_->wait_obj=mw and returns a PLACEHOLDER immediately (the yield
-        // happens after this shim returns, EAX is patched on wake) — so the
-        // delete ran with the wait still pending, and every pick_ready() pass
-        // virtual-called the freed object (host SIGSEGV, first hit by torture
-        // mt/interlocked's blocking waitAll join; a game whose net path only
-        // issues immediate/timeout-0 multiwaits survives it, which is why the
-        // bug hid for so long).
-        // Reuse is safe on BOTH backends: a thread has at most one outstanding
-        // wait, and it can only re-enter this shim after that wait completed
-        // (coop clears wait_obj on wake before the thread runs again; native
-        // completes the wait inside wait() itself). Leaked by design — one
-        // object per guest thread, reclaimed by the OS at exit — strictly
-        // less than the pre-C13 one-per-call leak.
+        // ONE WxMultiWait per guest thread, REUSED rather than allocated per
+        // call and deleted after the wait. On the coop scheduler, wait() on
+        // the blocked path stores the object in cur_->wait_obj and returns a
+        // placeholder immediately (the actual yield happens after this shim
+        // returns, EAX gets patched on wake) — so deleting after the wait
+        // would free the object while every pending pick_ready() pass still
+        // references it, a host use-after-free.
+        //
+        // Reuse is safe on BOTH backends: a thread has at most one
+        // outstanding wait, and it can only re-enter this shim after that
+        // wait completed (coop clears wait_obj on wake before the thread runs
+        // again; native completes the wait inside wait() itself). Leaked by
+        // design — one object per guest thread, reclaimed by the OS at exit.
         static std::map<uint32_t,WxMultiWait*> permw;
         uint32_t curtid = sch->current() ? sch->current()->id : 0;
         WxMultiWait*& mwslot = permw[curtid];
@@ -93,11 +88,11 @@ void win32_shims_wait_install(Bridge& br){
     K("SleepEx",2,[](Cpu&c){ wx86_wait_sleep(c.arg(0)); return 0u; });
     K("SwitchToThread",0,[](Cpu&){ if(ThreadScheduler* s=wx86_sched()) s->yield(); return 1u; });
 
-    // ---- port d'achevement d'entrees-sorties --------------------------------
-    // Un systeme de taches pose son fil ouvrier sur GetQueuedCompletionStatus
-    // et lui envoie du travail par PostQueuedCompletionStatus. Rien de propre a
-    // un jeu : l'objet WxIocp appartient deja au moteur (guest_sync.h), ses
-    // trois shims le rejoignent.
+    // ---- I/O completion port ---------------------------------------------------
+    // A task system parks its worker thread on GetQueuedCompletionStatus and
+    // feeds it work via PostQueuedCompletionStatus. Nothing guest-specific:
+    // the WxIocp object already lives in the engine (guest_sync.h), and its
+    // three shims join it here.
     K("CreateIoCompletionPort",4,[](Cpu&c)->uint32_t{ uint32_t ex=c.arg(1);
         if(ex) return ex;                          // associate file w/ existing port
         WxIocp* p=new WxIocp(); p->cpu=&c; return wx86_handle_add(p); });

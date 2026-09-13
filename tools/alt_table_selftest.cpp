@@ -1,26 +1,25 @@
-// tools/alt_table_selftest.cpp — l'oracle de src/dynarec86/alt_table.c.
+// Oracle for src/dynarec86/alt_table.c.
 //
-// CE QU'IL PROUVE, ET CE QU'IL NE PROUVE PAS.
+// What it proves, and what it doesn't.
 //
-// Il prouve deux choses sur le corps que la bibliotheque embarque :
-//   1. AUCUNE BORNE. 1 000 alternates distincts se posent tous, se relisent
-//      tous, et dyn86_alt_lost() reste a 0. C'est le defaut corrige : la table
-//      s'arretait a 52 et avalait la suite sans un mot.
-//   2. UN ECHEC SE VOIT. Quand l'allocation est refusee, la pose est REFUSEE
-//      (le compte n'avance pas), dyn86_alt_lost() avance, et le journal recoit
-//      une ligne qui nomme la perte.
+// It proves two things about the body the library ships:
+//   1. No bound: 1000 distinct alternates are all set, all read back, and
+//      dyn86_alt_lost() stays at 0.
+//   2. A failure is visible: when allocation is refused, the set is refused
+//      (the count doesn't advance), dyn86_alt_lost() advances, and the log
+//      gets a line naming the loss.
 //
-// INJECTION DE FAUTE. alt_table.c est compile avec -Dmalloc=wx86_selftest_malloc
-// (voir tools/selftest.sh) : l'allocateur est celui de CE fichier, et il refuse
-// a la demande. La fausse main porte sur l'allocateur, pas sur la fonction
-// testee — le corps de dyn86_set_alternate est celui de la bibliotheque, ligne
-// pour ligne. La contrepartie, a dire : l'objet teste differe de l'objet livre
-// par ce seul drapeau. Une injection SANS recompilation est impossible sur un
-// chemin d'allocation.
+// Fault injection: alt_table.c is compiled with -Dmalloc=wx86_selftest_malloc
+// (see tools/selftest.sh) — the allocator is this file's, and it can refuse
+// on demand. The fake targets the allocator, not the function under test:
+// dyn86_set_alternate's body is the library's, line for line. Caveat: the
+// tested object differs from the shipped one by that one flag — fault
+// injection without recompilation isn't possible on an allocation path.
 //
-// CONTROLE NEGATIF : le test verifie que la faute CHANGE le verdict (sans elle,
-// lost==0 ; avec elle, lost>0, puis lost cesse de monter des qu'on la retire).
-// Un filet qui rend le meme resultat dans les deux jambes ne prouve rien.
+// Negative control: the test verifies the fault actually changes the
+// verdict (without it, lost==0; with it, lost>0, and lost stops climbing
+// once the fault is removed). A test that gives the same result either way
+// proves nothing.
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -33,11 +32,11 @@ extern "C" {
     extern uintptr_t *dyn86_alt_from;
     extern uintptr_t *dyn86_alt_to;
 
-    // L'allocateur que voit alt_table.c (-Dmalloc=wx86_selftest_malloc).
+    // The allocator alt_table.c sees (-Dmalloc=wx86_selftest_malloc).
     int  g_refuser = 0;
     void* wx86_selftest_malloc(size_t n) { return g_refuser ? nullptr : std::malloc(n); }
 
-    // Le journal de la console : ici, un compteur de lignes.
+    // Stand-in for the console log: a line counter here.
     int  g_lignes = 0;
     char g_derniere[128] = {0};
     void wx86_vita_progress_c(const char* msg) {
@@ -55,7 +54,7 @@ static void ok(bool c, const char* quoi) {
 static uintptr_t cible(int i) { return (uintptr_t)0x00400000u + (uintptr_t)i * 16u; }
 
 int main() {
-    // ---- 1. aucune borne : 1 000 poses, 1 000 retrouvailles ---------------
+    // ---- 1. no bound: 1000 sets, 1000 lookups ------------------------------
     const int N = 1000;
     for (int i = 0; i < N; ++i) dyn86_set_alternate(cible(i), cible(i) + 8u);
     ok(dyn86_alt_count() == N, "les 1000 alternates sont poses");
@@ -70,7 +69,7 @@ int main() {
             }
     ok(retrouves == N, "les 1000 redirections se relisent a la bonne valeur");
 
-    // Re-poser une cle DEJA presente met a jour sans consommer de place.
+    // Re-setting an already-present key updates in place without using new space.
     const int avant = dyn86_alt_count();
     dyn86_set_alternate(cible(7), 0xDEADBEEFu);
     ok(dyn86_alt_count() == avant, "re-poser une cle connue n'ajoute pas d'entree");
@@ -79,13 +78,13 @@ int main() {
         if (dyn86_alt_from[k] == cible(7)) { maj = (dyn86_alt_to[k] == 0xDEADBEEFu); break; }
     ok(maj, "re-poser une cle connue met la valeur a jour");
 
-    // ---- 2. l'echec se voit ----------------------------------------------
+    // ---- 2. a failure is visible -------------------------------------------
     const int nAvant     = dyn86_alt_count();
     const int perduAvant = dyn86_alt_lost();
     g_refuser = 1;
     int poses = 0;
-    // Au plus une croissance separe deux tailles : quelques poses suffisent a
-    // atteindre la capacite courante. On en tente largement assez.
+    // At most one growth step separates two capacities, so a handful of sets
+    // reaches the current capacity; this tries far more than enough.
     for (int i = 0; i < 4096; ++i) {
         dyn86_set_alternate(cible(100000 + i), 1u);
         if (dyn86_alt_lost() > perduAvant) break;
@@ -98,7 +97,7 @@ int main() {
     ok(dyn86_alt_count() == nAvant + poses,
        "une pose refusee n'entre pas dans la table");
 
-    // ---- 3. controle negatif : sans la faute, le verdict est different -----
+    // ---- 3. negative control: without the fault, the verdict differs ------
     const int perduApres = dyn86_alt_lost();
     for (int k = 0; k < 256; ++k) dyn86_set_alternate(cible(200000 + k), 2u);
     ok(dyn86_alt_lost() == perduApres,

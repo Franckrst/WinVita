@@ -1,14 +1,8 @@
-// src/runtime/guest_str.h — lecture/ecriture de chaines dans la memoire INVITEE.
+// src/runtime/guest_str.h — read/write strings in GUEST memory.
 //
-// Toute API Win32 qui prend ou rend une chaine doit la lire ou l'ecrire a une
-// adresse x86 invitee, pas hote. Ces trois helpers sont donc un primitif du
-// moteur au meme titre que l'allocateur de brouillon (guest_scratch.h) : le
-// premier portage les avait, le second les avait aussi, mot pour mot.
-//
-// Ils etaient chez le consommateur pour une raison purement historique (tout
-// est ne dans son monolithe). Plusieurs shims du moteur portent encore un
-// commentaire « reste cote portage a cause de gread_mb » : c'est ce blocage-la
-// que ce fichier leve.
+// Any Win32 API that takes or returns a string must read or write it at a
+// guest x86 address, not a host one. These helpers are engine primitives,
+// like the scratch allocator (guest_scratch.h).
 #pragma once
 #include <cstdint>
 #include <string>
@@ -16,11 +10,11 @@
 
 namespace d2rt { class Cpu; }
 
-// Chaine multi-octets invitee. len<0 = jusqu'au zero terminal, sinon len octets.
+// Guest multi-byte string. len<0 = until null terminator, else len bytes.
 std::string wx86_gread_mb(d2rt::Cpu& c, uint32_t p, int len);
 
-// Chaine large (UTF-16) invitee. len<0 = jusqu'au zero terminal, sinon len unites.
+// Guest wide (UTF-16) string. len<0 = until null terminator, else len units.
 std::vector<uint16_t> wx86_gread_wc(d2rt::Cpu& c, uint32_t p, int len);
 
-// Ecrit une unite UTF-16 a une adresse invitee.
+// Writes one UTF-16 unit at a guest address.
 void wx86_gwrite_wc(d2rt::Cpu& c, uint32_t p, uint16_t w);

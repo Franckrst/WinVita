@@ -1,26 +1,11 @@
-// src/runtime/win32_shims_memory.cpp — voir win32_shims_memory.h.
+// src/runtime/win32_shims_memory.cpp — see win32_shims_memory.h.
 //
-// Les corps sont deplaces MOT POUR MOT depuis tools/rt_boot.cpp de d2vita,
-// commentaires compris. Trois choses seulement changent, et chacune est un
-// deplacement de PROPRIETE, pas de comportement :
-//
-//   1. les deux regions ne sont plus des globales du portage mais celles que
-//      le plan designe (g_plan.heap / g_plan.va) ;
-//   2. les compteurs d'occupation et les lignes de journal deviennent des
-//      notifications a l'observateur, emises AUX MEMES ENDROITS et dans le
-//      MEME ORDRE que les increments/impressions d'origine — c'est la seule
-//      facon de ne pas changer l'entrelacement d'un journal ;
-//   3. `g_decommitted`, l'ensemble des pages decommittees, suit ses deux
-//      shims. Il etait `static` dans la fonction d'installation du portage :
-//      il ne laisse donc AUCUN jumeau derriere lui.
-//
-// UNE DIFFERENCE DE COMPORTEMENT DECLAREE. A l'origine, l'adresse de retour de
-// l'appelant n'etait lue sur la pile, dans le cas « MEM_RELEASE tombe a cote »,
-// que pour les quatre premieres occurrences (le compteur qui bornait le
-// journal vivait dans le meme corps). Le compteur appartient desormais a
-// l'observateur, donc le moteur lit l'adresse de retour a CHAQUE occurrence.
-// C'est un chemin d'erreur rare (une fuite d'arene) et une lecture de pile ;
-// le journal du consommateur, lui, reste borne comme avant.
+// Occupancy counters and log lines are observer notifications, emitted at
+// the same points and in the same order a log needs them, so a consumer's
+// own log interleaving stays intact. The engine itself never caps how often
+// it notifies — e.g. every MEM_RELEASE-miss reads the guest caller's return
+// address, a rare error path — any capping for a log belongs to the
+// observer, not here.
 #include "win32_shims_memory.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
@@ -34,7 +19,7 @@
 #include <vector>
 using namespace d2rt;
 
-// ---- remplissage a zero d'une plage invitee --------------------------------
+// ---- zero-filling a guest range ---------------------------------------------
 void wx86_gzero(Cpu& c, uint32_t va, uint32_t n){
     if(!n) return;
     if(void* hp=c.hostptr(va,n)){ c.invalidate_code(va,n); std::memset(hp,0,n); return; }
@@ -42,7 +27,7 @@ void wx86_gzero(Cpu& c, uint32_t va, uint32_t n){
     for(uint32_t o=0;o<n;){ uint32_t k=(n-o)>(uint32_t)z.size()?(uint32_t)z.size():(n-o); c.write(va+o,z.data(),k); o+=k; } }
 static inline void gzero(Cpu& c, uint32_t va, uint32_t n){ wx86_gzero(c,va,n); }
 
-// ---- etat possede par ce fichier -------------------------------------------
+// ---- state owned by this file -----------------------------------------------
 static Wx86MemoryPlan  g_plan;
 static WxMemObserverFn g_obs = nullptr;
 static uint32_t        g_physMB = 256u;
@@ -77,8 +62,9 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     K("HeapFree",3,[](Cpu&c){ g_plan.heap->free(c.arg(2)); return 1u; });
     K("HeapSize",3,[](Cpu&c){ uint32_t s=g_plan.heap->size_of(c.arg(2)); return s?s:0u; });
 
-    // Local/GlobalAlloc: adossees au MEME tas. Non shimmees elles decalent ESP
-    // et rendent 0, ce qui a deja fait planter un fil sur un portage.
+    // Local/GlobalAlloc: backed by the SAME heap. Left unshimmed, the stdcall
+    // arg-cleanup mismatch shifts ESP and returns 0 — enough to crash a
+    // guest thread.
     K("LocalAlloc",2,[](Cpu&c){ uint32_t fl=c.arg(0),n=c.arg(1),a=g_plan.heap->alloc(n);
         if(a && (fl&0x40u)) gzero(c,a,n); return a; });  // LMEM_ZEROINIT
     K("LocalFree",1,[](Cpu&c){ g_plan.heap->free(c.arg(0)); return 0u; });     // NULL on success
@@ -106,12 +92,12 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
         note(ty&0x2000u?WX86_MEM_VA_RESERVE:WX86_MEM_VA_COMMIT_FRESH,&c,hint,sz,ty,c.arg(3));
         if(sz>=0x100000){ uint32_t ra=c.read_u32(c.reg(R_ESP));
             note(WX86_MEM_VA_BIG,&c,hint,sz,ty,c.arg(3),ra); }
-        // Une demande enorme (>= 2 GiB) est une taille corrompue en amont : la
-        // nommer durablement AVANT qu'elle echoue.
+        // A huge request (>= 2 GiB) is a corrupted size upstream — record it
+        // before it fails.
         if(sz>=0x80000000u){ uint32_t ra=c.read_u32(c.reg(R_ESP));
             note(WX86_MEM_VA_GARBAGE,&c,hint,sz,ty,c.arg(3),ra); }
         uint32_t a=g_plan.va->alloc(sz);
-        if(!a){ uint32_t ra=c.read_u32(c.reg(R_ESP));           // nommer le site fautif durablement
+        if(!a){ uint32_t ra=c.read_u32(c.reg(R_ESP));           // record the faulting site
             note(WX86_MEM_VA_FAIL,&c,hint,sz,ty,c.arg(3),ra); }
         if(a) gzero(c,a,sz);
         return a; });
@@ -119,7 +105,7 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
         if(ft&0x8000u){ uint32_t blk=g_plan.va->block_of(a)?g_plan.va->block_of(a):a;  // MEM_RELEASE
             uint32_t bs=g_plan.va->size_of(blk);
             if(g_plan.va->free(blk)) note(WX86_MEM_VA_RELEASE,&c,blk,bs,ft);
-            else { uint32_t ra=c.read_u32(c.reg(R_ESP));         // une liberation PERDUE = fuite d'arene
+            else { uint32_t ra=c.read_u32(c.reg(R_ESP));         // a LOST free = arena leak
                 note(WX86_MEM_VA_RELEASE_MISS,&c,a,bs,ft,0,ra); }
             return 1u; }
         if(ft&0x4000u){                                                      // MEM_DECOMMIT: keep backing,
@@ -140,7 +126,7 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     // primitive: GetSystemInfo then VirtualQuery region-by-region). Reports the
     // real module / heap / VA-arena / stack regions as MEM_COMMIT and the gaps
     // as MEM_FREE. Fills MEMORY_BASIC_INFORMATION (28 bytes) and returns 28.
-    // Le FORMAT est du Win32 ; le PLAN decrit est celui du consommateur.
+    // The FORMAT is Win32's; the PLAN it describes is the consumer's.
     K("VirtualQuery",3,[](Cpu&c){ uint32_t addr=c.arg(0),buf=c.arg(1),len=c.arg(2);
         if(!buf || len<28) return 0u;
         uint32_t base=0,size=0,state=0x10000u,type=0,protect=0x01u,allocbase=0;   // default MEM_FREE/NOACCESS
@@ -163,18 +149,18 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     K("GetSystemInfo",1,[](Cpu&c){ uint32_t p=c.arg(0);
         c.write_u32(p+0,0);            // wProcessorArchitecture=PROCESSOR_ARCHITECTURE_INTEL, wReserved
         c.write_u32(p+4,0x1000);       // dwPageSize = 4096
-        c.write_u32(p+8, d2rt::layout_user_lo());       // lpMinimumApplicationAddress (0x00010000 par defaut)
-        c.write_u32(p+12,d2rt::layout_user_hi()-1u);    // lpMaximumApplicationAddress (0x7FFEFFFF par defaut)
+        c.write_u32(p+8, d2rt::layout_user_lo());       // lpMinimumApplicationAddress (0x00010000 by default)
+        c.write_u32(p+12,d2rt::layout_user_hi()-1u);    // lpMaximumApplicationAddress (0x7FFEFFFF by default)
         c.write_u32(p+16,1);           // dwActiveProcessorMask
         c.write_u32(p+20,1);           // dwNumberOfProcessors
         c.write_u32(p+24,586);         // dwProcessorType
         c.write_u32(p+28,0x10000);     // dwAllocationGranularity = 64 KiB
         c.write_u32(p+32,6);           // wProcessorLevel/Revision
         return 0u; });
-    // MEMORYSTATUS avec des valeurs REELLES : beaucoup de jeux dimensionnent
-    // leurs caches sur dwTotalPhys, et une valeur fantaisiste les fait soit
-    // abandonner, soit reserver bien plus que la console n'a. La quantite
-    // annoncee est une decision du consommateur (wx86_mem_set_total_phys_mb).
+    // MEMORYSTATUS with REAL values: many games size their caches off
+    // dwTotalPhys, and a made-up value makes them either bail out or
+    // reserve far more than the target actually has. The reported amount
+    // is the consumer's decision (wx86_mem_set_total_phys_mb).
     K("GlobalMemoryStatus",1,[](Cpu&c){ uint32_t p=c.arg(0);
         const uint32_t physMB = g_physMB;
         c.write_u32(p+0,32);           // dwLength

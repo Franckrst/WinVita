@@ -1,9 +1,8 @@
-// src/runtime/host_clock.cpp — voir host_clock.h.
+// src/runtime/host_clock.cpp — see host_clock.h.
 //
-// Corps identique a celui que les deux portages hebergeaient chacun de leur
-// cote (rt_now_us de d2vita, d2vita_now_us de carn-vita) et a celui de
-// prof.cpp, qui n'etait compile qu'avec -DPROF_COUNTERS et ne pouvait donc
-// pas servir au reste du moteur.
+// The same body every consumer of this engine would otherwise duplicate on
+// its own side, and the one prof.cpp also needs but can't provide since it
+// only compiles under -DPROF_COUNTERS.
 #include "runtime/host_clock.h"
 
 #ifdef __vita__
@@ -14,7 +13,7 @@
 
 uint64_t wx86_now_us() {
 #ifdef __vita__
-    // Le noyau Sony compte deja en microsecondes.
+    // The Sony kernel already counts in microseconds.
     return (uint64_t)sceKernelGetProcessTimeWide();
 #else
     struct timespec ts;

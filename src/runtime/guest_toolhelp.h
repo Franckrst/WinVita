@@ -1,14 +1,12 @@
-// src/runtime/guest_toolhelp.h — l'etat des instantanes Toolhelp32.
+// src/runtime/guest_toolhelp.h — Toolhelp32 snapshot state.
 //
-// CreateToolhelp32Snapshot fige une liste de fils et de processus, que
-// Process32First/Next et Thread32First/Next parcourent ensuite. Le curseur de
-// parcours et la liste figee sont de la semantique Win32 : un instantane est
-// une notion du systeme, pas du jeu. Les DEUX portages declaraient cette meme
-// structure et cette meme table, a l'identique.
+// CreateToolhelp32Snapshot freezes a list of threads and processes, which
+// Process32First/Next and Thread32First/Next then iterate. The iteration
+// cursor and frozen list are OS semantics, not game logic.
 //
-// Ce qui n'est PAS ici : la liste de MODULES que Module32First/Next parcourt.
-// Elle se derive de la table de modules chargee par le pont, et chaque portage
-// la construit a sa facon — elle reste donc chez lui.
+// NOT included here: the MODULE list that Module32First/Next iterates. It
+// derives from the module table each consumer's loader builds differently,
+// so it stays with the consumer.
 #pragma once
 #include <cstdint>
 #include <cstddef>
@@ -20,7 +18,6 @@ struct WxSnapState {
     std::vector<uint32_t> pids; size_t pcur=0;
 };
 
-// Table des instantanes. Exposee par reference, meme raison et meme prix que
-// les tables de fichiers : transferer la PROPRIETE sans reecrire les sites
-// d'appel. Une seule table existe, celle-ci.
+// Snapshot table, exposed by reference for the same reason as the file
+// tables: transfer ownership without rewriting call sites.
 std::map<uint32_t,WxSnapState>& wx86_snapshots();

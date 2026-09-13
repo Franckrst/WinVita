@@ -1,42 +1,36 @@
-/* src/dynarec86/alt_table.c — LA TABLE DES ALTERNATES, et rien d'autre.
+/* src/dynarec86/alt_table.c — the alternates table, and nothing else.
  *
- * Un « alternate » est la primitive d'extension numero 1 du dynarec : une
- * redirection INVITE -> INVITE que le traducteur applique aux cibles de
- * call/jmp, sans toucher un octet de la memoire invitee. C'est par la qu'un
- * portage fait tourner du code natif a la place d'une fonction du jeu.
+ * An "alternate" is the dynarec's primary extension mechanism: a guest ->
+ * guest redirection that the translator applies to call/jmp targets, without
+ * touching a single byte of guest memory. This is how a port runs native code
+ * in place of a guest function.
  *
- * POURQUOI CE FICHIER EXISTE SEPAREMENT. La table vivait dans dyn86.c, au
- * milieu du dynarec, donc impossible a compiler sur bureau : son unique mode
- * de panne ne pouvait pas etre EXERCE par un oracle. Isolee, elle ne depend
- * que de la bibliotheque C, et tools/alt_table_selftest.cpp peut lui injecter
- * un echec d'allocation puis VERIFIER qu'elle le dit.
+ * This table lives in its own file, decoupled from the rest of the dynarec,
+ * so it has no dependency beyond libc: tools/alt_table_selftest.cpp can
+ * inject an allocation failure and verify it is reported correctly.
  *
- * CE QUI A CHANGE LE 2026-09-12. La table etait un tableau fixe — 24 places,
- * puis 52 — et le 53e enregistrement etait AVALE SANS UN MOT : un crochet
- * perdu, aucune trace, et un portage natif qui « ne tire pas » sans raison
- * visible. Une borne arbitraire sur la primitive d'extension numero 1 n'a pas
- * sa place dans un moteur generique. La table croit maintenant par doublement,
- * et le seul echec qui subsiste (allocation refusee) incremente un compteur
- * LISIBLE par l'embarqueur et ecrit une ligne dans le journal de la console.
+ * The table grows by doubling with no fixed cap. The only failure mode
+ * (allocation refused) increments a counter readable by the embedder and
+ * writes a line to the console log.
  *
- * CONTRAT D'APPEL : dyn86_set_alternate s'appelle a l'INSTALLATION, avant que
- * le code traduit ne tourne. hasAlternate()/getAlternate() lisent la table sur
- * le chemin chaud (premiere ligne de internalDBGetBlock), sans verrou : la
- * taille `dyn86_alt_n` est donc PUBLIEE EN DERNIER, apres l'ecriture de
- * l'entree, et les anciens tableaux ne sont JAMAIS liberes — un lecteur peut
- * tenir l'ancien pointeur. Le gaspillage est borne par la somme des capacites
- * precedentes, quelques kilo-octets.
+ * Call contract: dyn86_set_alternate is called at install time, before any
+ * translated code runs. hasAlternate()/getAlternate() read the table on the
+ * hot path (first line of internalDBGetBlock) without a lock, so
+ * `dyn86_alt_n` is published last, after the entry itself is written. Old
+ * backing arrays are never freed, since a concurrent reader may still hold
+ * the previous pointer; the resulting waste is bounded by the sum of past
+ * capacities, a few kilobytes.
  */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
-#include "bridge.h"   /* les declarations extern de la table (source unique) */
+#include "bridge.h"   /* extern declarations for the table (single source of truth) */
 
-/* Journal de la console : lien FORT, no-op hors __vita__
- * (platform/vita_host.cpp). Jamais une reference FAIBLE au nom d'un
- * consommateur — cf. docs/migration.md, piege 9. */
+/* Console log: strong link, no-op outside __vita__ (platform/vita_host.cpp).
+ * Never a weak reference by a consumer's name -- see docs/migration.md,
+ * pitfall 9. */
 #ifdef __cplusplus
 extern "C" void wx86_vita_progress_c(const char* msg);
 #else
@@ -45,8 +39,8 @@ void wx86_vita_progress_c(const char* msg);
 
 uintptr_t *dyn86_alt_from = NULL;
 uintptr_t *dyn86_alt_to   = NULL;
-int dyn86_alt_n     = 0;      /* alternates POSES */
-int dyn86_alt_refus = 0;      /* alternates PERDUS (allocation refusee) */
+int dyn86_alt_n     = 0;      /* alternates set */
+int dyn86_alt_refus = 0;      /* alternates lost (allocation refused) */
 static int g_alt_cap = 0;
 
 void dyn86_set_alternate(uintptr_t from, uintptr_t to) {
@@ -74,7 +68,7 @@ void dyn86_set_alternate(uintptr_t from, uintptr_t to) {
     }
     dyn86_alt_from[dyn86_alt_n] = from;
     dyn86_alt_to[dyn86_alt_n]   = to;
-    dyn86_alt_n++;            /* PUBLIE EN DERNIER (voir le contrat ci-dessus) */
+    dyn86_alt_n++;            /* published last (see contract above) */
 }
 
 int dyn86_alt_count(void) { return dyn86_alt_n; }

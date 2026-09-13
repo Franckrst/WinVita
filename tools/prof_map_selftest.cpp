@@ -1,25 +1,24 @@
-// tools/prof_map_selftest.cpp — l'oracle de src/runtime/prof_map.h.
+// Oracle for src/runtime/prof_map.h.
 //
-// CE QU'IL PROUVE. Jusqu'au 2026-09-12 le profileur du moteur classait chaque
-// echantillon dans une chaine de six `else if` ecrite EN DUR, aux bornes des
-// sous-systemes de Diablo II. Cette chaine est devenue une table que le
-// consommateur decrit. Le risque de la conversion est une transcription
-// infidele — un seau qui bouge d'une adresse et tous les profils dates
-// deviennent incomparables.
+// The profiler used to classify each sample with a hardcoded chain of six
+// `else if` checks at Diablo II subsystem boundaries; that chain is now a
+// table the consumer describes instead. The risk in such a conversion is an
+// unfaithful transcription — a boundary that shifts by one address makes
+// every profile compared against it incomparable.
 //
-// L'oracle compare donc, sur un BALAYAGE de tout le .text (0..0x300000, un
-// point tous les 64 octets, plus les bornes exactes et leurs voisins), la
-// sortie de wx86_prof_family() a une transcription fidele de la chaine
-// d'origine, recopiee ici depuis l'historique de cpu_box86.cpp.
+// This oracle sweeps the entire .text range (0..0x300000, one point every
+// 64 bytes, plus exact boundaries and their neighbors) and compares
+// wx86_prof_family()'s output against a faithful transcription of the
+// original chain (below).
 //
-// ET QU'IL COUPE : la meme comparaison est rejouee avec une carte dont UNE
-// borne est decalee d'un octet ; elle doit produire des divergences. Un oracle
-// qui rend « identique » dans les deux jambes ne prouve rien.
+// Negative control: the same comparison is replayed with a map where one
+// boundary is off by one byte; it must diverge. An oracle that reports
+// "identical" either way proves nothing.
 #include <cstdio>
 #include <cstdint>
 #include "runtime/prof_map.h"
 
-// --- la chaine d'origine, transcrite mot pour mot ---------------------------
+// --- the original chain, transcribed verbatim -------------------------------
 static int famille_historique(uint32_t rva) {
     if      (rva >= 0x20b200 && rva < 0x20d040) return 0;   // Codec.cpp (DCC)
     else if (rva >= 0x1fe000 && rva < 0x204000) return 1;   // SpriteCache.cpp
@@ -27,17 +26,17 @@ static int famille_historique(uint32_t rva) {
     else if (rva >= 0x242000 && rva < 0x280000) return 3;   // DRLG
     else if (rva >= 0x0f0000 && rva < 0x110000) return 4;   // Gfx / blit
     else if (rva <  0x030000)                   return 5;   // Storm
-    else                                        return 6;   // reste
+    else                                        return 6;   // remainder
 }
 
-// La carte que le portage D2 installe (tools/rt_boot.cpp, d2_prof_map()).
+// The map a D2 port installs (tools/rt_boot.cpp, d2_prof_map()).
 static Wx86ProfMap carte_d2(bool faute) {
     Wx86ProfMap m;
     m.fam[0] = {0x20b200, 0x20d040};
     m.fam[1] = {0x1fe000, 0x204000};
     m.fam[2] = {0x2094b0, 0x20ab00};
     m.fam[3] = {0x242000, 0x280000};
-    m.fam[4] = {0x0f0000, faute ? 0x110001u : 0x110000u};   // <- la faute
+    m.fam[4] = {0x0f0000, faute ? 0x110001u : 0x110000u};   // <- the injected fault
     m.fam[5] = {0x000000, 0x030000};
     m.nfam   = 6;
     m.zoom_4k_a = 0x0f0000; m.zoom_4k_b = 0x0d0000; m.zoom_256 = 0x0fa000;
@@ -46,11 +45,11 @@ static Wx86ProfMap carte_d2(bool faute) {
 
 static long compare(const Wx86ProfMap& m, long* points) {
     long diff = 0, n = 0;
-    // balayage regulier
+    // regular sweep
     for (uint32_t rva = 0; rva < 0x300000u; rva += 64) {
         ++n; if (wx86_prof_family(m, rva) != famille_historique(rva)) ++diff;
     }
-    // bornes exactes et voisins immediats
+    // exact boundaries and immediate neighbors
     static const uint32_t bornes[] = {
         0x20b200,0x20d040,0x1fe000,0x204000,0x2094b0,0x20ab00,
         0x242000,0x280000,0x0f0000,0x110000,0x030000,0x0d0000,0x0fa000,0x0fb000 };
@@ -78,15 +77,16 @@ int main() {
     const long d_faute = compare(carte_d2(true), &n2);
     ok(d_faute > 0, "CONTROLE NEGATIF : une borne decalee d'un octet est VUE");
 
-    // Carte VIDE : le cas d'un portage qui n'a rien decrit. Tout doit tomber
-    // dans la famille de queue — jamais dans une famille nommee par un autre jeu.
+    // Empty map: the case of a port that hasn't described anything.
+    // Everything must fall into the tail family — never into a family that
+    // belongs to a different port's map.
     Wx86ProfMap vide;
     long tous = 0;
     for (uint32_t rva = 0; rva < 0x300000u; rva += 1024)
         if (wx86_prof_family(vide, rva) == kProfFamOther) ++tous;
     ok(tous == 0x300000 / 1024, "carte vide : tout tombe dans la famille de queue");
 
-    // Fenetres de detail : bornes et extinction.
+    // Detail windows: bounds and the disabled case.
     ok(wx86_prof_zoom(0x0f0000, 12, 32, 0x0effff) == -1, "zoom : sous la base -> hors fenetre");
     ok(wx86_prof_zoom(0x0f0000, 12, 32, 0x0f0000) ==  0, "zoom : premiere case");
     ok(wx86_prof_zoom(0x0f0000, 12, 32, 0x10ffff) == 31, "zoom : derniere case");

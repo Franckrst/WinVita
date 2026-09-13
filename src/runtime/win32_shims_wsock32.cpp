@@ -1,76 +1,33 @@
 // src/runtime/win32_shims_wsock32.cpp — see win32_shims_wsock32.h.
 //
-// First pass (2026-09-10) moved only argument-pure, stateless ordinals here
-// (byte-order, WSAStartup/WSACleanup, gethostname) after an audit found the
-// rest "entangled" — but entangled turned out to mean "the socket table and
-// a couple of generic host-syscall wrappers happened to live inside
-// d2vita's tools/rt_boot.cpp", not "genuinely D2/BNCS-specific". Pushed
-// further (2026-09-11, explicit direction: the network stack itself is
-// generic, only the BNCS application protocol on top of it is D2-specific):
-// the socket-handle table, the networking-enabled gate, and every ordinal
-// that is a real Winsock->POSIX passthrough with NO protocol literal now
-// live here too — accept, bind, closesocket, getpeername, getsockname,
-// getsockopt, ioctlsocket (both DLLs' ordinal), listen, setsockopt,
-// shutdown, socket — plus wx86_connect_wait/wx86_recv_blocking/
-// wx86_send_simple, generic helper bodies that d2vita's connect/recv/send
-// shims (kept d2vita-side, see below) now call into instead of duplicating.
+// Holds every Winsock ordinal that is a generic Winsock->POSIX passthrough
+// with no protocol-specific literal: byte-order conversions, WSAStartup/
+// WSACleanup, gethostname, the socket-handle table, the networking-enabled
+// gate, accept/bind/closesocket/getpeername/getsockname/getsockopt/
+// ioctlsocket (both DLLs)/listen/setsockopt/shutdown/socket, connect/recv/
+// send (generic bodies: wx86_connect_wait/wx86_recv_blocking/
+// wx86_send_simple), the address helpers (inet_addr/inet_ntoa/
+// gethostbyname, which write through the guest scratch allocator,
+// guest_scratch.h) and the socket-layer half of the exit lock (net_guard.h)
+// — see win32_shims_wsock32.h for the observer/redirect/exit-lock contract
+// these all sit behind. sendto/recvfrom are real registered ordinals (not
+// left to the default shim) partly so the exit lock can gate them too.
 //
-// Troisieme passe (2026-09-11) — la couche est maintenant generique de bout
-// en bout pour connect/recv/send. Ce qui restait cote d2vita n'etait pas la
-// mecanique reseau mais la POLITIQUE posee autour : ports du protocole
-// applicatif, redirection de mise au point, bascules d'horloge propres au
-// consommateur, instrumentation. Deux points d'extension
-// generiques suffisent a la rendre au consommateur :
-//   - wx86_net_set_observer() : UN observateur passif qui recoit connect /
-//     connect-done / send / recv. Le moteur raconte, il ne demande jamais
-//     d'avis et ne change rien selon la reponse. Le decodage de protocole et
-//     toute politique applicative vivent chez le consommateur.
-//   - wx86_net_set_redirect() : une route generique de connect, l'equivalent
-//     d'une entree de fichier hosts ou d'un mandataire sortant. Elle ne sait
-//     rien du protocole qui passe dessus.
-// Note pour qui branche un client sur un serveur prive : cette route est un
-// FILET, pas la bonne facon de faire. La facon fidele au PC est de configurer
-// la liste de serveurs du client lui-meme (ses cles de registre / son .ini)
-// pour qu'il demande votre hote d'entree de jeu. Mesure le 2026-09-11 sur le
-// consommateur de reference : liste de serveurs du registre ramenee a une
-// entree locale, AUCUNE redirection activee -> le client se connecte tout seul
-// au serveur local et son transfert de fichier se deroule normalement.
+// select (WSOCK32.dll!#18) is left registered on the embedder side: its
+// fd_set<->pollfd translation is generic, but it is also the exact site of
+// a network-starvation edge case that only reproduces under real network
+// load, so it is left alone deliberately.
 //
-// Cinquieme passe (2026-09-12) — sendto (#20) et recvfrom (#17) rejoignent la
-// table : ils n'avaient JAMAIS ete inscrits, ni ici ni chez le consommateur, et
-// tombaient donc sur le shim par defaut (arret controle + derive ESP). Et avec
-// eux le VERROU DE SORTIE (wx86_net_set_private_only) : « cette adresse peut-
-// elle atteindre l'internet public ? » est une question de la couche socket,
-// au meme titre que la route ci-dessus, et pas une question de protocole. Le
-// moteur fournit le mecanisme et reste MUET ; l'embarqueur l'arme, decide a
-// quelles conditions il le leve, et journalise les refus via WX86_NET_REFUSED.
+// inet_ntoa and gethostbyname were fixed, not just relocated, when they
+// moved here: inet_ntoa was returning a hardcoded "127.0.0.1" regardless of
+// its argument, and gethostbyname made five permanent allocations per call,
+// exhausting guest memory in long sessions. Both are now cached by key.
 //
-// Ce qui reste cote consommateur, avec une vraie raison a chaque fois :
-//   - select (WSOCK32.dll!#18) : son coeur (traduction fd_set <-> pollfd) est
-//     generique, mais c'est aussi le site exact d'une famine reseau reelle
-//     deja corrigee (2026-08-30, D2_SELECTBLOCK) dont la signature de
-//     regression ne se voit que sous charge reseau reelle. Non touche.
-// Quatrieme passe (2026-09-11) — inet_addr/inet_ntoa/gethostbyname rejoignent
-// le moteur. Ce qui les retenait n'etait pas leur contenu (aucun des trois ne
-// connait D2) mais le fait qu'ils ecrivent dans la memoire INVITEE, via un
-// allocateur de brouillon qui vivait chez le consommateur. Cet allocateur est
-// devenu un primitif du moteur (guest_scratch.h) et la raison est tombee.
-// Deux defauts reels corriges au passage, pas seulement deplaces :
-//   - inet_ntoa rendait une chaine "127.0.0.1" ecrite en dur sur l'ordinal
-//     WSOCK32, quel que soit l'argument (un bouchon, pas une implementation) ;
-//   - gethostbyname faisait cinq allocations DEFINITIVES a chaque appel, ce
-//     qui menait tout droit a l'epuisement de la plage en session longue.
-//     Les deux sont maintenant caches par cle.
-//
-// Trace-log tradeoff, disclosed rather than hidden: d2vita's W() helper
-// wraps every WSOCK32/WS2_32 ordinal it registers with a uniform
-// g_netwatch_on() call trace. Ordinals moved here register directly via
-// this file's own REGORD and no longer go through that wrapper, so their
-// entries disappear from that specific trace (accept/bind/closesocket/
-// getpeername/getsockname/getsockopt/setsockopt/shutdown/socket/
-// ioctlsocket). Functional behavior is unchanged; only that one verbose
-// diagnostic loses coverage for these ordinals. connect/recv/send/select
-// (unchanged, still W()-registered) keep full tracing.
+// Trace-log note: ordinals registered directly through this file's own
+// REGORD bypass any per-call trace wrapper an embedder registers its own
+// ordinals through, so such a trace loses coverage for exactly those
+// ordinals. Functional behavior is unchanged; connect/recv/send/select stay
+// embedder-registered and keep full tracing.
 #include "win32_shims_wsock32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
@@ -147,10 +104,9 @@ uint32_t wx86_net_redirect() { return g_routeIp; }
 void wx86_net_set_observer(WsockObserverFn cb) { g_observer = cb; }
 
 
-// Lecture d'une chaine C invitee, octet par octet — les shims d'adresse
-// recoivent un char* invite. Bornee (1 Kio) : un pointeur errant ne doit pas
-// faire boucler le moteur sur toute la memoire invitee a la recherche d'un
-// zero qui n'existe pas.
+// Reads a guest C string byte by byte — address shims receive a guest
+// char*. Bounded (1 KiB): a stray pointer must not make the engine loop
+// over all of guest memory looking for a zero that doesn't exist.
 static std::string wx86_guest_cstr(Cpu& c, uint32_t p) {
     std::string s;
     if (!p) return s;
@@ -173,18 +129,18 @@ static void wx86_net_notify(int kind, Cpu* c, uint32_t handle, int fd,
     g_observer(e);
 }
 
-// LE VERROU DE SORTIE, applique EN AVAL de la route : il ne voit que ce qui
-// partirait REELLEMENT sur le fil. Rend true si la destination est autorisee.
-// Un refus ne touche AUCUNE socket hote : pas de poignee TCP entamee, pas un
-// octet emis. Le moteur ne journalise rien lui-meme (il est muet) — il le DIT
-// par WX86_NET_REFUSED, et l'embarqueur ecrit ou il veut.
+// The exit lock, applied AFTER routing: it only sees what would REALLY go
+// out on the wire. Returns true if the destination is allowed. A refusal
+// touches NO host socket: no TCP handshake started, no byte sent. The
+// engine logs nothing itself (it stays silent) — it reports via
+// WX86_NET_REFUSED, and the embedder logs it however it wants.
 static bool wx86_net_allow(Cpu* c, uint32_t handle, int fd,
                            uint32_t ip_be, uint16_t port, int kindRefus) {
-    // La DECISION et ses compteurs vivent dans net_guard.cpp (unite feuille) ;
-    // ici on ne garde que la maniere de DIRE le refus, qui elle a besoin de
-    // cet etage-ci : le code Winsock et l'observateur.
+    // The DECISION and its counters live in net_guard.cpp (a leaf unit);
+    // this keeps only how to REPORT a refusal, which needs this layer's own
+    // Winsock error code and observer.
     if (wx86_net_addr_allowed(ip_be)) return true;
-    wx86_net_set_last_error(10013);   // WSAEACCES — le code Winsock d'un envoi interdit
+    wx86_net_set_last_error(10013);   // WSAEACCES — the Winsock code for a forbidden send
     wx86_net_notify(WX86_NET_REFUSED, c, handle, fd, ip_be, ip_be, port,
                     kindRefus, 10013, nullptr, 0);
     return false;
@@ -218,18 +174,17 @@ int wx86_connect_wait(int fd, int timeout_ms, uint32_t* outWsaErr) {
     return -1;
 }
 
-// SO_RCVTIMEO par fd hote (ms ; absent/0 = attente infinie, comme Windows).
+// SO_RCVTIMEO per host fd (ms; absent/0 = wait forever, as on Windows).
 static std::map<int, uint32_t> g_rcvTimeoMs;
 
 int wx86_recv_blocking(int fd, void* buf, uint32_t len, bool blocking, int wait_ms, uint32_t* outWsaErr) {
     ssize_t n = ::recv(fd, buf, len, 0);
-    // Semantique Windows d'une socket BLOQUANTE (13/09) : recv attend
-    // INDEFINIMENT, sauf SO_RCVTIMEO pose, auquel cas il echoue en
-    // WSAETIMEDOUT (10060). Avant, l'attente etait coupee a 15 s et rendait
-    // WSAEWOULDBLOCK — un code qu'une socket bloquante Windows ne rend jamais.
-    // L'attente se fait par tranches GIL relache ; elle s'interrompt si le
-    // reseau est coupe (arret, verrou) ou si la socket est fermee ailleurs.
-    // `wait_ms` > 0 impose une borne explicite a l'appelant (0 = politique Windows).
+    // A BLOCKING Windows socket's semantics: recv waits INDEFINITELY unless
+    // SO_RCVTIMEO is set, in which case it fails with WSAETIMEDOUT (10060) —
+    // never WSAEWOULDBLOCK, a code a blocking Windows socket never returns.
+    // The wait happens in GIL-released slices; it stops early if networking
+    // gets disabled (shutdown, lock) or the socket is closed elsewhere.
+    // `wait_ms` > 0 imposes an explicit caller bound (0 = Windows policy).
     if (n < 0 && blocking && (errno == EAGAIN || errno == EWOULDBLOCK)) {
         uint32_t limit = wait_ms > 0 ? (uint32_t)wait_ms : 0;
         if (!limit) { auto it = g_rcvTimeoMs.find(fd); if (it != g_rcvTimeoMs.end()) limit = it->second; }
@@ -269,10 +224,9 @@ void win32_shims_wsock32_install(Bridge& br) {
     // lambda helper (it looks for a direct br.register_shim(_ordinal) call
     // inside a helper's own body); a helper that calls another helper
     // resolves to zero targets and every key it registers vanishes
-    // SILENTLY from the safety-net table. Hit exactly this bug once while
-    // writing this file (a `BOTH(ord,...)` wrapping `REGORD(dll,ord,...)`
-    // twice) — caught only because shim_seq.sh's ENSEMBLE check is run
-    // before every commit, not because the mistake was otherwise visible.
+    // SILENTLY from the safety-net table — e.g. a `BOTH(ord,...)` wrapping
+    // `REGORD(dll,ord,...)` twice. This is caught only by shim_seq.sh's
+    // ENSEMBLE check running before every commit, not by visual inspection.
     auto REGORD = [&](const char* dll, uint32_t ord, uint32_t ac, std::function<uint32_t(Cpu&)> fn) {
         Shim s;
         s.argc = ac;
@@ -334,7 +288,7 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WSOCK32.dll", 57, 2, gethostname_fn);
     REGORD("WS2_32.dll", 57, 2, gethostname_fn);
 
-    // --- real generic socket primitives (2026-09-11) ------------------
+    // --- real generic socket primitives ---------------------------------
     auto closesocket_fn = [](Cpu& c) -> uint32_t {
         if (!wx86_net_enabled()) return 0u;
         int fd = wx86_sock_fd(c.arg(0));
@@ -407,7 +361,7 @@ void win32_shims_wsock32_install(Bridge& br) {
         if (lvl == 0xffff && opt == 0x0008) {   // SO_KEEPALIVE
             int on = v.size() >= 4 ? *(int*)v.data() : 1;
             ::setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &on, sizeof on);
-        } else if (lvl == 0xffff && opt == 0x1006) {   // SO_RCVTIMEO (DWORD ms, 0 = infini)
+        } else if (lvl == 0xffff && opt == 0x1006) {   // SO_RCVTIMEO (DWORD ms, 0 = infinite)
             g_rcvTimeoMs[fd] = v.size() >= 4 ? *(uint32_t*)v.data() : 0u;
         } else if (lvl == 6 && opt == 1) {      // TCP_NODELAY
             int on = v.size() >= 4 ? *(int*)v.data() : 1;
@@ -445,23 +399,15 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WS2_32.dll", 10, 3, ioctlsocket_fn);
 
     // --- address helpers: inet_addr / inet_ntoa / gethostbyname ------------
-    // Ils rendent des donnees a l'invite, donc ils ont besoin d'ecrire dans
-    // la memoire INVITEE : c'est ce qui les retenait chez le consommateur,
-    // qui hebergeait l'allocateur de brouillon. Cet allocateur appartient
-    // maintenant au moteur (guest_scratch.h), et la raison tombe : rien
-    // dans ces trois fonctions ne connait D2 ni Battle.net.
+    // These return data to the guest, so they need to write into GUEST
+    // memory (guest_scratch.h).
     //
-    // Les ordinaux des deux DLL ne coincident PAS ici, contrairement au
-    // reste du fichier :
-    //        WSOCK32 : 10=inet_addr 11=inet_ntoa 12=ioctlsocket
-    //        WS2_32  : 10=ioctlsocket 11=inet_addr 12=inet_ntoa
-    // D'ou quatre inscriptions explicites, chacune sur le BON ordinal. Le
-    // consommateur plantait auparavant, par effet de bord de son helper a
-    // double inscription, un inet_addr transitoire sur WS2_32!#10 et un
-    // inet_ntoa transitoire sur WS2_32!#11, aussitot ecrases par la bonne
-    // fonction. Ces deux inscriptions mortes disparaissent : la table
-    // EFFECTIVE est inchangee (meme corps gagnant partout), seule la
-    // multiplicite de ces deux cles retombe de 2 a 1.
+    // Unlike the rest of this file, the two DLLs' ordinals do NOT match
+    // here:
+    //        WSOCK32: 10=inet_addr 11=inet_ntoa 12=ioctlsocket
+    //        WS2_32:  10=ioctlsocket 11=inet_addr 12=inet_ntoa
+    // Hence four explicit registrations below, each on its correct ordinal,
+    // instead of the usual same-ordinal-both-DLLs pattern.
     auto inet_addr_fn = [](Cpu& c) -> uint32_t {
         std::string s = wx86_guest_cstr(c, c.arg(0));
         in_addr a;
@@ -471,17 +417,13 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WSOCK32.dll", 10, 1, inet_addr_fn);
     REGORD("WS2_32.dll", 11, 1, inet_addr_fn);
 
-    // inet_ntoa(in_addr) -> char* : la chaine doit survivre au retour, donc
-    // elle vit dans le brouillon invite. UNE entree de cache par adresse
-    // distincte : sans cela chaque appel fuirait ~16 octets definitivement
-    // (l'allocateur ne libere jamais — cf. le contrat de guest_scratch.h), et
-    // un client qui formate une adresse a chaque image finirait par epuiser
-    // la plage. Le consommateur rendait ici une chaine "127.0.0.1" ECRITE EN
-    // DUR, quel que soit l'argument : c'etait un bouchon, pas une
-    // implementation, et sur l'ordinal WSOCK32 uniquement — l'ordinal WS2
-    // avait deja la vraie. Les deux sont desormais la vraie.
+    // inet_ntoa(in_addr) -> char*: the string must survive past return, so it
+    // lives in guest scratch. ONE cache entry per distinct address: without
+    // it, every call would permanently leak ~16 bytes (the allocator never
+    // frees — see guest_scratch.h's contract), and a client formatting an
+    // address every frame would eventually exhaust the arena.
     auto inet_ntoa_fn = [](Cpu& c) -> uint32_t {
-        static std::map<uint32_t, uint32_t> cache;   // addr reseau -> adresse invitee
+        static std::map<uint32_t, uint32_t> cache;   // network addr -> guest address
         const uint32_t a = c.arg(0);
         auto it = cache.find(a);
         if (it != cache.end()) return it->second;
@@ -495,16 +437,13 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WSOCK32.dll", 11, 1, inet_ntoa_fn);
     REGORD("WS2_32.dll", 12, 1, inet_ntoa_fn);
 
-    // gethostbyname(name) -> hostent* : meme histoire, en plus gros. La
-    // structure rendue (hostent + liste d'adresses + liste d'alias + copie du
-    // nom) faisait CINQ allocations definitives A CHAQUE APPEL chez le
-    // consommateur. Un client qui re-resout son serveur a chaque tentative de
-    // connexion marchait donc droit vers l'epuisement de la plage — c'est
-    // exactement le defaut que le commentaire C6 de misc() signalait sans le
-    // corriger. Corrige ici : une entree de cache par nom, la structure est
-    // batie UNE fois. Le cache ne reflete volontairement pas les changements
-    // DNS : ces structures Winsock ont de toute facon une duree de vie
-    // processus, c'est ce que leur contrat autorise.
+    // gethostbyname(name) -> hostent*: same story, bigger. The returned
+    // structure (hostent + address list + alias list + name copy) made FIVE
+    // permanent allocations per call — a client that re-resolves its server
+    // on every connection attempt would run straight to arena exhaustion.
+    // Fixed with one cache entry per name; the structure is built ONCE. The
+    // cache deliberately does not track DNS changes: these Winsock
+    // structures have process lifetime anyway, which their contract allows.
     auto gethostbyname_fn = [](Cpu& c) -> uint32_t {
         if (!wx86_net_enabled()) return 0u;
         const std::string host = wx86_guest_cstr(c, c.arg(0));
@@ -512,9 +451,10 @@ void win32_shims_wsock32_install(Bridge& br) {
         auto it = cache.find(host);
         if (it != cache.end()) return it->second;
         const uint32_t addr = wx86_net_resolve(host.c_str());
-        // Le moteur est muet : l'echec de resolution part a l'observateur,
-        // pas dans un journal qu'il ne connait pas. C'est le premier echec
-        // attendu sur une plateforme embarquee, il ne doit pas etre invisible.
+        // The engine stays silent: a resolution failure goes to the
+        // observer, not to a log it has no notion of. This is often the
+        // first failure to show up on an embedded platform, and it must
+        // not stay invisible.
         if (!addr) {
             wx86_net_set_last_error(11001);   // WSAHOST_NOT_FOUND
             wx86_net_notify(WX86_NET_RESOLVE, &c, 0, -1, 0, 0, 0, -1, 11001,
@@ -530,7 +470,7 @@ void win32_shims_wsock32_install(Bridge& br) {
         const uint32_t he = wx86_scratch_alloc(16);
         if (!namep || !addrbuf || !addrlist || !aliases || !he) {
             wx86_net_set_last_error(11001);
-            return 0u;   // brouillon epuise : echouer proprement, pas ecrire en 0
+            return 0u;   // scratch exhausted: fail cleanly, don't write at address 0
         }
         c.write_u32(addrbuf, addr);
         c.write_u32(addrlist, addrbuf);
@@ -539,8 +479,8 @@ void win32_shims_wsock32_install(Bridge& br) {
         c.write_u32(he + 0, namep);
         c.write_u32(he + 4, aliases);
         uint16_t at = 2 /*AF_INET*/, ln = 4;
-        c.write(he + 8, &at, 2);     // h_addrtype et h_length sont des SHORT
-        c.write(he + 10, &ln, 2);    // accoles, pas deux mots de 32 bits
+        c.write(he + 8, &at, 2);     // h_addrtype and h_length are SHORTs
+        c.write(he + 10, &ln, 2);    // packed together, not two 32-bit words
         c.write_u32(he + 12, addrlist);
         cache[host] = he;
         wx86_net_notify(WX86_NET_RESOLVE, &c, 0, -1, addr, addr, 0, 0, 0,
@@ -590,8 +530,8 @@ void win32_shims_wsock32_install(Bridge& br) {
                 c.write(c.arg(1), sa, 16);
             }
         }
-        // Verrou EN AVAL de la route : c'est la destination reellement composee
-        // qui est jugee, et un refus n'a AUCUN effet de bord (aucun SYN ne part).
+        // Lock applied AFTER routing: the destination actually dialed is
+        // what's judged, and a refusal has NO side effect (no SYN goes out).
         if (!wx86_net_allow(&c, c.arg(0), fd, rip, dport, WX86_NET_CONNECT))
             return 0xFFFFFFFFu;
         wx86_net_notify(WX86_NET_CONNECT, &c, c.arg(0), fd, dip, rip, dport, 0, 0, nullptr, 0);
@@ -649,14 +589,9 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WSOCK32.dll", 19, 4, send_fn);
     REGORD("WS2_32.dll", 19, 4, send_fn);
 
-    // ---- sendto (#20) / recvfrom (#17) — LE TROU UDP ----------------------
-    // Ces deux ordinaux n'ont JAMAIS ete inscrits, ni ici ni chez le
-    // consommateur : la table allait 1-16, 19, 21-23, 52, 57, 101, 111, 112,
-    // 115, 116 et sautait 17 et 20. Un appel tombait donc sur le shim par
-    // defaut — arret controle ET derive ESP, puisque l'argc est inconnu. Or
-    // tout protocole qui fait un test d'accessibilite UDP passe par la.
-    // L'argc est la seule chose qui compte ici : un shim stdcall mal dimensionne
-    // decale la pile a CHAQUE appel.
+    // ---- sendto (#20) / recvfrom (#17): real bodies, not the default shim -
+    // argc is what matters here: a wrong stdcall argc shifts the stack on
+    // EVERY call.
     //   int sendto  (SOCKET, const char* buf, int len, int flags,
     //                const struct sockaddr* to, int tolen);        -> 6
     //   int recvfrom(SOCKET, char* buf, int len, int flags,
@@ -670,8 +605,8 @@ void win32_shims_wsock32_install(Bridge& br) {
         if (pto) c.read(pto, sa, tolen > 16 ? 16 : (tolen ? tolen : 16));
         uint32_t dip; std::memcpy(&dip, sa + 4, 4);
         const uint16_t dport = (uint16_t)((sa[2] << 8) | sa[3]);
-        // MEME route generique que connect : un banc local doit pouvoir
-        // detourner un test UDP sans toucher au jeu.
+        // SAME generic route as connect: a local test rig must be able to
+        // redirect a UDP probe without touching the guest.
         uint32_t rip = dip;
         if (g_routeIp) {
             const uint8_t hi = dip & 0xff;
@@ -680,7 +615,7 @@ void win32_shims_wsock32_install(Bridge& br) {
             }
         }
         if (!wx86_net_allow(&c, c.arg(0), fd, rip, dport, WX86_NET_SEND))
-            return 0xFFFFFFFFu;               // rien ne part
+            return 0xFFFFFFFFu;               // nothing goes out
         std::vector<uint8_t> b(len);
         if (len) c.read(c.arg(1), b.data(), len);
         ssize_t n = ::sendto(fd, b.data(), b.size(), MSG_NOSIGNAL,
@@ -703,8 +638,8 @@ void win32_shims_wsock32_install(Bridge& br) {
         sockaddr_in sa{}; socklen_t sl = sizeof sa;
         ssize_t n = ::recvfrom(h.fd, b.data(), b.size(), 0, (sockaddr*)&sa, &sl);
         if (n < 0 && !h.nonblock && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            // Attente BORNEE (3 s) : un test UDP sans reponse doit degrader
-            // proprement, jamais figer le runtime.
+            // BOUNDED wait (3s): a UDP probe that gets no response must
+            // degrade gracefully, never freeze the runtime.
             pollfd pf{h.fd, POLLIN, 0};
             wx86_poll_gilfree(&pf, 3000);
             sl = sizeof sa;
@@ -716,12 +651,12 @@ void win32_shims_wsock32_install(Bridge& br) {
             wx86_net_notify(WX86_NET_RECV, &c, c.arg(0), h.fd, 0, 0, h.port, -1, we, nullptr, 0);
             return 0xFFFFFFFFu;
         }
-        // Defense en profondeur : sous verrou, un datagramme VENANT d'une
-        // adresse non privee est jete — sinon le verrou ne tiendrait que la
-        // moitie de la conversation.
+        // Defense in depth: under the lock, a datagram ARRIVING FROM a
+        // non-private address is dropped too — otherwise the lock would
+        // only cover half the conversation.
         const uint32_t sip = (uint32_t)sa.sin_addr.s_addr;
         if (!wx86_net_allow(&c, c.arg(0), h.fd, sip, (uint16_t)ntohs(sa.sin_port), WX86_NET_RECV)) {
-            wx86_net_set_last_error(10035);   // WSAEWOULDBLOCK : « rien pour toi »
+            wx86_net_set_last_error(10035);   // WSAEWOULDBLOCK: "nothing for you"
             return 0xFFFFFFFFu;
         }
         if (n > 0) c.write(c.arg(1), b.data(), (uint32_t)n);

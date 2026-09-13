@@ -1,10 +1,9 @@
-// src/runtime/win32_shims_misc.cpp — see win32_shims_misc.h. Split out of
-// d2vita's tools/rt_boot.cpp "couverture complete des imports" catch-all
-// section (2026-09-10): DirectDraw/Bink/Smacker/ijl11 stubs, all constant
-// "unavailable"/"not implemented" returns with zero state and zero
-// dependency on any d2vita-hosted helper. The surrounding catch-all section
-// (KERNEL32/USER32/GDI32/ADVAPI32/IMM32 "solde", glide3x, d2vhost, VERSION/
-// PSAPI module introspection) stays d2vita-side — not classified tonight.
+// src/runtime/win32_shims_misc.cpp — see win32_shims_misc.h. DirectDraw/
+// Bink/Smacker/ijl11 stubs: all constant "unavailable"/"not implemented"
+// returns with zero state and zero dependency on any consumer-hosted
+// helper. The surrounding catch-all group (remaining KERNEL32/USER32/GDI32/
+// ADVAPI32/IMM32 entries, glide3x, VERSION/PSAPI module introspection)
+// stays on the consumer side.
 #include "win32_shims_misc.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
@@ -24,7 +23,7 @@ void win32_shims_misc_install(Bridge& br){
     // different renderer, same contract as a machine with no DirectDraw
     // driver installed.
     REG("DDRAW.dll","DirectDrawCreate",3,[](Cpu&){ return 0x80004005u; });
-    REG("DDRAW.dll","DirectDrawEnumerateA",2,[](Cpu&){ return 0u; });             // DD_OK, aucun device enumere
+    REG("DDRAW.dll","DirectDrawEnumerateA",2,[](Cpu&){ return 0u; });             // DD_OK, no device enumerated
 
     // Bink/Smacker: NULL "player unavailable" — a caller that handles a
     // missing codec gracefully skips the video cleanly.
@@ -45,11 +44,11 @@ void win32_shims_misc_install(Bridge& br){
     REG("smackw32.dll","_SmackToBuffer@28",7,[](Cpu&){ return 0u; });
 
     // ijl11 (Intel JPEG, by ordinal): clean error path.
-    REGORD("ijl11.dll",2,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlFree   -> erreur propre
+    REGORD("ijl11.dll",2,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlFree   -> clean error
     REGORD("ijl11.dll",3,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlRead
-    REGORD("ijl11.dll",5,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlInit? (echec -> chemin d'erreur)
+    REGORD("ijl11.dll",5,1,[](Cpu&){ return 0xFFFFFFFEu; });                      // ijlInit? (failure -> error path)
 
-    // IMM32 : IME absent, reponses coherentes.
+    // IMM32: no IME present, consistent responses.
     REG("IMM32.dll","ImmGetContext",1,[](Cpu&){ return 0u; });
     REG("IMM32.dll","ImmReleaseContext",2,[](Cpu&){ return 1u; });
     REG("IMM32.dll","ImmIsIME",1,[](Cpu&){ return 0u; });

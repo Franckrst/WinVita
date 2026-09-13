@@ -23,26 +23,23 @@
 /* Registry of live blocks: munmap frees whole blocks by exact base (that is
  * the only pattern custommem.c uses), and the cache-sync needs base+uid. */
 #define DYN86_MAXBLK 256
-/* JOURNAL DU MOTEUR (platform/vita_host.h). Declare ICI et non par inclusion :
- * cette unite est du C, l'en-tete est du C++. Reference FORTE — le symbole est
- * defini par la meme bibliotheque, sous la meme garde de cible.
- *
- * Avant : une reference FAIBLE vers `d2vita_progress_c`, le nom du PREMIER
- * consommateur, testee a chaque appel. Un portage au prefixe different
- * n'obtenait RIEN, sans erreur de lien. Un echec d'allocation DOIT atteindre le
- * journal : sur materiel il n'y a pas de stderr, et un MAP_FAILED silencieux se
- * lit « l'application se ferme au lancement » (2026-08-24). */
+/* Engine log sink (platform/vita_host.h). Declared HERE rather than
+ * included: this unit is C, the header is C++. STRONG reference -- the
+ * symbol is defined by the same library under the same target guard. A weak
+ * reference tied to one consumer's name would silently do nothing for a
+ * differently-named port, and a failed allocation MUST reach the log: there
+ * is no stderr on hardware, and a silent MAP_FAILED just looks like the app
+ * closing at launch. */
 void wx86_vita_progress_c(const char* msg);
-/* `pool` : sous-bloc de la piscine JIT. L'uid reste celui de la PISCINE — la
- * synchronisation du domaine VM (dyn86_vita_clear_cache) en a besoin, et un
- * uid bidon y faisait echouer le sync : le code emis ne devenait jamais
- * executable et le demarrage mourait juste apres la reservation (constate). */
+/* `pool`: sub-block of the JIT pool. `uid` stays the POOL's uid -- VM-domain
+ * sync (dyn86_vita_clear_cache) needs it, and a placeholder uid there makes
+ * the sync fail silently: emitted code never becomes executable and boot
+ * dies right after the pool is reserved. */
 typedef struct { void* base; size_t size; SceUID uid; int vm; int pool; } Blk;
 static Blk g_blk[DYN86_MAXBLK];
-/* Registry lock (audit T12 — allocator-path hardening, same commit as the
- * custommem mutex_dynarec): mmap() is reached under TWO different upstream
- * locks — customMalloc holds mutex_blocks (RW blocks), AllocDynarecMap holds
- * mutex_dynarec (VM blocks) — so two threads can be in here CONCURRENTLY.
+/* Registry lock: mmap() is reached under TWO different upstream locks --
+ * customMalloc holds mutex_blocks (RW blocks), AllocDynarecMap holds
+ * mutex_dynarec (VM blocks) -- so two threads can be in here CONCURRENTLY.
  * The slot scan + insert (and munmap's find + clear) mutate g_blk with no
  * lock of their own: a slot collision unregisters a live block, and a block
  * missing from the registry makes dyn86_vita_clear_cache return WITHOUT
@@ -51,90 +48,61 @@ static Blk g_blk[DYN86_MAXBLK];
  * per-translation cache sync). pte handles the lazy-init sentinel. */
 static pthread_mutex_t g_blk_mx = PTHREAD_MUTEX_INITIALIZER;
 
-/* --- VM domain: PER-THREAD open (console root cause, session 3 coredumps) ---
- * The 14 rtc+3s "allocBlock crashes" of audit T12 §11 re-read: BOTH parsed
- * dumps show a byte-perfect HEALTHY blockmark chain (tail free mark =
- * chunk_size - offset - 2 marks, exact: 0x1ffe90 @+0x160 and 0x1bd230
- * @+0x42dc0) and the fault is the FIRST WRITE (strb [r2,#7], allocBlock's
- * s->next.fill=1) into a mapped VM chunk. That is a write-PERMISSION Data
- * abort, not corruption: sceKernelOpenVMDomain grants VM-domain write access
- * via the DACR, which lives in each thread's saved CPU context — the open is
- * effective for the CALLING thread. The old code opened it ONCE globally
- * (g_vm_open), i.e. only for whichever thread performed the first VM mmap
- * (the boot main). Under coop a single thread ever writes JIT memory: stable
- * for years. Under D2SCHED=native, the first pte runner that translates
- * (Game.exe's first threads, ~rtc+3s) writes the arena with a virgin DACR ->
- * deterministic Data abort in allocBlock. qemu: real kernel mmap, no domain.
- * Vita3K: no DACR emulation. Only the console fires it — exactly the
- * observed tier split. Fix: every thread that may WRITE JIT memory calls
- * this before its first write (mmap covers the allocating thread; the
- * native scheduler calls it at main+runner entry). Idempotent per thread;
- * rc logged on first failure only (a repeat-open rc quirk must not spam). */
-/* VERDICT CONSOLE session 4 (2026-08-29, audit T12 §13.1/§13.2) : ce remede
- * NE MARCHE PAS et le journal de la console le dit lui-meme. Le PREMIER appel
- * du processus rend 0 ; TOUT appelant suivant (les runners pte qui traduisent)
- * rend rc=0x80010058 (famille errno SCE, 0x58 = 88 = ENOSYS), et le crash
- * rtc+3s est INCHANGE, au motif identique (chaine blockmark saine a l'octet
- * pres, ldrb reussi / strb refuse au meme octet). Le diagnostic de §12.1
- * (faute de PERMISSION, DACR) tient ; c'est le mecanisme choisi ici qui tombe :
- * sceKernelOpenVMDomain semble n'accepter qu'UNE ouverture par PROCESSUS.
- * A trancher AVANT tout autre correctif, par une sonde de deux lignes : le main
- * appelle sceKernelOpenVMDomain() DEUX fois et journalise les deux rc (un second
- * refus depuis le MEME fil = one-shot par processus ; un second succes = c'est
- * bien une affaire de fil). Pistes ensuite : fil traducteur unique dedie,
- * paire Close/Open sous verrou (attention : Close rend les memblocks VM NON
- * EXECUTABLES pour tout le processus), ou double mapping RW/RX.
- * Ni qemu (pas de domaine) ni Vita3K (HLE rend 0 a tout fil) ne voient ce
- * point : seule la console juge. La fonction reste en place — elle est
- * inoffensive et c'est elle qui IMPRIME le refus, la seule mesure qu'on ait.
- * CORRECTION (session 6, audit §16) : l'hypothese « une ouverture par
- * PROCESSUS » de ce paragraphe est FAUSSE, la sonde l'a refutee — c'est une
- * bascule a etat RE-ARMABLE dont la portee est le FIL. Voir le bloc suivant. */
-/* --- BRACKET Close+Open : DEFAUT ON, kill-switch D2_VMBRACKET=0 -----------
- * Recherche du 2026-08-29 (docs/audit T12 §14) : le commentaire du header
- * vitasdk sur ce couple de fonctions est INVERSE. Les deux seules sources
- * primaires disent l'inverse et sont d'accord entre elles :
- *   - gist yifanlu 43a35324f3b76391cd15c6b96ae8b831 (auteur HENkaku/vitasdk,
- *     l'exemple dynarec de reference) : Open = « set domain to be writable by
- *     user », Close = « set domain back to read-only » ;
- *   - vita-luajit (hyln9), src/lj_mcode.c, le seul VRAI JIT Vita publie :
+/* --- VM domain: PER-THREAD open ---
+ * sceKernelOpenVMDomain grants VM-domain write access via the DACR, which
+ * lives in each thread's saved CPU context -- the open is effective only for
+ * the CALLING thread. Opening it ONCE globally covers only whichever thread
+ * performed the first VM mmap (the boot main). Under cooperative scheduling
+ * a single thread ever writes JIT memory, so that was stable; under a native
+ * scheduler, the first worker thread that translates code writes the arena
+ * with a virgin DACR and takes a deterministic write-permission Data abort
+ * in allocBlock -- not corruption, since the fault is the very first write
+ * into an otherwise healthy, freshly mapped VM chunk. qemu (real kernel
+ * mmap, no domain) and Vita3K (no DACR emulation) never exercise this path;
+ * only real hardware does.
+ * Fix: every thread that may WRITE JIT memory calls this before its first
+ * write (mmap covers the allocating thread; the native scheduler calls it
+ * at main+runner entry). Idempotent per thread; a failure is logged only
+ * once per thread to avoid log spam from a repeat-open quirk. */
+/* --- BRACKET Close+Open: DEFAULT ON, kill switch D2_VMBRACKET=0 ---------
+ * The VitaSDK header doc comment for this function pair is backwards. Two
+ * independent primary sources agree with each other, and against the header:
+ *   - the reference HENkaku/vitasdk dynarec gist: Open = "set domain to be
+ *     writable by user", Close = "set domain back to read-only";
+ *   - vita-luajit (hyln9) src/lj_mcode.c, the only real published Vita JIT:
  *       mcode_setprot(..., MCPROT_RX)  -> sceKernelCloseVMDomain()
  *       mcode_setprot(..., MCPROT_RWX) -> sceKernelOpenVMDomain()
- * Donc Open = RWX (sur-ensemble), Close = RX : « ldrb OK puis strb fautant au
- * meme octet » (le crash de allocBlock, audit §13.1) est EXACTEMENT la
- * signature d'un domaine ferme. Et vita-luajit appelle la PAIRE des milliers
- * de fois : la bascule est l'usage NOMINAL, « ouvrir une fois et garder
- * ouvert » (notre choix historique) est l'exception.
- * MESURE SUR CONSOLE REELLE (session 6, audit §16, decision utilisateur §17) :
- * la sonde D2_VMPROBE a tranche l'arbre §14.9 sur la branche A2 / ligne 1 —
- * open#1=0, open#2=0x80010058 (deja ouvert), close=0, open#3=0, et les phases
- * F (fil Sce), G (fil pte) et G2 (le main, sans se re-armer, APRES les
- * brackets de F et G) ecrivent TOUTES OK. Donc : la permission d'ecriture VM
- * (DACR) a pour portee le FIL et non le processus ni le coeur (phase H), et
- * Close ne desarme QUE son appelant — le bracket n'ouvre aucune fenetre
- * mortelle pour les autres fils. Arme, il donne sur matériel un solo natif
- * complet (premiere image a 283 s, CLEAN EXIT frame=600), un soak 9000 images
- * sans un seul Halt, et un FAMINETEST PASS (detections=4). Sans lui, le natif
- * meurt a rtc+3 s sur le premier fil traducteur.
- * D'ou le DEFAUT ON (convention D2_FAMINE, cf. tools/rt_boot.cpp : absence de
- * la variable = arme, kill-switch explicite a '0'). Le mode historique
- * « ouverture unique » n'est conserve QUE comme kill-switch d'A/B sur
- * matériel : D2_VMBRACKET=0. Les deux modes s'estampillent dans
- * boot_progress — jamais de changement de mode silencieux.
- * Ni qemu (pas de domaine) ni Vita3K (HLE rend 0 a tout fil) ne voient ce
- * knob : seule la console juge, ce fichier n'est compile que pour __vita__.
- * Verrou obligatoire autour de la paire : sans lui, deux fils qui se croisent
- * (Close/Close/Open/Open) laissent le second Open refuse et le premier fil
- * non arme. */
+ * So Open = RWX (superset), Close = RX: "ldrb OK, then strb faulting at the
+ * same byte" is exactly the signature of a closed domain. vita-luajit calls
+ * the pair thousands of times -- toggling is the NOMINAL usage; "open once
+ * and keep open" (this file's original approach) is the exception.
+ *
+ * Measured on real hardware: the DACR write permission is scoped to the
+ * THREAD, not the process or the core, and Close only disarms its own
+ * caller -- so bracketing Close+Open around a write opens no unsafe window
+ * for other threads. Armed, this lets the native scheduler run stably;
+ * without it, a translating worker thread dies shortly after start.
+ *
+ * Hence DEFAULT ON (D2_FAMINE convention, see tools/rt_boot.cpp: the
+ * variable's ABSENCE means armed; an explicit '0' is the kill switch). The
+ * original "open once" mode is kept only as an A/B kill switch on hardware:
+ * D2_VMBRACKET=0. Both modes stamp themselves in boot_progress -- never a
+ * silent mode change.
+ * Neither qemu (no domain) nor Vita3K (HLE returns 0 for every thread)
+ * exercise this knob: only real hardware can judge it, which is why this
+ * file only compiles for __vita__.
+ * A lock around the pair is mandatory: without it, two threads racing
+ * (Close/Close/Open/Open) can leave the second Open refused and the first
+ * thread unarmed. */
 static pthread_mutex_t g_vmdom_mx = PTHREAD_MUTEX_INITIALIZER;
 
 void dyn86_vita_open_vm_thread(void) {
     static __thread int t_vm_open = 0;
     if (t_vm_open) return;
     t_vm_open = 1;
-    static int bracket = -1;   /* course benigne : deux fils calculent la meme valeur */
-    /* Defaut ON : l'ABSENCE de la variable arme le bracket (convention
-     * D2_FAMINE). Seul un '0' explicite retombe sur le mode historique. */
+    static int bracket = -1;   /* benign race: both threads compute the same value */
+    /* Default ON: the variable's ABSENCE arms the bracket (D2_FAMINE
+     * convention). Only an explicit '0' falls back to the original mode. */
     if (bracket < 0) { const char* e = getenv("WX86_VMBRACKET"); if (!e) e = getenv("D2_VMBRACKET"); bracket = (e && *e == '0') ? 0 : 1; }
     int rcC = 0, rc;
     if (bracket) {
@@ -149,10 +117,9 @@ void dyn86_vita_open_vm_thread(void) {
     if (!announced) {
         announced = 1;
         {
-            /* Estampille dans LES DEUX SENS (doctrine : jamais de changement
-             * de mode silencieux) — un journal dit toujours quel mode a
-             * tourne. Libelle conditionnel (review) : un rc<0 ne doit pas se
-             * lire « arme » ni « active ». */
+            /* Stamp BOTH outcomes (doctrine: never a silent mode change) --
+             * the log always states which mode ran. Wording is conditional:
+             * an rc<0 must not read as "armed" or "active". */
             char m[160];
             snprintf(m, sizeof m,
                      rc < 0 ? (bracket ? "vm-domain: BRACKET arme mais EN ECHEC (premier rc=0x%08x)"
@@ -179,60 +146,55 @@ void dyn86_vita_open_vm_thread(void) {
  * perf collapse (fill_fail storm -> retranslation every visit). Any future
  * budget reshuffle must keep a floor >= the measured in-game peak + margin. */
 unsigned int dyn86_jit_cur = 0;   /* bytes in VM (PROT_EXEC) blocks */
-/* ⚡ 08/09 : PISCINE JIT RESERVEE AU DEMARRAGE.
- * Le probleme corrige ici : le cache JIT et le tas newlib puisaient dans la
- * MEME reserve libre, chacun grandissant de son cote. Le dernier qui demande
- * perd — et quand c'est le JIT, le fil invite MEURT, parce qu'il n'y a pas
- * d'interpreteur dans ce build (shim_impl.c : Run() met quit=1). Le jeu
- * mourait donc apres un temps variable selon ce que le joueur explorait.
- * On reserve desormais la piscine EN UNE FOIS au premier besoin, puis on la
- * sous-alloue. Consequences :
- *   - le tas ne peut plus affamer le JIT, ni l'inverse ;
- *   - un budget insuffisant se voit AU DEMARRAGE, pas au bout de dix minutes ;
- *   - box86 ne rend jamais ses morceaux (FreeDynarecMap ne libere qu'A
- *     L'INTERIEUR d'un morceau), donc une allocation par bond est exactement
- *     equivalente a l'existant, sans la competition.
- * Si la reservation echoue, on retombe sur l'ancien chemin bloc-par-bloc :
- * aucune regression possible. */
-unsigned int  dyn86_jitpool_size = 0, dyn86_jitpool_used = 0;   /* pour la jauge, somme des segments */
+/* JIT POOL RESERVED AT STARTUP.
+ * The JIT cache and the newlib heap used to draw from the SAME free-memory
+ * reserve, each growing independently. Whichever asked last would lose --
+ * and when it's the JIT, the guest thread DIES, since this build has no
+ * interpreter fallback (shim_impl.c: Run() sets quit=1).
+ * The pool is now reserved IN ONE SHOT on first need, then sub-allocated:
+ *   - the heap can no longer starve the JIT, or vice versa;
+ *   - an insufficient budget shows up AT STARTUP, not ten minutes in;
+ *   - box86 never returns its chunks (FreeDynarecMap only frees WITHIN a
+ *     chunk), so one bump allocation is exactly equivalent to the previous
+ *     behavior, minus the race.
+ * If the reservation fails, this falls back to the old block-by-block path:
+ * no regression possible. */
+unsigned int  dyn86_jitpool_size = 0, dyn86_jitpool_used = 0;   /* for the gauge, summed across segments */
 unsigned int dyn86_rw_cur  = 0;   /* bytes in plain RW blocks */
 
-/* Piscine JIT en PLUSIEURS SEGMENTS de 16 Mio. ⚡ 12/09 : un bloc
- * sceKernelAllocMemBlockForVM plus grand (teste a 17 et 29 Mo, voie 5.2 de
- * jit_budget_20260908.md) est refuse par le noyau (sce=0x80024B0B,
- * SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW) — 16 Mio est un PLAFOND NOYAU PAR BLOC
- * VM, pas un choix de ce projet. Un seul bloc plus gros n'existe donc pas ;
- * plusieurs blocs de 16 Mio, si. Sur par construction : verifie le 13/09
- * (dynarec_arm_jmpnext.c: CreateJmpNext = LDR_literal+BX ; D2_CALLRET
- * (dynarec_arm_helper.c: ret_to_epilog/retn_to_epilog) = BX apres
- * verification ou table de sauts + BX) — TOUTE liaison entre blocs traduits
- * est un branchement INDIRECT sur adresse 32 bits complete, jamais un B/BL
- * direct a portee limitee. L'eloignement entre segments ne coute donc rien :
- * meme instruction, meme cout, que la cible soit a cote ou a l'autre bout de
- * l'espace d'adressage. Voir docs/audit/repartition_ram_20260912.md.
+/* JIT pool split into MULTIPLE 16 MiB segments. A single larger
+ * sceKernelAllocMemBlockForVM request is refused by the kernel
+ * (sce=0x80024B0B, SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW): 16 MiB is a KERNEL
+ * CAP PER VM BLOCK, not a choice made by this project. So one larger block
+ * doesn't exist as an option; several 16 MiB blocks do.
+ * Safe by construction: every link between translated blocks is an INDIRECT
+ * branch on a full 32-bit address (CreateJmpNext = LDR_literal+BX;
+ * D2_CALLRET's ret_to_epilog/retn_to_epilog = BX after a check, or jump
+ * table + BX) -- never a direct, range-limited B/BL. So the distance between
+ * segments costs nothing: same instruction, same cost, whether the target is
+ * next door or at the other end of the address space.
  *
- * WX86_JITPOOL_MB/D2_JITPOOL_MB = taille de CHAQUE segment (plafonnee a 16,
- * au-dela le noyau refuse de toute facon). WX86_JITPOOL_SEGS/D2_JITPOOL_SEGS
- * = nombre de segments vises (defaut 2, donc 32 Mio de piscine totale). Un
- * segment est ouvert PARESSEUSEMENT, seulement quand le precedent est plein —
- * jamais tous d'un coup au boot. */
+ * WX86_JITPOOL_MB/D2_JITPOOL_MB = size of EACH segment (capped at 16; the
+ * kernel refuses more anyway). WX86_JITPOOL_SEGS/D2_JITPOOL_SEGS = target
+ * segment count (default 2, so 32 MiB of total pool). A segment is opened
+ * LAZILY, only once the previous one is full -- never all at once at boot. */
 #define JITPOOL_MAX_SEGS 8
 typedef struct { void* base; size_t size, used; SceUID uid; } JitSeg;
 static JitSeg    g_jitseg[JITPOOL_MAX_SEGS];
-static int       g_jitseg_n = 0;          /* segments reellement ouverts */
-static unsigned  g_jitseg_cap_mb = 0;     /* taille visee par segment, 0 = pas encore lu */
-static unsigned  g_jitseg_max = 0;        /* nombre de segments vises */
-static int       g_jitseg_refused = 0;    /* un essai a echoue : on arrete d'en demander */
+static int       g_jitseg_n = 0;          /* segments actually opened */
+static unsigned  g_jitseg_cap_mb = 0;     /* target size per segment, 0 = not read yet */
+static unsigned  g_jitseg_max = 0;        /* target segment count */
+static int       g_jitseg_refused = 0;    /* a request failed: stop asking */
 
-/* Tente d'ouvrir UN segment de plus. Rend 0 sans toucher au noyau si le
- * plafond configure est deja atteint OU si un essai precedent a deja
- * echoue (pas de martelage du noyau a chaque nouveau bloc PROT_EXEC). */
+/* Tries to open ONE more segment. Returns 0 without touching the kernel if
+ * the configured cap is already reached OR a previous attempt already
+ * failed (no hammering the kernel on every new PROT_EXEC block request). */
 static int jitpool_grow(void) {
     if (g_jitseg_refused) return 0;
     if (!g_jitseg_cap_mb) {
         const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
         unsigned mb = e ? (unsigned)atoi(e) : 16u;
-        if (mb > 16u) mb = 16u;   /* plafond noyau par bloc VM, mesure le 12/09 */
+        if (mb > 16u) mb = 16u;   /* kernel cap per VM block */
         g_jitseg_cap_mb = mb ? mb : 16u;
         const char* es = getenv("WX86_JITPOOL_SEGS"); if (!es) es = getenv("D2_JITPOOL_SEGS");
         unsigned segs = es ? (unsigned)atoi(es) : 2u;
@@ -288,51 +250,33 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
     size_t size;
     if (vm) {
         size = (length + 0xFFFFFu) & ~(size_t)0xFFFFFu;      /* 1 MiB */
-        /* ⚠️ 08/09, 3e passe : CES DEUX GARDE-FOUS SONT DESACTIVES PAR DEFAUT.
-         * Je les avais introduits en affirmant que refuser une allocation JIT
-         * etait « plus lent mais vivant ». C'EST FAUX, et le code le dit noir
-         * sur blanc — src/dynarec86/shim/shim_impl.c :
-         *     // ---- interpreter stub: no interpreter in the PoC ----
-         *     int Run(...) { ... emu->quit = 1; emu->error |= ERR_UNIMPL; }
-         * Il n'y a PAS d'interpreteur dans ce build. Un bloc qui echoue mene a
-         * Run(), qui met quit=1 et TUE le fil invite. Les deux sessions qui se
-         * sont terminees par [ring-final] sans bad_alloc, c'etait ca : mon
-         * bridage transformait une mort possible en mort certaine.
-         * On les garde comme boutons de diagnostic (D2_JITRESERVE_KB,
-         * D2_JITMAX_MB) mais a 0 — inertes — tant qu'aucun interpreteur
-         * n'existe. La seule vraie solution est de DONNER de la memoire au JIT.
-         *
-         * Texte d'origine du plafond :
-         * ⚡ 08/09 : PLAFOND DU CACHE JIT. Le code traduit n'avait AUCUNE borne :
-         * mesure en partie reelle, il passe de 4 a 13 Mio en cinq minutes et
-         * continue, pendant que le tas newlib grimpe de 22 a 30 Mio. Les deux
-         * puisent dans les ~11 Mio laisses libres par l'arene, et le processus
-         * meurt en std::bad_alloc (TTY_INFO du core dump).
-         *
-         * Refuser une allocation JIT est SANS DANGER, contrairement a liberer du
-         * code qu'un fil execute peut-etre : mmap rend MAP_FAILED, FillBlock
-         * echoue, dynablock.c libere le bloc, incremente dyn86_fill_fail (le
-         * « fail= » de la ligne alive) et l'emulateur RETOMBE SUR L'INTERPRETEUR
-         * pour cette adresse. On echange de la vitesse contre le fait de rester
-         * en vie, et le compteur rend l'echange visible au lieu de le cacher. */
+        /* These two guardrails are DISABLED BY DEFAULT (0 = inert). Refusing
+         * a JIT allocation is normally safe in box86: mmap returns
+         * MAP_FAILED, FillBlock fails, dynablock.c frees the block and falls
+         * back to interpreting that address. This build has NO interpreter
+         * (shim_impl.c's Run() stub just sets quit=1 and kills the guest
+         * thread), so a refused JIT allocation kills the guest exactly as
+         * surely as running out of memory would -- it doesn't make things
+         * safer. Kept as diagnostic knobs (D2_JITRESERVE_KB, D2_JITMAX_MB)
+         * for if/when an interpreter exists; until then the real fix is
+         * giving the JIT more memory, not capping it. */
         {
             static unsigned cap_mb = 0, said = 0, said2 = 0;
             if (!cap_mb) { const char* e = getenv("WX86_JITMAX_MB"); if (!e) e = getenv("D2_JITMAX_MB");
-                           cap_mb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DESACTIVE */
-            /* ⚡ 08/09, 2e passe : LE PLAFOND ABSOLU NE SUFFIT PAS. Session de
-             * 920 s : le JIT n'etait qu'a 11 Mio — bien sous les 24 — et c'est
-             * la RAM SYSTEME qui s'est epuisee la premiere. Resultat, une
-             * tempete d'echecs (« mmap FAIL VM 2048 KB ... free user=-1024 KB »
-             * des dizaines de fois par seconde), le jeu fige 3,5 s, puis mort.
-             * Une limite absolue ne protege de rien quand le voisin mange le
-             * budget : ce qu'il faut borner, c'est CE QU'IL RESTE.
+                           cap_mb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DISABLED */
+            /* An absolute cap alone is NOT enough: system RAM can be
+             * exhausted by something other than the JIT while the JIT is
+             * still well under its own cap, triggering a storm of allocation
+             * failures and a hang before death. An absolute limit protects
+             * nothing when a neighbor eats the budget -- what needs bounding
+             * is what's LEFT.
              *
-             * On garde donc une reserve plancher de RAM utilisateur. Refuser
-             * ici est le chemin GRACIEUX (repli interpreteur, « fail= » monte) ;
-             * laisser le systeme refuser est le chemin FATAL. */
+             * Hence a floor on remaining user RAM as well. Refusing here is
+             * the GRACEFUL path (interpreter fallback, "fail=" counter
+             * climbs); letting the system itself refuse is the FATAL path. */
             static unsigned res_kb = 0;
             if (!res_kb) { const char* e = getenv("WX86_JITRESERVE_KB"); if (!e) e = getenv("D2_JITRESERVE_KB");
-                           res_kb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DESACTIVE, voir ci-dessous */
+                           res_kb = e ? (unsigned)atoi(e) : 0u; }   /* 0 = DISABLED, see below */
             SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
             if (res_kb && sceKernelGetFreeMemorySize(&fi) >= 0 &&
                 (long)(fi.size_user >> 10) - (long)(size >> 10) < (long)res_kb) {
@@ -354,7 +298,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 errno = ENOMEM; return MAP_FAILED;
             }
         }
-        /* --- piscine : segments de 16 Mio, on grandit a la demande --- */
+        /* --- pool: 16 MiB segments, growing on demand --- */
         {
             JitSeg* s = (g_jitseg_n > 0) ? &g_jitseg[g_jitseg_n - 1] : 0;
             if (!(s && s->used + size <= s->size)) {
@@ -366,9 +310,9 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 dyn86_jitpool_used += (unsigned int)size;
                 dyn86_jit_cur += (unsigned int)size;
                 g_blk[slot].base = p;   g_blk[slot].size = size;
-                g_blk[slot].uid  = s->uid;   /* uid du SEGMENT : requis par le sync VM */
+                g_blk[slot].uid  = s->uid;   /* the SEGMENT's uid: required by the VM sync */
                 g_blk[slot].vm   = 1;
-                g_blk[slot].pool = 1;              /* ne PAS rendre au noyau au munmap */
+                g_blk[slot].pool = 1;              /* do NOT return to the kernel on munmap */
                 pthread_mutex_unlock(&g_blk_mx);
                 dyn86_vita_open_vm_thread();
                 return p;
@@ -413,15 +357,15 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
     g_blk[slot].base = base; g_blk[slot].size = size;
     g_blk[slot].uid = uid;   g_blk[slot].vm = vm;  g_blk[slot].pool = 0;
     pthread_mutex_unlock(&g_blk_mx);
-    /* mmap(MAP_ANONYMOUS) — the desktop/qemu path every run was validated against —
-     * always hands back ZERO-filled pages. sceKernelAllocMemBlock does NOT: it may
-     * return stale/garbage bytes. The guest relies on the zero baseline that Windows
-     * itself guarantees (VirtualAlloc MEM_COMMIT + BSS + fresh heap all read as zero),
-     * so a non-zeroed arena makes the guest read garbage where it expects NUL — e.g.
-     * the Rogue level-load's freshly-committed VirtualAlloc pages, which trip a Fog
-     * "Unrecoverable internal error" Halt on Vita but not on qemu. Zero non-exec
-     * blocks (the guest arena/heap) to restore mmap-ANON parity. JIT (vm) blocks are
-     * fully overwritten by the emitter, so they need no clear. */
+    /* mmap(MAP_ANONYMOUS) -- the desktop/qemu path this was validated against --
+     * always hands back ZERO-filled pages. sceKernelAllocMemBlock does NOT: it
+     * may return stale/garbage bytes. Guest code relies on the zero baseline
+     * Windows itself guarantees (VirtualAlloc MEM_COMMIT, BSS, and a fresh
+     * heap all read as zero), so a non-zeroed arena makes the guest read
+     * garbage where it expects NUL -- which can surface as a guest-side
+     * fatal error on Vita that never reproduces on qemu. Zero non-exec
+     * blocks (the guest arena/heap) to restore mmap-ANON parity. JIT (vm)
+     * blocks are fully overwritten by the emitter, so they need no clearing. */
     if (!vm) memset(base, 0, size);
     return base;
 }
@@ -437,9 +381,9 @@ int munmap(void* addr, size_t length) {
     const int was_pool = b->pool;
     memset(b, 0, sizeof *b);
     pthread_mutex_unlock(&g_blk_mx);
-    /* Sous-bloc de la piscine : le noyau ne connait que la piscine entiere, et
-     * box86 ne rend de toute facon jamais ses morceaux. On relache seulement
-     * l'entree du registre — liberer l'uid ici detruirait TOUTE la piscine. */
+    /* Pool sub-block: the kernel only knows about the whole pool, and box86
+     * never returns its chunks anyway. Only the registry entry is released
+     * here -- freeing the uid would destroy the ENTIRE pool. */
     if (!was_pool) sceKernelFreeMemBlock(uid);
     return 0;
 }

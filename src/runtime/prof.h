@@ -1,13 +1,12 @@
-// src/runtime/prof.h — PROF_COUNTERS profiling (docs/perf/optimization_audit.md §1).
+// src/runtime/prof.h — PROF_COUNTERS profiling.
 //
 // Deterministic-friendly counters + wall-clock accumulators at the C++ hot
 // spots (bridge trap, scheduler slice, sync shims). NOTHING on the dynarec
-// per-instruction path — bias stays <5% (§1.1). EIP hot-block sampling piggy-
-// backs on quantum preemption (one sample per preempted slice), NOT a per-insn
-// hook, so the sample distribution matches real execution.
+// per-instruction path — bias stays under 5%. EIP hot-block sampling
+// piggybacks on quantum preemption (one sample per preempted slice), not a
+// per-instruction hook, so the sample distribution matches real execution.
 //
-// Everything compiles away without -DPROF_COUNTERS: the validated default
-// build is bit-identical to before this header existed.
+// Compiles away entirely without -DPROF_COUNTERS.
 #pragma once
 #include <cstdint>
 
@@ -34,18 +33,17 @@ void   sample_eip(uint32_t eip);
 void   top_eips(int n, void (*cb)(uint32_t eip, uint64_t hits, void* u), void* u);
 uint64_t eip_samples();
 
-// PAR FIL INVITE (06/09, chantier fil d'E/S Storm). Le meme echantillon de
-// preemption, attribue au fil qui tournait, a l'EIP EXACT (pas de seau) ; et
-// le compte EXACT de blocs traduits executes par fil (delta du compteur
-// dyn86_blocks autour de chaque tranche coop). Un echantillon par tranche =
-// un echantillon par QUANTUM blocs : c'est un tirage uniforme sur les blocs,
-// pas sur le temps (cf. feedback « le profil EIP compte des blocs »).
+// PER GUEST THREAD: the same preemption sample, attributed to the thread
+// that was running, at the EXACT EIP (no bucket); plus the EXACT count of
+// translated blocks executed per thread (delta of the dyn86_blocks counter
+// around each coop slice). One sample per slice = one sample per QUANTUM of
+// blocks: this is a uniform draw over blocks, not over time.
 void   sample_eip_tid(uint32_t eip, uint32_t tid);
 void   add_blocks_tid(uint32_t tid, uint32_t blocks);
 void   note_thread(uint32_t tid, uint32_t entry);
-// cb(tid, entry, samples, blocks) pour chaque fil vu, par tid croissant.
+// cb(tid, entry, samples, blocks) for each thread seen, in increasing tid order.
 void   threads(void (*cb)(uint32_t tid, uint32_t entry, uint64_t samples, uint64_t blocks, void* u), void* u);
-// cb(eip, hits) : les n EIP exacts les plus frequents du fil (n<0 : tous).
+// cb(eip, hits): the n most frequent exact EIPs for the thread (n<0: all).
 void   top_eips_tid(uint32_t tid, int n, void (*cb)(uint32_t eip, uint64_t hits, void* u), void* u);
 
 #else

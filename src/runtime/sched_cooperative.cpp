@@ -2,15 +2,10 @@
 #include "runtime/sched_cooperative.h"
 #include "runtime/prof.h"
 
-// JOURNAL DU MOTEUR. Le service appartient au moteur (platform/vita_host.h) :
-// sur console il ecrit la ligne durable, hors console il ne fait rien. L'appel
-// est DIRECT et en lien FORT — plus de reference faible a tester.
-//
-// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
-// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
-// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
-// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
-// de ses consommateurs.
+// Engine-owned progress log (platform/vita_host.h): writes a durable line on
+// console, no-op elsewhere. Direct, strongly-linked call — a generic engine
+// must not depend on a specific consumer's symbol names for something this
+// basic to work.
 #include "platform/vita_host.h"
 extern "C" uint32_t d2rt_sw_seq = 0;   // C-visible scheduler event counter (dynarec eipring timestamps)
 
@@ -57,7 +52,7 @@ GuestThread* CooperativeScheduler::set_main(uint32_t entry, uint32_t stack_top, 
     t->tib = tib; t->ctx.fs_base = tib;
     t->entry = entry; t->ctx.eip = entry; t->started = false; t->state = S::Ready;
     auto* p = t.get(); threads_.push_back(std::move(t));
-    { uint32_t n = flat_n_.load(std::memory_order_relaxed);      // C14: main thread too
+    { uint32_t n = flat_n_.load(std::memory_order_relaxed);      // flat snapshot: main thread too
       if (n < kFlatMax) { flat_[n] = p; flat_n_.store(n + 1, std::memory_order_release); } }
     return p;
 }
@@ -67,14 +62,14 @@ GuestThread* CooperativeScheduler::create_thread(uint32_t entry, uint32_t param,
     auto t = std::make_unique<GuestThread>();
     t->id = next_id_++;
     uint32_t ssize = stack_size ? ((stack_size + 0xFFFF) & ~0xFFFFu) : stack_each_;
-    // C2 (deep review 2026-08-25): the bump allocator below is never reclaimed.
-    // Over a long/online session (Game.exe has 20 static CreateThread sites;
-    // Battle.net and re-entering a game re-create workers) the stacks climb into
-    // the TIB region, then the trap window, then off the arena memblock on Vita
-    // (silent host overrun, not a clean fault). RECYCLE first: a Finished thread
-    // never runs again, so its stack + TIB are free real estate — exactly what
-    // Windows does when a TEB/stack is released. Exact-size match only (no
-    // splitting), and the donor hands over ownership so it is reused once.
+    // The bump allocator below is never reclaimed. Over a long session with
+    // many CreateThread calls (short-lived workers recreated repeatedly),
+    // stacks would climb into the TIB region, then the trap window, then off
+    // the arena entirely on Vita (a silent host overrun, not a clean fault).
+    // RECYCLE first: a Finished thread never runs again, so its stack + TIB
+    // are free real estate — exactly what Windows does when a TEB/stack is
+    // released. Exact-size match only (no splitting), and the donor hands
+    // over ownership so it is reused once.
     uint32_t sbase = 0, tib = 0;
     for (auto& u : threads_) {
         GuestThread* g = u.get();
@@ -111,17 +106,18 @@ GuestThread* CooperativeScheduler::create_thread(uint32_t entry, uint32_t param,
     // Self: linear addr of the active TIB — linear 0 on the page-swap backend
     // (Unicorn), the TIB's own address on the fs-direct backend (CpuBox86).
     cpu_->write_u32(tib + 0x18, cpu_->fs_base_is_direct() ? tib : 0);
-    // NOTE: do NOT write ClientId.UniqueThread at TIB+0x24. Blizzard code reads
-    // the TEB thread id directly; distinct ids make Storm keep PER-THREAD SMem
-    // pools, tripling heap usage (48 MiB compact heap overflows during the
-    // level load -> Fog unrecoverable error). The validated behaviour is all
-    // zeros (threads share one pool), matching the C++ GetCurrentThreadId shim
-    // never being consulted for pooling.
+    // NOTE: do NOT write ClientId.UniqueThread at TIB+0x24. Some guest code
+    // reads the TEB thread id directly to pick a per-thread allocation pool;
+    // distinct ids per thread then multiply pool count and heap usage,
+    // which can exhaust memory under a heavy load. All zeros (every thread
+    // shares one pool) is the behavior that keeps such code working, and
+    // matches the C++ GetCurrentThreadId shim never being consulted for
+    // pooling.
     t->tib = tib; t->ctx.fs_base = tib;
     t->entry = entry; t->param = param; t->ctx.eip = entry; t->started = false;
     t->state = suspended ? S::New : S::Ready;
     auto* p = t.get(); threads_.push_back(std::move(t));
-    // C14: publish into the flat snapshot BEFORE bumping the count — the Vita
+    // Publish into the flat snapshot BEFORE bumping the count — the Vita
     // watchdog runs on another core and only ever reads [0, flat_n_).
     if (flat_n_.load(std::memory_order_relaxed) < kFlatMax) {
         uint32_t n = flat_n_.load(std::memory_order_relaxed);
@@ -145,8 +141,8 @@ uint32_t CooperativeScheduler::wait(Waitable* w, uint32_t timeout_ms) {
     cur_->wait_obj = w;
     // Absolute virtual-time deadline (0 = infinite). This is what lets a timed
     // WaitForSingleObject actually time out under the cooperative scheduler —
-    // D2's render worker waits 250 ms on a frame event and must wake to keep
-    // producing, or the main thread (waiting infinitely on the worker) deadlocks.
+    // e.g. a render worker waiting on a frame event must still wake up to
+    // keep producing, or a thread blocked on it forever would deadlock.
     cur_->wake_deadline = (timeout_ms == 0xFFFFFFFFu) ? 0
                           : virt_ms_ + (timeout_ms ? timeout_ms : 1);
     cur_->state = S::Blocked;
@@ -224,7 +220,7 @@ GuestThread* CooperativeScheduler::pick_ready() {
                 sync_real_clock();
                 if (virt_ms_ >= soonest->wake_deadline || !real_sleep_) break;
                 uint64_t d = soonest->wake_deadline - virt_ms_;
-                idle_ms_ += (d > 100 ? 100 : d);   // D2_PHASEPROF : sieste hote rendue
+                idle_ms_ += (d > 100 ? 100 : d);   // D2_PHASEPROF: host nap time given back
                 real_sleep_((uint32_t)(d > 100 ? 100 : d));
             }
         }
@@ -281,7 +277,7 @@ void CooperativeScheduler::run_slice(GuestThread* t) {
     const char* fault = nullptr;
 #ifdef PROF_COUNTERS
     uint64_t prof_t0 = prof::now_ns();
-    uint32_t prof_b0 = 0; cpu_->thread_emu_blocks(nullptr, &prof_b0);   // blocs par fil (exact)
+    uint32_t prof_b0 = 0; cpu_->thread_emu_blocks(nullptr, &prof_b0);   // blocks per thread (exact)
 #endif
     // D2_JITPROFILE guest-run timer. Deliberately here — ONE pair of clock
     // reads per scheduler slice — and NOT around each dynablock: per-block
@@ -312,30 +308,26 @@ void CooperativeScheduler::run_slice(GuestThread* t) {
         if (preempted_last_ == t) preempted_last_ = nullptr;   // voluntary boundary reached
         sw_rec(t->id, 3, t->state == S::Blocked ? 1 : 0, t->ctx.eip);   // BLOCK(aux=1)/yield
     } else if (!ok) {
-        // SEH dispatcher (audit p8) — FAIL-SAFE. The dispatcher is only allowed to
-        // CHANGE the outcome (resume) when its model is certain; by default it just
-        // NOTES an installed fs:[0] chain (SEH_UNSUPPORTED_CHAIN) and returns 0, so
-        // the fault/termination below is byte-identical to the pre-SEH behaviour
-        // (historical exit code 0xC0000005). D2_SEH_EXPERIMENTAL=1 opts into the
-        // incomplete walk; it never calls a handler on a guessed address. See the
-        // fidelity TODO P0. code==0 (emulator gap / unknown) is not SEH-eligible.
+        // SEH dispatcher — FAIL-SAFE. It is only allowed to CHANGE the outcome
+        // (resume) when its model is certain; by default it just NOTES an
+        // installed fs:[0] chain (SEH_UNSUPPORTED_CHAIN) and returns 0, so the
+        // fault/termination below is byte-identical to running with no SEH
+        // dispatch at all (exit code 0xC0000005). D2_SEH_EXPERIMENTAL=1 opts
+        // into the incomplete walk; it never calls a handler on a guessed
+        // address. code==0 (emulator gap / unknown) is not SEH-eligible.
         uint32_t code = cpu_->fault_code();
         int act = (code && fault_disp_) ? fault_disp_(t, code, cpu_->fault_addr()) : 0;
         if (act == 1) { if (t->state == S::Running) t->state = S::Ready; return; }  // resume (experimental)
-        t->exit_code = 0xC0000005; t->state = S::Finished; stop_reason_ = fault ? fault : "fault";  // historical
+        t->exit_code = 0xC0000005; t->state = S::Finished; stop_reason_ = fault ? fault : "fault";
         std::printf("  [sched] thread %u FAULT: %s  EIP=0x%08x faultAddr=0x%08x ESP=0x%08x EAX=0x%08x\n",
                     t->id, stop_reason_, cpu_->reg(R_EIP), cpu_->fault_addr(),
                     cpu_->reg(R_ESP), cpu_->reg(R_EAX));
         dyn86_dump_xfer();   // D2_XFERTRACE + D2_NOLINK: last control transfers before the fault
-        // CHAINE DE PILE : on releve les mots de la pile qui pointent DANS un
-        // module charge — l'amorce d'une trace d'appels quand le cadre est
-        // perdu. Jusqu'au 2026-09-12 les trois plages etaient ecrites en dur
-        // (0x400000-0xA00000, 0x1900000-0x2100000, 0x30000000-0x31000000) :
-        // c'etait le plan memoire du PREMIER consommateur, et sur un portage
-        // dont les modules vivent ailleurs le dump sortait VIDE — un
-        // diagnostic qui se tait au moment ou on en a le plus besoin. Le pont
-        // connait la base et la taille de chaque module charge : on lui
-        // demande, et le dump dit lequel.
+        // STACK SCAN: sample stack words that point INTO a loaded module — a
+        // cheap call-stack hint when the frame is lost. Ranges come from the
+        // bridge (each loaded module's base + size) rather than hardcoded
+        // addresses, so this keeps working regardless of where a given
+        // port's modules sit in memory.
         { uint32_t esp = cpu_->reg(R_ESP);
           const std::vector<std::pair<uint32_t,uint32_t>> mods =
               br_ ? br_->loaded_modules() : std::vector<std::pair<uint32_t,uint32_t>>();

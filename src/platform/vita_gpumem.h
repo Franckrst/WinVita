@@ -1,32 +1,18 @@
-// src/platform/vita_gpumem.h — memoire GPU de la console (blocs noyau + GXM).
+// GPU memory for the console (kernel blocks + GXM).
 //
-// TROISIEME CATEGORIE. Ce fichier n'est ni generique ni propre a un jeu : il est
-// propre a la CONSOLE, et le moteur cible cette console. Allouer un bloc noyau,
-// le mapper pour le GPU, le mapper dans l'espace USSE — rien la-dedans ne
-// depend du jeu qu'on porte.
+// Console-specific rather than generic or game-specific: allocating a kernel
+// block, mapping it for the GPU, and mapping it into USSE space doesn't depend
+// on which game is running. Consumers share the same pattern — prefer CDRAM,
+// fall back to user RAM, log every failure — because free user RAM is
+// measured in MiB and a silently null pointer causes an unexplained black
+// screen.
 //
-// POURQUOI ICI PLUTOT QUE CHEZ UN PORTAGE
-// ---------------------------------------
-// L'idiome est partage par les deux portages reels, constate avant d'ecrire ce
-// fichier et non suppose :
-//   * l'un alloue ses tampons GXM (sommets, indices, profondeur, carrousel
-//     d'affichage) en preferant la CDRAM et en retombant sur la RAM utilisateur ;
-//   * l'autre alloue son tampon d'affichage exactement de la meme facon —
-//     CDRAM d'abord, repli RAM principale, et un journal a chaque echec.
-// Les deux ont la meme raison d'etre aussi bavards : sur cette console la RAM
-// utilisateur libre se compte en unites de Mio, et un pointeur nul rendu en
-// silence donne un ecran noir eternel qu'aucune trace n'explique.
+// Sizes, formats, and what goes in the blocks are the caller's decision; this
+// file only allocates and frees memory.
 //
-// CE QUI N'EST PAS ICI
-// --------------------
-// Le choix des TAILLES, celui des formats, et ce qu'on met dans les blocs
-// appartiennent a l'appelant : ce sont des decisions du portage. Ce fichier ne
-// sait qu'obtenir de la memoire et la rendre.
-//
-// DEPENDANCE DE LIEN. Les corps referencent sceGxm*. Ils vivent dans une
-// ARCHIVE : un portage qui n'appelle aucune de ces fonctions n'attire pas
-// l'objet, donc n'a pas besoin de lier le stub GXM. C'est ce qui permet a ce
-// fichier de cohabiter avec un portage qui passe par une couche OpenGL.
+// Bodies reference sceGxm* and live in a separate archive, so a port that
+// never calls these functions doesn't need to link the GXM stub — this lets
+// the file coexist with a port that goes through an OpenGL layer instead.
 #pragma once
 #include <cstdint>
 
@@ -37,7 +23,7 @@
 namespace wx86 {
 namespace vita {
 
-// Un bloc memoire visible du GPU. `uid` < 0 = bloc vide.
+// A GPU-visible memory block. `uid` < 0 means empty.
 struct GpuBlock {
     SceUID   uid   = -1;
     void*    p     = nullptr;
@@ -47,40 +33,38 @@ struct GpuBlock {
 
 inline uint32_t align_up(uint32_t v, uint32_t a) { return (v + a - 1u) & ~(a - 1u); }
 
-// Alloue un bloc du TYPE demande et le mappe pour le GPU.
+// Allocates a block of the requested TYPE and maps it for the GPU.
 //
-// CHAQUE code de retour est lu et dit : un gel console sans trace ne permet pas
-// de savoir si une allocation avait echoue et si l'on continuait avec un
-// pointeur nul. En cas d'echec, le journal nomme l'appel exact et son rc, et la
-// fonction rend false — a l'appelant de s'arreter.
+// Every return code is checked: an unexplained freeze must not be confused
+// with an allocation that silently failed and left a null pointer in use. On
+// failure this logs the exact call and its rc and returns false; the caller
+// must stop.
 bool gpu_alloc(GpuBlock& b, SceKernelMemBlockType type, uint32_t size,
                uint32_t attribs, const char* name);
 
-// Alloue la ou c'est le mieux : CDRAM si elle est preferee (defaut), repli sur
-// la RAM utilisateur non cachee. La CDRAM est la memoire du GPU et elle est
-// abondante quand la RAM utilisateur ne l'est pas.
+// Allocates wherever is best: CDRAM if preferred (default), falling back to
+// uncached user RAM. CDRAM is GPU memory and stays plentiful when user RAM
+// doesn't.
 bool gpu_alloc_best(GpuBlock& b, uint32_t size, uint32_t attribs, const char* name);
 
-// Preference CDRAM. Un portage la coupe pour reproduire un temoin d'avant.
-//
-// Le LECTEUR existe pour une raison precise : sans lui, un portage qui veut
-// afficher son reglage garde SA copie du booleen, et deux sources de verite
-// pour un seul etat finissent toujours par diverger. La preference vit ici et
-// nulle part ailleurs.
+// CDRAM preference toggle. The getter exists so a caller that wants to
+// display the current setting doesn't keep its own copy of the flag — two
+// sources of truth for one piece of state always end up diverging; this is
+// the only place the preference lives.
 void gpu_prefer_cdram(bool on);
 bool gpu_prefers_cdram();
 
-// Memoire USSE. Le SDK n'expose pas les helpers d'allocation USSE des exemples
-// officiels (ce sont des fonctions DES EXEMPLES, pas de la bibliotheque) : il
-// faut allouer le bloc soi-meme puis le mapper dans l'espace USSE.
-// ⚠️ L'USSE n'accepte PAS la CDRAM — ces blocs restent en RAM utilisateur.
+// USSE memory. The SDK's USSE allocation helpers are sample code, not part of
+// the library, so the block must be allocated manually and then mapped into
+// USSE space.
+// USSE does not accept CDRAM — these blocks stay in user RAM.
 bool usse_alloc(GpuBlock& b, uint32_t size, bool fragment, unsigned int* offset,
                 const char* name);
 
 void gpu_free(GpuBlock& b);
 
-// Memoire libre, en Kio. Sur cette console le chiffre EST le diagnostic : il
-// dit a quelle etape d'initialisation on a manque de place.
+// Free memory, in KB. On this console the number itself is the diagnostic:
+// it shows which init stage ran out of room.
 void mem_free_kb(int* user_kb, int* cdram_kb);
 
 }  // namespace vita

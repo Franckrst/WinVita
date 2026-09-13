@@ -1,4 +1,4 @@
-// src/runtime/authenticode.cpp — voir authenticode.h.
+// src/runtime/authenticode.cpp — see authenticode.h.
 #include "runtime/authenticode.h"
 #include "runtime/authenticode_roots.h"
 
@@ -10,7 +10,7 @@
 namespace wx86 { namespace ac {
 
 // =============================================================================
-// Condensats
+// Digests
 // =============================================================================
 size_t hash_len(HashAlg a) { return a == HASH_SHA1 ? 20 : a == HASH_SHA256 ? 32 : 0; }
 
@@ -121,17 +121,17 @@ void sha1(const uint8_t* p, size_t n, uint8_t out[20]) { Sha1 s; s.init(); s.upd
 void sha256(const uint8_t* p, size_t n, uint8_t out[32]) { Sha256 s; s.init(); s.update(p, n); s.final(out); }
 
 // =============================================================================
-// RSA : exponentiation de Montgomery sur mots de 32 bits
+// RSA: Montgomery exponentiation over 32-bit words
 // =============================================================================
 namespace {
-using Limbs = std::vector<uint32_t>;   // petit-boutiste par mot
+using Limbs = std::vector<uint32_t>;   // little-endian by word
 
 Limbs from_be(const uint8_t* p, size_t n, size_t k) {
     Limbs r(k, 0);
     for (size_t i = 0; i < n; i++) {
-        size_t bit = (n - 1 - i);                // indice d'octet depuis le poids faible
+        size_t bit = (n - 1 - i);                // byte index from the least-significant end
         if (bit / 4 < k) r[bit / 4] |= (uint32_t)p[i] << (8 * (bit % 4));
-        else if (p[i]) return Limbs();           // ne tient pas
+        else if (p[i]) return Limbs();           // doesn't fit
     }
     return r;
 }
@@ -180,10 +180,10 @@ bool rsa_public(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
     size_t k = (nlen + 3) / 4;
     Limbs N = from_be(n, nlen, k), S = from_be(sig, siglen, k);
     if (N.empty() || S.empty() || cmp(S, N) >= 0) return false;
-    uint32_t inv = 1;                                        // Newton : inv = n0^-1 mod 2^32
+    uint32_t inv = 1;                                        // Newton's method: inv = n0^-1 mod 2^32
     for (int i = 0; i < 5; i++) inv *= 2 - N[0] * inv;
     uint32_t n0inv = (uint32_t)(0u - inv);
-    // R mod n et R^2 mod n par doublements successifs.
+    // R mod n and R^2 mod n via repeated doubling.
     Limbs x(k, 0); x[0] = 1;
     Limbs R2;
     for (size_t i = 0; i < 64 * k; i++) {
@@ -195,14 +195,14 @@ bool rsa_public(const uint8_t* n, size_t nlen, const uint8_t* e, size_t elen,
     Limbs one(k, 0); one[0] = 1;
     Limbs base, acc, tmp;
     mont_mul(S, R2, N, n0inv, base);                         // S*R
-    mont_mul(one, R2, N, n0inv, acc);                        // R (= 1 en Montgomery)
+    mont_mul(one, R2, N, n0inv, acc);                        // R (= 1 in Montgomery form)
     uint64_t E = 0; for (size_t i = 0; i < elen; i++) E = (E << 8) | e[i];
     int top = 63; while (top >= 0 && !((E >> top) & 1)) top--;
     for (int i = top; i >= 0; i--) {
         mont_mul(acc, acc, N, n0inv, tmp); acc.swap(tmp);
         if ((E >> i) & 1) { mont_mul(acc, base, N, n0inv, tmp); acc.swap(tmp); }
     }
-    mont_mul(acc, one, N, n0inv, tmp);                       // sortie du domaine
+    mont_mul(acc, one, N, n0inv, tmp);                       // convert out of Montgomery form
     out.assign(nlen, 0);
     for (size_t i = 0; i < nlen; i++) {
         size_t bit = nlen - 1 - i;
@@ -221,11 +221,11 @@ bool rsa_pkcs1v15_verify(const uint8_t* n, size_t nlen, const uint8_t* e, size_t
     if (dlen != hash_len(alg) || dlen == 0) return false;
     std::vector<uint8_t> em;
     if (!rsa_public(n, nlen, e, elen, sig, siglen, em)) return false;
-    // em = 00 01 FF..FF 00 DigestInfo. Trois formes acceptees, comme le fournisseur
-    // RSA de CryptoAPI (CPVerifySignature retente sans OID) : DigestInfo avec
-    // parametres NULL, sans parametres, et condensat NU sans DigestInfo — cette
-    // derniere est celle des contre-signatures d'horodatage Symantec/VeriSign
-    // (constate sur les binaires cibles : 00 01 FF..FF 00 || SHA-1).
+    // em = 00 01 FF..FF 00 DigestInfo. Three forms accepted, matching
+    // CryptoAPI's RSA provider (CPVerifySignature retries without the OID):
+    // DigestInfo with NULL parameters, without parameters, and a bare digest
+    // with no DigestInfo at all -- the latter is how Symantec/VeriSign
+    // timestamp countersignatures encode it: 00 01 FF..FF 00 || SHA-1.
     for (int variant = 0; variant < 3; variant++) {
         const uint8_t* pre = variant == 2 ? P1 : alg == HASH_SHA1 ? (variant ? P1n : P1) : (variant ? P2n : P2);
         size_t plen = variant == 2 ? 0 : alg == HASH_SHA1 ? (variant ? sizeof P1n : sizeof P1) : (variant ? sizeof P2n : sizeof P2);
@@ -247,11 +247,11 @@ bool rsa_pkcs1v15_verify(const uint8_t* n, size_t nlen, const uint8_t* e, size_t
 bool der_read(const uint8_t* buf, size_t pos, size_t end, Tlv& t) {
     if (pos >= end || end - pos < 2) return false;
     uint8_t tag = buf[pos];
-    if ((tag & 0x1f) == 0x1f) return false;                  // numeros de balise longs : absents d'Authenticode
+    if ((tag & 0x1f) == 0x1f) return false;                  // long tag numbers: absent from Authenticode
     size_t l = buf[pos + 1], h = 2;
     if (l & 0x80) {
         size_t k = l & 0x7f;
-        if (k == 0 || k > 4 || end - pos < 2 + k) return false; // 0x80 = longueur indefinie (BER) : refusee
+        if (k == 0 || k > 4 || end - pos < 2 + k) return false; // 0x80 = indefinite length (BER): rejected
         l = 0;
         for (size_t i = 0; i < k; i++) l = (l << 8) | buf[pos + 2 + i];
         h = 2 + k;
@@ -261,8 +261,8 @@ bool der_read(const uint8_t* buf, size_t pos, size_t end, Tlv& t) {
     return true;
 }
 
-// Decimal sans snprintf : le formateur embarque de la cible ne garantit ni %zu
-// ni %llu.
+// Decimal without snprintf: the target's bundled formatter guarantees
+// neither %zu nor %llu.
 static void append_u64(std::string& s, uint64_t v) {
     char tmp[24]; int k = 0;
     do { tmp[k++] = (char)('0' + v % 10); v /= 10; } while (v);
@@ -288,7 +288,7 @@ std::string oid_to_string(const uint8_t* p, size_t n) {
 }
 
 namespace {
-// Curseur sur une suite de TLV.
+// Cursor over a sequence of TLVs.
 struct Cur {
     const uint8_t* b; size_t pos, end; bool bad = false;
     Cur(const uint8_t* buf, const Span& s) : b(buf), pos(s.off), end(s.off + s.len) {}
@@ -339,7 +339,7 @@ bool der_time(const uint8_t* tlv, size_t n, int64_t& out) {
         if (l < 15 || p[l-1] != 'Z') return false;
         if (!digits(p, 4, Y)) return false;
         p += 4;
-        if (l > 15) {                                       // fraction de seconde : ignoree, mais bien formee
+        if (l > 15) {                                       // fractional seconds: ignored, but must be well-formed
             if (p[10] != '.' || l < 17) return false;
             for (size_t i = 15; i + 1 < l; i++) if (tlv[t.val.off + i] < '0' || tlv[t.val.off + i] > '9') return false;
         }
@@ -351,14 +351,14 @@ bool der_time(const uint8_t* tlv, size_t n, int64_t& out) {
 }
 
 // =============================================================================
-// Chaines de DirectoryString et Name
+// DirectoryString and Name strings
 // =============================================================================
 bool directory_string_to_u16(const uint8_t* b, size_t n, std::u16string& out) {
     Tlv t; if (!der_read(b, 0, n, t)) return false;
     const uint8_t* p = b + t.val.off; size_t l = t.val.len;
     out.clear();
     switch (t.tag) {
-    case 0x13: case 0x16: case 0x14: case 0x1a: case 0x12:  // Printable, IA5, T61 (traite en Latin-1), Visible, Numeric
+    case 0x13: case 0x16: case 0x14: case 0x1a: case 0x12:  // Printable, IA5, T61 (treated as Latin-1), Visible, Numeric
         for (size_t i = 0; i < l; i++) out.push_back((char16_t)p[i]);
         return true;
     case 0x1e:                                              // BMPString (UTF-16BE)
@@ -559,14 +559,14 @@ bool SignedData::parse(const uint8_t* d, size_t n, uint32_t* err) {
     if (s.peek(tag) && tag == 0xA0) {
         s.next(x); Cur cc(b, x.val); Tlv cert;
         while (cc.next(cert)) {
-            if (cert.tag != 0x30) continue;                  // autres CertificateChoices : ignores
+            if (cert.tag != 0x30) continue;                  // other CertificateChoices: ignored
             Certificate ce;
             if (!ce.parse(b + cert.all.off, cert.all.len)) return fail(CRYPT_E_ASN1_CORRUPT);
             certs.push_back(std::move(ce));
         }
         if (cc.bad) return fail(CRYPT_E_ASN1_CORRUPT);
     }
-    if (s.peek(tag) && tag == 0xA1) s.next(x);               // crls : ignorees
+    if (s.peek(tag) && tag == 0xA1) s.next(x);               // crls: ignored
     if (!s.expect(0x31, x)) return fail(CRYPT_E_ASN1_BADTAG);
     { Cur sc(b, x.val); Tlv si;
       while (sc.next(si)) {
@@ -593,7 +593,7 @@ struct PeLayout {
     uint32_t sizeOfHeaders = 0, secOff = 0, secSize = 0; uint16_t nsec = 0;
     bool hasSecEntry = false;
 };
-// Rend 0, ou TRUST_E_SUBJECT_FORM_UNKNOWN si ce n'est pas un PE lisible.
+// Returns 0, or TRUST_E_SUBJECT_FORM_UNKNOWN if this isn't a readable PE.
 uint32_t pe_layout(const std::vector<uint8_t>& f, PeLayout& L) {
     if (f.size() < 0x40 || f[0] != 'M' || f[1] != 'Z') return TRUST_E_SUBJECT_FORM_UNKNOWN;
     size_t pe = le32(f, 0x3c);
@@ -630,7 +630,7 @@ bool pe_extract_pkcs7(const std::vector<uint8_t>& f, std::vector<uint8_t>& out, 
         if (len < 8 || len > end - pos) { if (err) *err = CRYPT_E_ASN1_EOD; return false; }
         if (rev == 0x0200 && type == 0x0002) {
             out.assign(f.begin() + pos + 8, f.begin() + pos + len);
-            // Le WIN_CERTIFICATE est aligne sur 8 : l'encodage peut etre suivi de zeros.
+            // WIN_CERTIFICATE is 8-byte aligned: the encoding may be followed by zero padding.
             Tlv t; if (der_read(out.data(), 0, out.size(), t)) out.resize(t.all.len);
             return true;
         }
@@ -664,7 +664,7 @@ bool pe_image_digest(const std::vector<uint8_t>& f, HashAlg alg, std::vector<uin
         h.update(f.data() + s.ptr, s.size);
         hashedEnd = std::max<size_t>(hashedEnd, (size_t)s.ptr + s.size);
     }
-    // Donnees au-dela de la derniere section, table des certificats exclue.
+    // Data beyond the last section, certificate table excluded.
     size_t certOff = L.secSize ? L.secOff : f.size(), certEnd = L.secSize ? (size_t)L.secOff + L.secSize : f.size();
     if (certEnd > f.size()) return no("certificate table beyond end of file");
     if (hashedEnd < certOff) h.update(f.data() + hashedEnd, certOff - hashedEnd);
@@ -675,11 +675,11 @@ bool pe_image_digest(const std::vector<uint8_t>& f, HashAlg alg, std::vector<uin
 }
 
 // =============================================================================
-// Magasin de confiance
+// Trust store
 // =============================================================================
 namespace {
 std::mutex g_rootsMu;
-std::vector<roots::RootProps>& root_props_locked();   // parallele a roots_locked(), meme indice
+std::vector<roots::RootProps>& root_props_locked();   // parallel to roots_locked(), same index
 std::vector<Certificate>& roots_locked() {
     static std::vector<Certificate> r;
     static bool init = false;
@@ -701,7 +701,7 @@ bool add_trusted_root(const uint8_t* der, size_t n) {
     auto& r = roots_locked();
     for (auto& x : r) if (x.der == c.der) return true;
     r.push_back(std::move(c));
-    root_props_locked().push_back(roots::RootProps{ nullptr, 0, 0 });   // racine ajoutee : sans restriction
+    root_props_locked().push_back(roots::RootProps{ nullptr, 0, 0 });   // added root: no restriction
     return true;
 }
 size_t trusted_root_count() { std::lock_guard<std::mutex> lk(g_rootsMu); return roots_locked().size(); }
@@ -746,7 +746,7 @@ std::string cn_of(const Certificate& c) {
 bool same_span(const Certificate& a, const Span& sa, const uint8_t* bp, size_t bl) {
     return sa.len == bl && std::memcmp(a.p(sa), bp, bl) == 0;
 }
-// Numero de serie : comparaison d'entiers (zeros de tete ignores).
+// Serial number: integer comparison (leading zeros ignored).
 bool same_serial(const uint8_t* a, size_t al, const uint8_t* b, size_t bl) {
     while (al > 1 && !*a) { a++; al--; }
     while (bl > 1 && !*b) { b++; bl--; }
@@ -764,7 +764,7 @@ bool eku_ok(const Certificate& c, const char* usage) {
     for (auto& u : c.eku) if (u == usage || u == "2.5.29.37.0") return true;
     return false;
 }
-// CertVerifyCertificateChainPolicy / softpub : priorite des statuts.
+// CertVerifyCertificateChainPolicy / softpub: status priority order.
 uint32_t status_to_hr(uint32_t st) {
     if (st & T_NOT_SIG_VALID) return TRUST_E_CERT_SIGNATURE;
     if (st & T_UNTRUSTED_ROOT) return CERT_E_UNTRUSTEDROOT;
@@ -775,7 +775,7 @@ uint32_t status_to_hr(uint32_t st) {
     return 0;
 }
 
-// Construit et juge la chaine de `leaf` a la date T. `pool` = certificats du message.
+// Builds and evaluates `leaf`'s chain at date T. `pool` = certificates from the message.
 uint32_t chain_status(const Certificate& leaf, const std::vector<Certificate>& pool, int64_t T,
                       const char* usage, std::vector<std::string>& names) {
     std::lock_guard<std::mutex> lk(g_rootsMu);
@@ -794,8 +794,8 @@ uint32_t chain_status(const Certificate& leaf, const std::vector<Certificate>& p
         if (T < cur->notBefore || T > cur->notAfter) st |= T_NOT_TIME_VALID;
         if (!eku_ok(*cur, usage)) st |= T_NOT_VALID_FOR_USAGE;
         if (depth > 0 && cur->version >= 2 && !(cur->hasBasicConstraints && cur->isCA)) st |= T_INVALID_BASIC_CONSTRAINTS;
-        if (const Certificate* anc = is_anchor(*cur)) {          // ancre atteinte (racine du magasin)
-            // Proprietes du programme de racines (authroot.stl), cf. authenticode_roots.h.
+        if (const Certificate* anc = is_anchor(*cur)) {          // anchor reached (store root)
+            // Root program properties (authroot.stl), see authenticode_roots.h.
             const roots::RootProps& pr = root_props_locked()[(size_t)(anc - &anchors[0])];
             if (pr.eku_only && std::strcmp(pr.eku_only, usage) != 0) st |= T_NOT_VALID_FOR_USAGE;
             if (pr.not_before && leaf.notBefore > pr.not_before) st |= T_UNTRUSTED_ROOT;
@@ -808,7 +808,7 @@ uint32_t chain_status(const Certificate& leaf, const std::vector<Certificate>& p
             if (!cert_signed_by(*cur, *cur)) st |= T_NOT_SIG_VALID;
             return st | T_UNTRUSTED_ROOT;
         }
-        // Emetteur : d'abord les racines de confiance, puis le message.
+        // Issuer: trusted roots first, then the message.
         const Certificate* next = nullptr; bool sigOk = false;
         for (auto& a : anchors)
             if (same_span(a, a.subject, cur->p(cur->issuer), cur->issuer.len)) {
@@ -832,8 +832,8 @@ const Attribute* find_attr(const std::vector<Attribute>& v, const char* oid) {
     return nullptr;
 }
 
-// Verifie un SignerInfo : attributs authentifies (contentType facultatif,
-// messageDigest == H(content)) puis signature RSA. Rend 0 ou un code.
+// Verifies a SignerInfo: authenticated attributes (contentType optional,
+// messageDigest == H(content)) then the RSA signature. Returns 0 or a code.
 uint32_t verify_signer(const uint8_t* b, const SignerInfo& si, const Certificate& cert,
                        const uint8_t* content, size_t clen, const char* expectContentType) {
     HashAlg ha = digest_alg(si.digestAlgOid);
@@ -907,31 +907,30 @@ uint32_t verify_pe(const std::vector<uint8_t>& file, const VerifyOptions& opt, V
     }
     rep.image_alg = imgAlg;
 
-    // 1. Condensat de l'image (CryptSIPVerifyIndirectData) : AVANT la signature,
-    //    comme l'etape « objet » de softpub precede l'etape « signature ».
+    // 1. Image digest (CryptSIPVerifyIndirectData): BEFORE the signature,
+    //    just as softpub's "object" step precedes its "signature" step.
     std::vector<uint8_t> dig; std::string why;
     if (!pe_image_digest(file, imgAlg, dig, &why)) return done(TRUST_E_BAD_DIGEST, TRUST_E_BAD_DIGEST, "image digest could not be computed");
     if (std::memcmp(dig.data(), b + imgDigest.off, dig.size()) != 0)
         return done(TRUST_E_BAD_DIGEST, TRUST_E_BAD_DIGEST, "image digest mismatch (file modified)");
     if (opt.hash_only) return done(AC_OK, 0, "image digest matches (hash only)");
 
-    // 2. Signataire primaire.
+    // 2. Primary signer.
     const SignerInfo& si = sd.signers[0];
     int ci = find_cert(sd.certs, b, si);
     if (ci < 0) return done(TRUST_E_NO_SIGNER_CERT, TRUST_E_NO_SIGNER_CERT, "signer certificate not in message");
     rep.signer_cert = ci;
-    // Echec du signataire -> TRUST_E_CERT_SIGNATURE : c'est le code que rend
-    // l'implementation wintrust de Wine (mesure : signature alteree d'un octet,
-    // tools/oracle_authenticode.sh) ; le detail interne est garde dans le rapport.
+    // Signer failure -> TRUST_E_CERT_SIGNATURE: matches Wine's wintrust
+    // implementation; the internal detail is kept in the report.
     uint32_t sv = verify_signer(b, si, sd.certs[ci], b + spc.val.off, spc.val.len, OID_SPC_INDIRECT);
     if (sv) return done(TRUST_E_CERT_SIGNATURE, TRUST_E_CERT_SIGNATURE,
                         sv == NTE_BAD_SIGNATURE ? "signer RSA signature invalid" :
                         sv == NTE_BAD_ALGID ? "signer algorithm not supported" : "signed attributes digest mismatch");
 
-    // 3. Horodatage.
+    // 3. Timestamp.
     int64_t T = now;
     uint32_t tsChain = 0;
-    SignedData tsd;                                          // jeton RFC 3161 (s'il y en a un)
+    SignedData tsd;                                          // RFC 3161 token (if there is one)
     const Certificate* tsaLeaf = nullptr;
     const std::vector<Certificate>* tsaPool = nullptr;
     if (const Attribute* cs = find_attr(si.unauthAttrs, OID_COUNTERSIG)) {
@@ -942,7 +941,7 @@ uint32_t verify_pe(const std::vector<uint8_t>& file, const VerifyOptions& opt, V
             return done(TRUST_E_TIME_STAMP, CRYPT_E_ASN1_CORRUPT, "countersignature decode");
         int tci = find_cert(sd.certs, b, csi);
         if (tci < 0) return done(TRUST_E_TIME_STAMP, TRUST_E_NO_SIGNER_CERT, "timestamp certificate not in message");
-        // La contre-signature couvre le CONTENU de l'encryptedDigest du signataire.
+        // The countersignature covers the CONTENT of the signer's encryptedDigest.
         if (verify_signer(b, csi, sd.certs[tci], b + si.encryptedDigest.off, si.encryptedDigest.len, nullptr))
             return done(TRUST_E_TIME_STAMP, TRUST_E_TIME_STAMP, "countersignature invalid");
         const Attribute* stA = find_attr(csi.authAttrs, OID_SIGNING_TIME);
@@ -983,20 +982,20 @@ uint32_t verify_pe(const std::vector<uint8_t>& file, const VerifyOptions& opt, V
         rep.timestamped = true; rep.timestamp = ts; T = ts;
         tsaLeaf = &tsd.certs[tci]; tsaPool = &tsd.certs;
     }
-    // WTD_LIFETIME_SIGNING_FLAG : l'horodatage ne prolonge plus la validite ;
-    // les deux chaines sont alors jugees a `now`.
+    // WTD_LIFETIME_SIGNING_FLAG: the timestamp no longer extends validity;
+    // both chains are then evaluated at `now`.
     if (opt.lifetime_signing) T = now;
     if (tsaLeaf) tsChain = chain_status(*tsaLeaf, *tsaPool, T, OID_KP_TIMESTAMP, rep.ts_chain);
     rep.evaluated_at = T;
 
-    // 4. Chaines.
+    // 4. Chains.
     uint32_t st = chain_status(sd.certs[ci], sd.certs, T, OID_KP_CODESIGN, rep.chain);
     uint32_t hr = status_to_hr(st);
     if (hr) return done(hr, hr, "signer certificate chain not trusted");
     hr = status_to_hr(tsChain);
     if (hr) return done(hr, hr, "timestamp certificate chain not trusted");
 
-    // 5. Revocation (voir en-tete).
+    // 5. Revocation (see header comment).
     if (opt.revocation_requested) {
         rep.revocation_unchecked = true;
         if (opt.strict_revocation) return done(CERT_E_REVOCATION_FAILURE, CERT_E_REVOCATION_FAILURE, "revocation status unknown (offline)");

@@ -1,80 +1,74 @@
-// src/runtime/guest_region.h — allocateur de REGIONS invitees.
+// src/runtime/guest_region.h — guest REGION allocator.
 //
-// POURQUOI C'EST UN PRIMITIF DU MOTEUR, ET PAS DU CONSOMMATEUR.
-// Un programme Win32 alloue et LIBERE : HeapAlloc/HeapFree, VirtualAlloc/
-// VirtualFree, LocalAlloc, GlobalAlloc. Sur une machine reelle c'est le
-// gestionnaire de tas du systeme qui repond. Ici le systeme n'existe pas :
-// c'est le moteur qui l'incarne, donc c'est au moteur de savoir decouper une
-// plage d'adresses INVITEES en blocs, les rendre, et les recoudre.
+// Engine-level primitive, not consumer code: a Win32 program both allocates
+// and FREES (HeapAlloc/HeapFree, VirtualAlloc/VirtualFree, LocalAlloc,
+// GlobalAlloc). On real hardware the OS heap manager handles this; here
+// there is no OS, so the engine must carve a GUEST address range into
+// blocks, hand them out, and stitch them back together on free.
 //
-// Ce n'est pas le meme besoin que guest_scratch.h, et les deux coexistent :
-//   * guest_scratch — UNE plage, allocation DEFINITIVE, jamais de free.
-//     Pour les valeurs de retour a duree de vie processus (une chaine rendue
-//     par GetCommandLineA, une struct hostent mise en cache).
-//   * guest_region (ce fichier) — PLUSIEURS plages independantes, avec free,
-//     fusion des blocs voisins et suivi d'occupation. Pour le tas invite et
-//     l'arene d'adresses virtuelles, qui vivent tout le long de la session.
+// Distinct from guest_scratch.h, and the two coexist:
+//   * guest_scratch — ONE range, PERMANENT allocation, no free. For
+//     process-lifetime return values (a string returned by GetCommandLineA,
+//     a cached hostent struct).
+//   * guest_region (this file) — MULTIPLE independent ranges, with free,
+//     neighbor-block merging, and occupancy tracking. For the guest heap
+//     and the virtual-address arena, which live for the whole session.
 //
-// Tout portage vers ce moteur a exactement le meme besoin : le laisser chez
-// le consommateur obligeait chaque portage a le reecrire. C'est la meme
-// erreur de placement que misc() avant son demenagement (guest_scratch).
+// Any port onto this engine has the same need, so it belongs here rather
+// than being reimplemented per port.
 //
-// PARTAGE DES ROLES. Le MOTEUR possede le decoupage (allocation, liberation,
-// fusion, mesure). Le CONSOMMATEUR possede les INSTANCES et les plages
-// qu'elles couvrent : ou commence le tas invite, quelle taille lui donner,
-// combien d'arenes ouvrir — cela depend du plan memoire du portage, qui n'a
-// rien d'universel (celui de d2vita est une arene compacte contrainte par la
-// console). Le moteur ne declare donc AUCUNE instance globale : il fournit la
-// classe, l'embarqueur instancie ce dont il a besoin.
+// ROLE SPLIT. The ENGINE owns the carving (allocate, free, merge, measure).
+// The CONSUMER owns the INSTANCES and the ranges they cover: where the guest
+// heap starts, how big it is, how many arenas to open — that depends on the
+// port's memory layout, which isn't universal. The engine therefore declares
+// no global instance; the embedder instantiates whatever it needs.
 //
-// ALIGNEMENT. Chaque region a le sien, fixe a l'init : 16 octets pour un tas
-// facon HeapAlloc, une page (0x1000) ou un bloc de reservation (0x10000) pour
-// une arene facon VirtualAlloc. C'est le consommateur qui sait lequel, parce
-// que c'est lui qui sait ce que le jeu attend de MEM_RESERVE.
+// ALIGNMENT. Each region has its own, fixed at init: 16 bytes for a
+// HeapAlloc-style heap, a page (0x1000), or a reservation granule (0x10000)
+// for a VirtualAlloc-style arena. The consumer picks it, since only it knows
+// what the game expects from MEM_RESERVE.
 #pragma once
 #include <cstdint>
 #include <map>
 
 namespace wx86 {
 
-// Signalement d'EPUISEMENT. Le moteur est muet par construction : il ne
-// connait ni le journal de l'embarqueur, ni sa console, ni son format. Il
-// appelle ce rappel a CHAQUE allocation refusee, avec de quoi ecrire une
-// ligne utile — et surtout de quoi distinguer « la region est pleine » de
-// « la region est fragmentee » : si `largest` est confortable alors que
-// `want` est petit, ce n'est pas un manque de place, c'est un emiettement.
-// Non arme = refus silencieux, alloc() rend 0 comme toujours.
+// OOM signal. The engine is silent by construction — it knows nothing of
+// the embedder's log, console, or format — so it invokes this callback on
+// every refused allocation, with enough data to tell "region full" from
+// "region fragmented": if `largest` is comfortable while `want` is small,
+// it's fragmentation, not a lack of space. No handler registered = silent
+// refusal, alloc() still returns 0.
 struct RegionFail {
-    const char* name;      // nom de la region, tel que passe a init()
-    uint32_t    base;      // adresse invitee du premier octet de la region
-    uint32_t    want;      // octets demandes (taille BRUTE, avant alignement)
-    uint32_t    cur;       // octets vivants a cet instant
-    uint32_t    peak;      // maximum d'octets vivants depuis l'init
-    uint32_t    largest;   // plus grand bloc libre d'un seul tenant
-    uint32_t    used;      // somme des blocs alloues (recomptee, cf. used_bytes)
+    const char* name;      // region name, as passed to init()
+    uint32_t    base;      // guest address of the region's first byte
+    uint32_t    want;      // bytes requested (raw size, before alignment)
+    uint32_t    cur;       // bytes currently live
+    uint32_t    peak;      // max bytes live since init
+    uint32_t    largest;   // largest single free block
+    uint32_t    used;      // sum of allocated blocks (recomputed, cf. used_bytes)
 };
 typedef void (*RegionFailFn)(const RegionFail&);
 
-// Rappel PARTAGE par toutes les regions : l'embarqueur n'a qu'un journal, il
-// n'a pas besoin d'un rappel par instance — le champ `name` dit laquelle a
-// refuse.
+// Shared by all regions: the embedder only needs one log, not one callback
+// per instance — the `name` field says which region refused.
 void region_set_fail_handler(RegionFailFn cb);
 
 class GuestRegion {
 public:
-    // b = adresse INVITEE du premier octet, sz = taille en octets, al =
-    // alignement des blocs rendus, nm = nom pour le diagnostic (il doit
-    // survivre a la region : un litteral, pas un tampon).
+    // b = guest address of the first byte, sz = size in bytes, al =
+    // alignment of returned blocks, nm = name for diagnostics (must outlive
+    // the region: a literal, not a buffer).
     void init(uint32_t b, uint32_t sz, uint32_t al, const char* nm = "region") {
         name_ = nm; base_ = b; limit_ = b + sz; align_ = al; freeb_[b] = sz;
     }
 
-    // Rend l'adresse INVITEE d'un bloc de n octets, ou 0. Premier ajustement
-    // (first-fit) sur la carte des blocs libres, qui est ordonnee par adresse.
+    // Returns the guest address of an n-byte block, or 0. First-fit over
+    // the free-block map, which is ordered by address.
     uint32_t alloc(uint32_t n) {
-        // (n + align - 1) DEBORDE pour n >= 0xFFFFFFF1 : une demande
-        // « negative » reussirait alors avec un bloc minuscule. Refuser tout
-        // ce que la region ne peut pas contenir ferme les deux cas d'un coup.
+        // (n + align - 1) overflows for n >= 0xFFFFFFF1, which would let a
+        // "negative" request succeed with a tiny block. Rejecting anything
+        // the region can't hold closes both cases at once.
         if (n > (limit_ - base_)) { record_fail(n); return 0; }
         uint32_t sz = (n + align_ - 1) & ~(align_ - 1);
         if (!sz) sz = align_;
@@ -91,10 +85,10 @@ public:
         return 0;
     }
 
-    // Rend true si a designait bien le debut d'un bloc alloue. Le bloc libere
-    // est recousu a son voisin de droite puis a celui de gauche : sans cette
-    // fusion, une region qui alloue et libere en boucle finit emiettee en
-    // blocs inutilisables alors qu'elle est presque vide.
+    // Returns true if a was the start of an allocated block. The freed
+    // block is merged with its right neighbor then its left: without this,
+    // a region that allocates and frees in a loop ends up fragmented into
+    // unusable blocks while nearly empty.
     bool free(uint32_t a) {
         auto it = used_.find(a); if (it == used_.end()) return false;
         uint32_t sz = it->second; used_.erase(it); cur_ -= sz;
@@ -107,24 +101,25 @@ public:
         freeb_[a] = sz; return true;
     }
 
-    // Base du bloc qui CONTIENT a, 0 si aucun. VirtualFree(MEM_RELEASE) en a
-    // besoin : le jeu y passe une adresse interieure, pas forcement le debut.
+    // Base of the block that CONTAINS a, or 0. VirtualFree(MEM_RELEASE)
+    // needs this: the game may pass an interior address, not necessarily
+    // the start.
     uint32_t block_of(uint32_t a) {
         auto it = used_.upper_bound(a); if (it == used_.begin()) return 0; --it;
         return (a >= it->first && a < it->first + it->second) ? it->first : 0;
     }
     uint32_t size_of(uint32_t a) { auto it = used_.find(a); return it == used_.end() ? 0 : it->second; }
     uint32_t largest_free() { uint32_t m = 0; for (auto& p : freeb_) if (p.second > m) m = p.second; return m; }
-    // Recompte la somme des blocs alloues. cur() donne la meme chose en O(1) ;
-    // used_bytes() reste le releve de reference (il ne peut pas deriver) et
-    // sert au diagnostic de fin de session.
+    // Recomputes the sum of allocated blocks. cur() gives the same value in
+    // O(1); used_bytes() is the reference reading (it can't drift), used
+    // for end-of-session diagnostics.
     uint32_t used_bytes() { uint32_t t = 0; for (auto& p : used_) t += p.second; return t; }
 
     uint32_t cur()  const { return cur_; }
     uint32_t peak() const { return peak_; }
     uint32_t base() const { return base_; }
-    // Carte des blocs alloues, pour le recensement des gros occupants
-    // (« qui tient l'arene ? »). Lecture seule par convention.
+    // Map of allocated blocks, for surveying the largest occupants ("who's
+    // holding the arena?"). Read-only by convention.
     const std::map<uint32_t, uint32_t>& used_map() const { return used_; }
 
 private:
@@ -133,7 +128,7 @@ private:
     const char* name_ = "region";
     uint32_t base_ = 0, limit_ = 0, align_ = 16;
     uint32_t cur_ = 0, peak_ = 0;
-    std::map<uint32_t, uint32_t> used_, freeb_;   // adresse -> taille
+    std::map<uint32_t, uint32_t> used_, freeb_;   // address -> size
 };
 
 } // namespace wx86

@@ -1,36 +1,26 @@
-// src/platform/vita_audio.cpp — LE PUITS CONSOLE (sceAudioOut) + son fil hote.
+// The console audio sink (sceAudioOut) and its host thread.
 //
-// Pourquoi sceAudioOut et pas NGS : psp2/ngs_internal.h ne declare que des
-// structures OPAQUES (typedef struct X X; sans corps) et il n'existe aucun
-// psp2/ngs.h dans ce SDK — on peut LIER NGS mais pas l'APPELER, faute de savoir
-// allouer le moindre parametre. psp2/audiodec.h (AT9/MP3/AAC/CELP) est hors
-// sujet : les MPQ de D2 contiennent du WAV Storm.
+// sceAudioOut rather than NGS: this SDK's psp2/ngs_internal.h only declares
+// opaque structs (no body), and there is no psp2/ngs.h — NGS can be linked
+// but not called, since none of its parameters can be allocated.
+// psp2/audiodec.h (AT9/MP3/AAC/CELP) is out of scope: the audio source here
+// is uncompressed PCM, not a compressed codec.
 //
-// Trois contraintes qui dictent la forme du fil :
-//   (a) sceAudioOutOutput est BLOQUANTE (~23 ms au grain retenu) -> interdit sur
-//       le coeur des runners invites (USER_0) ;
-//   (b) tout fil hote doit s'EPINGLER LUI-MEME : un masque pose par le createur
-//       rend rc=0 mais se relit 0 et le fil migre (constat console du 05/09) ;
-//   (c) il ne doit JAMAIS tenir le GIL — le melange lit la memoire invitee par
-//       vue hote plate, exactement la course qu'une vraie carte son a en DMA,
-//       et le contrat DirectSound (Lock ne rend que ce qui ne joue pas) la rend
-//       benigne.
+// Three constraints shape the thread:
+//   (a) sceAudioOutOutput blocks (~23ms at the grain used here), so it must
+//       never run on the guest runners' core (USER_0);
+//   (b) every host thread must pin itself: a mask set by the creator returns
+//       rc=0 but reads back as 0, and the thread migrates;
+//   (c) it must never hold the GIL — the mixer reads guest memory through a
+//       flat host view, exactly the same race a real sound card has via DMA,
+//       and the DirectSound contract (Lock only returns what isn't playing)
+//       makes that race benign.
 #include "runtime/audio_sink.h"
 
 #ifdef __vita__
 
-// LE JOURNAL ET L'EPINGLAGE SONT AU MOTEUR, PAS CHEZ LE PORTAGE.
-//
-// Ce fichier appelait trois symboles FAIBLES du premier consommateur —
-// d2vita_progress_c, d2vita_pin_self_c, d2vita_core_register_c — pour trois
-// services que le moteur POSSEDE desormais (platform/vita_host.h). C'etait la
-// forme du premier consommateur restee dans le moteur : un second portage, dont
-// les symboles ne portent pas ce prefixe, obtenait un journal MUET et un fil
-// audio NON EPINGLE, sans la moindre erreur de lien pour l'en avertir — le pire
-// mode de panne de ce projet, le « diagnostic qui ment ».
-//
-// Ces trois services vivent maintenant dans la meme archive et sous garde
-// __vita__ identique : l'appel est DIRECT, et tout portage les obtient.
+// Progress logging and core pinning are engine services (platform/vita_host.h),
+// called directly here — every port gets them without providing anything.
 #include "platform/vita_host.h"
 static inline void wx86_progress(const char* msg) { wx86_vita_progress(msg); }
 
@@ -46,18 +36,12 @@ namespace d2rt { namespace audio {
 
 namespace {
 
-// Frequence de repli, et RIEN DE PLUS. Elle n'est PAS « la » frequence de
-// sortie : c'est celle qu'on demande quand l'appelant n'en donne pas
-// d'utilisable. Le chiffre venait du premier consommateur (tous ses WAV sont a
-// 22050 Hz) et il etait applique a TOUS — open() recevait `freq` et l'ignorait,
-// si bien qu'un flux a une autre frequence aurait joue a la mauvaise hauteur
-// sans un mot. Le second consommateur est a 22050 lui aussi, ce qui rendait le
-// defaut encore plus difficile a voir.
+// Fallback rate only, used when the caller doesn't provide a usable one.
 constexpr int kFallbackRate = 22050;
 
-// Les frequences que l'en-tete du SDK (psp2/audioout.h) declare acceptables
-// pour un port BGM. Demander autre chose est un echec garanti : autant le
-// savoir avant d'appeler, et retomber sur le chemin qui reechantillonne.
+// Rates the SDK header (psp2/audioout.h) declares valid for a BGM port.
+// Anything else is guaranteed to fail, so check before calling and fall back
+// to the resampling path instead.
 inline bool rate_supported(int hz) {
     switch (hz) {
         case 8000: case 11025: case 12000: case 16000: case 22050:
@@ -71,16 +55,15 @@ public:
     bool open(int freq, int ch, int grain) override {
         srcRate_ = freq; ch_ = ch; grain_ = grain;
         const char* pw = getenv("WX86_SON_PORT"); if (!pw) pw = getenv("D2_SON_PORT");
-        // Le port BGM accepte neuf frequences (voir rate_supported) : sur le
-        // chemin par defaut il n'y a donc AUCUN reechantillonnage, quelle que
-        // soit celle du portage. Le repli MAIN, lui, impose 48000 par l'en-tete
-        // du SDK, donc une interpolation lineaire — il existe parce que « le
-        // port BGM est-il attenue quand le lecteur de musique systeme tourne »
-        // n'est PAS dans l'en-tete et ne se tranche que sur materiel.
+        // The BGM port accepts several rates (see rate_supported), so the
+        // default path needs no resampling. The MAIN port fallback forces
+        // 48000 per the SDK header, hence linear interpolation — it exists
+        // because whether the BGM port gets attenuated while the system
+        // music player is running isn't documented, only observable on
+        // hardware.
         main_ = (pw && !std::strcmp(pw, "main"));
-        // LA FREQUENCE DE L'APPELANT EST LA FREQUENCE DE SORTIE quand la
-        // console l'accepte : aucun reechantillonnage, aucune derive de
-        // hauteur, aucun cout. Elle ne l'etait pas — la constante gagnait.
+        // The caller's rate is the output rate whenever the console accepts
+        // it: no resampling, no pitch drift, no cost.
         outRate_ = main_ ? 48000
                  : rate_supported(srcRate_) ? srcRate_
                                             : kFallbackRate;
@@ -96,9 +79,9 @@ public:
             wx86_progress(m);
             return false;
         }
-        // rs_ tient 2048 trames stéréo. Un port plus large que ça ne peut pas
-        // être servi sans déborder : on refuse à l'ouverture plutôt que de
-        // découvrir le débordement sur console.
+        // rs_ holds 2048 stereo frames. A wider port can't be served without
+        // overflowing it, so refuse at open time rather than discover the
+        // overflow on console.
         if (len * 2 > (int)(sizeof rs_ / sizeof rs_[0])) {
             std::snprintf(m, sizeof m, "audio: outLen=%d > capacite du tampon de sortie — port refuse", len);
             wx86_progress(m);
@@ -106,9 +89,9 @@ public:
             return false;
         }
         outLen_ = len;
-        // Le rc du VOLUME DU PORT est RELU et publie. Un port ouvert mais laisse
-        // a 0 dB « par supposition » est un des points de la chaine qui avalent
-        // le son sans une ligne de journal.
+        // The port volume's rc is read back and published. A port opened but
+        // silently assumed to be at 0dB is exactly the kind of step that can
+        // swallow sound without a single log line.
         volRc_ = set_port_volume();
         std::snprintf(m, sizeof m, "audio: port %s ouvert (port=%d len=%d %d Hz stereo%s) volume 0dB rc=0x%08x",
                       main_ ? "MAIN" : "BGM", port_, outLen_, outRate_,
@@ -118,23 +101,17 @@ public:
         return true;
     }
 
-    // GRAIN PARTIEL. sceAudioOutOutput consomme TOUJOURS outLen_ trames, quel
-    // que soit ce qu'on croit lui donner : passer un tampon de n < outLen_
-    // trames fait rejouer par le pilote les trames PÉRIMÉES qui suivent dans la
-    // mémoire (la fin du grain précédent). On recopie ce qu'on a et on MET À
-    // ZÉRO le reste. Le mélangeur fait déjà la même mise à zéro de son côté :
-    // ceinture ET bretelles, parce que ce puits est le seul qui BLOQUE et que
-    // c'est le chemin qu'on ne peut pas rejouer sous qemu.
+    // Partial grain: sceAudioOutOutput always consumes outLen_ frames no
+    // matter what's actually passed in. A buffer with fewer valid frames
+    // would have the driver replay stale trailing memory (the end of the
+    // previous grain), so the rest is zeroed after copying what's available.
     void write(const int16_t* pcm, int frames) override {
         if (port_ < 0 || !pcm) return;
-        // REAFFIRMATION DU VOLUME DU PORT, toutes les ~10 s. Il n'etait pose
-        // qu'a l'ouverture et jamais relu : si le systeme ou un autre composant
-        // le baisse, personne ne le saurait. L'appel est idempotent et coute
-        // moins qu'un grain sur 430.
+        // Re-assert port volume roughly every ~10s: if the system or another
+        // component lowers it after open, nothing else would catch that. The
+        // call is idempotent and costs less than one grain in 430.
         if (++sinceVol_ >= 430) { sinceVol_ = 0; set_port_volume(); }
-        // LE CRITERE EST L'EGALITE DES FREQUENCES, pas le type de port : c'est
-        // `main_` qui servait de critere, ce qui liait le reechantillonnage a
-        // un knob au lieu de le lier au fait qui le commande.
+        // Resampling is decided by rate equality, not by port type.
         if (outRate_ == srcRate_) {
             if (frames == outLen_) { out(pcm); return; }
             if (frames < 0) frames = 0;
@@ -144,7 +121,7 @@ public:
             out(rs_);
             return;
         }
-        // Interpolation lineaire vers outRate_, jambe de REPLI seulement.
+        // Linear interpolation to outRate_ — fallback path only.
         const int n = outLen_;
         for (int i = 0; i < n; i++) {
             const int64_t sp = (int64_t)i * srcRate_;
@@ -160,12 +137,11 @@ public:
 
     void close() override {
         if (port_ < 0) return;
-        // Le DRAINAGE attend la fin du dernier grain : c'est un appel BLOQUANT.
-        // Il n'a de sens que si l'on a ecrit quelque chose. Sans cette garde, le
-        // repli « le fil audio n'a pas demarre » — qui ferme le puits depuis
-        // DirectSoundCreate, donc depuis un corps de shim, GIL TENU — ferait le
-        // SEUL appel bloquant restant sur le fil du jeu. Rien n'a ete ecrit dans
-        // ce cas : on relache le port, point.
+        // Draining waits for the last grain to finish (a blocking call), and
+        // only makes sense if something was written. Without this guard, the
+        // path that closes the sink from DirectSoundCreate — shim code,
+        // holding the GIL — would make this the one remaining blocking call
+        // on the game thread when nothing was ever written.
         if (wrote_) sceAudioOutOutput(port_, nullptr);
         sceAudioOutReleasePort(port_);
         port_ = -1;
@@ -188,12 +164,11 @@ private:
         return sceAudioOutSetVolume(port_,
             (SceAudioOutChannelFlag)(SCE_AUDIO_VOLUME_FLAG_L_CH | SCE_AUDIO_VOLUME_FLAG_R_CH), vol);
     }
-    // LE rc DE LA SORTIE, TESTE. sceAudioOutOutput rend le nombre d'octets mis
-    // en file, ou un code negatif. Un rc negatif ignore rend l'appel IMMEDIAT :
-    // la boucle du fil audio, qui n'a pas d'autre horloge que cet appel
-    // bloquant, devient une attente active a 100 % d'un coeur, les curseurs de
-    // lecture avancent des dizaines de fois trop vite, toutes les voix
-    // « finissent » aussitot — et le son disparait SANS UNE LIGNE.
+    // sceAudioOutOutput's rc is checked because it returns a queued byte
+    // count or a negative code. An ignored negative rc returns immediately:
+    // since this blocking call is the audio thread's only clock, that turns
+    // into a 100%-core busy loop, playback cursors advance far too fast, and
+    // sound disappears with nothing in the log to explain why.
     void out(const int16_t* p) {
         const int rc = sceAudioOutOutput(port_, p);
         lastRc_ = rc;
@@ -206,10 +181,10 @@ private:
                           (unsigned)rc, (unsigned long long)nerr_, (unsigned long long)consec_);
             wx86_progress(m);
         }
-        // ANTI-ATTENTE-ACTIVE. Le puits est l'horloge du fil ; s'il rend la main
-        // sans attendre, on remet l'horloge a la main (23 ms = un grain) plutot
-        // que de bruler un coeur. Le fil reste sortable : le drapeau d'arret est
-        // relu a chaque tour de boucle.
+        // Anti-busy-wait: the sink is the thread's clock, so if it keeps
+        // returning without waiting, sleep for one grain (23ms) instead of
+        // spinning a core. The thread stays stoppable since the stop flag is
+        // re-read every loop iteration.
         if (consec_ >= 4) sceKernelDelayThread(23000);
     }
 
@@ -217,33 +192,28 @@ private:
     bool main_ = false, wrote_ = false;
     int  volRc_ = 0, lastRc_ = 0, sinceVol_ = 0;
     unsigned long long nout_ = 0, nerr_ = 0, consec_ = 0;
-    // ALIGNEMENT. int16_t[] a un alignement naturel de 2 octets ; le pilote
-    // audio fait du DMA et rien dans l'en-tete ne promet qu'il accepte moins de
-    // 4. Un refus a cet endroit serait silencieux (le rc etait jete avant ce
-    // correctif) : alignas(64) — la ligne de cache ARM — coute zero et ferme la
-    // question. NON MESURE : aucune preuve que le pilote l'exigeait.
-    alignas(64) int16_t rs_[4096];   // 2048 trames stereo au plus (grain 512 -> 1115 a 48000)
+    // int16_t[] naturally aligns to 2 bytes, but the audio driver does DMA
+    // and nothing in the header guarantees it accepts less than 4. alignas(64)
+    // (an ARM cache line) costs nothing and closes the question — defensive,
+    // not proven necessary.
+    alignas(64) int16_t rs_[4096];   // at most 2048 stereo frames (grain 512 -> 1115 at 48000)
 };
 
 void (*g_body)(void) = nullptr;
 SceUID g_th = -1;
 
 int audio_thread(SceSize, void*) {
-    // PREMIERE INSTRUCTION : l'auto-epinglage. Un masque pose par le createur se
-    // relit 0 ; c'est rc et surtout d= (lastExecutedCpuId) de la ligne
-    // « coeurs: » qui tranchent, jamais m=0x0.
+    // First instruction: self-pinning. A mask set by the creator reads back
+    // as 0; the "cores:" line's rc and especially d= (lastExecutedCpuId) are
+    // what settle it, never m=0x0.
     unsigned relu = 0;
     const char* cs = getenv("WX86_SONCPU"); if (!cs) cs = getenv("D2_SONCPU");
-    // PLACEMENT PAR DEFAUT : USER_1, ET C'EST UN CHOIX, PAS UN HERITAGE.
-    // D2_COEURS vaut "222" par defaut : le presentateur, le chien de garde et le
-    // battement anti-famine sont TOUS sur USER_2, les runners invites sur
-    // USER_0 — USER_1 ne porte AUCUN fil de production. C'est donc le seul
-    // emplacement ou un fil qui bloque 23 ms sur 23 ms ne prend le coeur de
-    // personne. L'ancien defaut d2vita_core_mask(2) resolvait a USER_2, donc
-    // SUR le presentateur, et a une priorite SUPERIEURE a la sienne (0xA0 contre
-    // 0x100) : il l'aurait PREEMPTE sur son propre coeur, contre la regle
-    // « presentateur seul sur son coeur » (docs/perf/README.md).
-    // JAMAIS USER_0 : 23 ms de blocage y voleraient le coeur du jeu.
+    // Default placement: USER_1, deliberately. With the default core scheme,
+    // the presenter, watchdog, and anti-starvation heartbeat all sit on
+    // USER_2, and guest runners on USER_0 — USER_1 carries no production
+    // thread. It's the only core where a thread that blocks 23ms out of every
+    // 23ms steals nobody's time. Never USER_0: blocking there would steal the
+    // game's own core.
     int mask = 0x00020000;   // SCE_KERNEL_CPU_MASK_USER_1
     if (cs && *cs) {
         switch (*cs) {
@@ -258,11 +228,9 @@ int audio_thread(SceSize, void*) {
     char s[128];
     std::snprintf(s, sizeof s, "audio: auto-epinglage masque=0x%x rc=0x%08x relu=0x%x", (unsigned)mask, (unsigned)rc, relu);
     wx86_progress(s);
-    // Le libelle reste « d2_audio » : c'est le nom du premier consommateur, et
-    // il porte encore la forme de celui-ci dans un fichier generique. Le
-    // renommer ici serait un changement de COMPORTEMENT (la ligne « coeurs: »
-    // est grepee par la recette de validation de ce consommateur) glisse sous
-    // une etiquette de nettoyage — voir le rapport de vague 4.
+    // The label stays "d2_audio": a port's validation scripts grep the
+    // "cores:" log line for this exact string, so renaming it here would be
+    // a behavior change, not just a cleanup.
     wx86_vita_core_register("d2_audio", g_th, (unsigned)mask, rc);
     if (g_body) g_body();
     wx86_progress("audio: fil termine");
@@ -273,18 +241,16 @@ int audio_thread(SceSize, void*) {
 
 Sink* make_vita_sink() { return new VitaSink(); }
 
-// LA CASCADE. Chaque barreau dit ce qu'il TENTE et ce qu'il OBTIENT ; le verdict
-// final donne les rc de tous. « Le fil n'a pas demarre » sans chiffre a coute
-// une soiree entiere : cela ne peut plus se reproduire.
+// The cascade: each rung logs what it attempts and what it gets; the final
+// verdict reports every rung's rc, so a thread that fails to start is never
+// unexplained.
 //
-// ⚠️ 06/09, console : ce fil ne se creait PAS et le jeu restait muet. La
-// priorite demandee etait 0x100000A0. Le bit 0x10000000 veut dire « RELATIVE au
-// defaut du processus », et le defaut est 0x10000100 : la fenetre legale va de
-// DEFAUT-32 (0x100000E0) a DEFAUT+31 (0x1000011F). 0xA0 = DEFAUT-96, soit
-// 64 crans HORS fenetre — le noyau refuse. Le commentaire d'origine raisonnait
-// comme si 0xA0 etait une priorite ABSOLUE (legale, 64..191) en gardant le
-// drapeau relatif : deux encodages melanges. Ce SDK ne definit AUCUNE constante
-// de priorite, donc rien ne l'a signale a la compilation.
+// Thread priority encoding: bit 0x10000000 means "relative to the process
+// default" (0x10000100 here); the legal window is DEFAULT-32 (0x100000E0) to
+// DEFAULT+31 (0x1000011F). A raw offset like 0xA0 is only legal if treated as
+// an absolute priority (range 64..191) — combined with the relative flag it
+// falls out of range and the kernel refuses the thread. This SDK defines no
+// priority constants, so nothing catches a mixed encoding at compile time.
 namespace {
 struct Rung { int prio; int stackKio; const char* why; };
 const Rung kRungs[] = {
@@ -312,15 +278,15 @@ void log_context(const char* quand) {
 
 bool thread_start(void (*body)(void)) {
     if (g_th >= 0) return true;
-    if (g_exhausted) return false;          // la cascade est deja allee au bout
+    if (g_exhausted) return false;          // the cascade already ran to completion
     g_body = body;
 
-    // LE CONTEXTE D'ABORD. Memoire libre et nombre de fils hotes : les deux
-    // seules hypotheses que le rc seul ne separe pas.
+    // Context first: free memory and host thread count are the two
+    // hypotheses that rc alone can't distinguish between.
     log_context("avant creation du fil");
 
-    // Deux knobs pour l'A/B console, DERRIERE le defaut : ils remplacent le
-    // PREMIER barreau seulement, les replis restent le patron prouve.
+    // Two knobs for console A/B testing, layered behind the default: they
+    // only override the first rung; the fallbacks stay the proven baseline.
     int p0 = kRungs[0].prio, s0 = kRungs[0].stackKio;
     if (const char* e = getenv("WX86_SONPRIO")  ? getenv("WX86_SONPRIO")  : getenv("D2_SONPRIO"))
         { long v = strtol(e, nullptr, 0); if (v) p0 = (int)v; }
@@ -337,7 +303,7 @@ bool thread_start(void (*body)(void)) {
                       i + 1, kRungs_n, (unsigned)prio, stack, (unsigned)th, kRungs[i].why);
         wx86_progress(m);
         if (th < 0) continue;
-        g_th = th;                                   // audio_thread lit g_th pour son inscription
+        g_th = th;                                   // audio_thread reads g_th to register itself
         const int rs = sceKernelStartThread(th, 0, nullptr);
         std::snprintf(m, sizeof m, "audio: essai %d/%d StartThread(uid=0x%08x) rc=0x%08x",
                       i + 1, kRungs_n, (unsigned)th, (unsigned)rs);
@@ -352,9 +318,8 @@ bool thread_start(void (*body)(void)) {
         sceKernelDeleteThread(th);
         g_th = -1;
     }
-    // VERDICT. Les rc des quatre barreaux sur UNE ligne : c'est elle, et elle
-    // seule, qui separe une priorite illegale d'un manque de memoire et d'un
-    // epuisement d'UID.
+    // Verdict: all four rungs' rc on one line — the only thing that
+    // distinguishes an illegal priority from low memory from UID exhaustion.
     int n = std::snprintf(m, sizeof m, "audio: FIL AUDIO NON DEMARRE apres %d essais — rc:", kRungs_n);
     for (int i = 0; i < kRungs_n && n > 0 && n < (int)sizeof m; i++)
         n += std::snprintf(m + n, sizeof m - (size_t)n, " [%d]=0x%08x", i + 1, (unsigned)g_rungRc[i]);
@@ -364,12 +329,11 @@ bool thread_start(void (*body)(void)) {
     return false;
 }
 
-// REPLI N+1 : LA CREATION DIFFEREE. Appele hors du chemin d'init (voir
-// ds_emul::frame_pump). La cascade en ligne se joue pendant la creation du
-// peripherique son, c'est-a-dire au creux de la courbe memoire ; quelques
-// secondes plus tard le tas a respire. Ce point d'entree REJOUE la cascade
-// complete, une fois par appel, et n'est atteint que si la premiere est allee
-// au bout.
+// Deferred retry, called outside the init path (see ds_emul::frame_pump).
+// The inline cascade runs during device creation, at the low point of the
+// memory curve; a few seconds later the heap has more room. This replays the
+// full cascade once per call, and is only reached if the first attempt ran
+// to completion.
 bool thread_retry(void) {
     if (g_th >= 0) return true;
     g_exhausted = false;
@@ -379,15 +343,16 @@ bool thread_retry(void) {
 
 bool thread_stop(void) {
     if (g_th < 0) return true;
-    // Le corps sort de sa boucle sur le drapeau de ds_emul ; il peut etre bloque
-    // jusqu'a un grain (23 ms) dans sceAudioOutOutput. Attente BORNEE : un
-    // demontage qui se fige est le pire des rapports de fin.
+    // The body exits its loop on ds_emul's stop flag, but can be blocked for
+    // up to one grain (23ms) inside sceAudioOutOutput. Bounded wait: a
+    // teardown that hangs is the worst possible shutdown behavior.
     SceUInt tmo = 2000000;   // 2 s
     const int rc = sceKernelWaitThreadEnd(g_th, nullptr, &tmo);
     if (rc < 0) {
-        // Il n'a pas joint. On NE detruit rien : ni le fil, ni (chez l'appelant)
-        // le puits qu'il lit encore. Un rapport de fin incomplet n'a jamais fait
-        // tomber un processus ; un fil qui lit un objet libere, si.
+        // Didn't join in time. Nothing is destroyed — not the thread, nor
+        // (in the caller) the sink it's still reading. An incomplete
+        // shutdown never crashed a process; a thread reading freed memory
+        // will.
         wx86_progress("audio: le fil n'a pas joint en 2 s — puits laisse en place");
         return false;
     }

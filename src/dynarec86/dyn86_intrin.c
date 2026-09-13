@@ -1,5 +1,5 @@
-/* src/dynarec86/dyn86_intrin.c — registre des intrinsèques natives.
- * Contrat, preuves et regles de surete : dyn86_intrin.h.
+/* src/dynarec86/dyn86_intrin.c — registry of native intrinsics.
+ * Contract, proofs and safety rules: dyn86_intrin.h.
  * Box86 is (c) ptitSeb, MIT license — see third_party/box86-dynarec/LICENSE
  */
 #include <stdio.h>
@@ -15,7 +15,7 @@ int dyn86_intrin_add(uintptr_t va, dyn86_intrin_fn fn, uint16_t retn,
     if (!va || !fn) return 0;
     if (dyn86_intrin_n >= DYN86_INTRIN_MAX) return 0;
     for (int i = 0; i < dyn86_intrin_n; ++i)
-        if (dyn86_intrin_tbl[i].va == va) return 0;   /* deja enregistree */
+        if (dyn86_intrin_tbl[i].va == va) return 0;   /* already registered */
     dyn86_intrin_t* e = &dyn86_intrin_tbl[dyn86_intrin_n++];
     e->va = va; e->fn = fn; e->retn = retn;
     e->inmask = inmask; e->regmask = regmask;
@@ -24,9 +24,9 @@ int dyn86_intrin_add(uintptr_t va, dyn86_intrin_fn fn, uint16_t retn,
     return 1;
 }
 
-/* Balayage lineaire : la table fait au plus 16 entrees et n'est consultee
- * qu'UNE fois par debut de bloc (pas par instruction). Une table de hachage
- * ici serait du bruit — mesure : ~9 000 blocs traduits sur un run entier. */
+/* Linear scan: the table holds at most 16 entries and is consulted only ONCE
+ * per block start (not per instruction). A hash table here would be noise --
+ * a full run translates on the order of a few thousand blocks. */
 const dyn86_intrin_t* dyn86_intrin_find(uintptr_t va)
 {
     if (!dyn86_intrin_on || !va) return 0;

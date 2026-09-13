@@ -48,7 +48,7 @@ struct Cpu {
     // touch guest bytes that may have been translated).
     // `n` = how many bytes the caller will touch: backends that can tell refuse
     // (null) a range escaping the guest arena, so bulk shim I/O can never memcpy
-    // into a host object behind a wild guest pointer (C3, deep review).
+    // into a host object behind a wild guest pointer.
     virtual void* hostptr(uint32_t va, uint32_t n = 1) { (void)va; (void)n; return nullptr; }
     // Stable pointer to the guest EIP storage (diagnostics: the Vita watchdog
     // samples it racily to name where a hung guest is spinning). Null if the
@@ -66,18 +66,17 @@ struct Cpu {
     // without a code cache. Same guest-VA keying as read()/write().
     virtual void invalidate_code(uint32_t va, uint32_t size) { (void)va; (void)size; }
 
-    // JETER les traductions de [va, va+size) — pas « marquer sales », JETER.
+    // Unconditionally DISCARDS translations of [va, va+size) — not just marks
+    // them dirty.
     //
-    // invalidate_code() suit le contrat SMC de box86 : il ne fait quelque chose
-    // que si la plage est ENTIEREMENT sous PROT_DYNAREC (isprotectedDB rend 0
-    // des qu'UNE page ne l'est pas). C'est prevu pour un auto-patch de quelques
-    // octets ; c'est un NO-OP SILENCIEUX pour ce dont un rechargement d'image
-    // complet a besoin — remplacer un exe de plusieurs Mo dont seules quelques
-    // pages ont ete traduites laisse le nouveau processus executer les
-    // dynablocks du PRECEDENT aux memes adresses (bug confirme sur carn-vita,
-    // 2026-09-06 : l'enchainement de deux .exe partait en vrille juste apres
-    // le premier ecran). D'ou cette methode, qui DETRUIT sans condition les
-    // dynablocks de la plage. Cher : a n'appeler qu'a un changement d'image.
+    // invalidate_code() follows box86's SMC contract: it only acts if the
+    // range is ENTIRELY under PROT_DYNAREC (isprotectedDB returns 0 as soon as
+    // one page isn't). That's fine for a small self-patch, but it's a silent
+    // no-op for what a full image reload needs: replacing a multi-MB exe
+    // where only a few pages were translated would leave the new process
+    // executing the PREVIOUS image's dynablocks at the same addresses. Hence
+    // this method, which unconditionally destroys the range's dynablocks.
+    // Expensive: call only on an image change.
     virtual void discard_code(uint32_t va, uint32_t size) { invalidate_code(va, size); }
 
     uint32_t read_u32(uint32_t va) { uint32_t v = 0; read(va, &v, 4); return v; }
@@ -117,57 +116,50 @@ struct Cpu {
     // at the return address (i.e. just after the call, before prologue).
     uint32_t arg(uint32_t k) { return read_u32(reg(R_ESP) + 4 + 4 * k); }
 
-    // Lecture GROUPEE des huit registres GENERAUX (R_EAX..R_EDI) : remplit
-    // out[R_EAX]..out[R_EDI]. Meme motif que trap_retaddr/trap_epilogue, et
-    // pour la meme raison : un crochet natif lisait ESP, puis ECX, puis EDX en
-    // TROIS appels, donc trois resolutions d'etat par fil (chaine emutls,
-    // 0,43-0,58 us mesurees par appel sur console). Une seule suffit.
+    // Batched read of the eight general registers (R_EAX..R_EDI) into out[].
+    // Reading them one at a time via reg() pays a per-thread state resolution
+    // on every call; grouping avoids that. Safe because reading GP registers
+    // is pure. R_EFLAGS is deliberately excluded: reading it would materialize
+    // Box86's deferred flags (UpdateFlags), which is a side effect and has no
+    // place in a speculative bulk read.
     //
-    // AUCUN EFFET DE BORD, et c'est ce qui rend le groupage sur : la lecture
-    // des huit generaux est pure. R_EFLAGS est EXCLU A DESSEIN — le lire
-    // materialise les drapeaux differes de Box86 (UpdateFlags), donc il n'a
-    // rien a faire dans une lecture speculative de tout le fichier.
-    //
-    // L'IMPLEMENTATION PAR DEFAUT EST L'ANCIEN CODE, registre par registre :
-    // un backend qui ne surcharge pas reste correct sans qu'on y touche.
+    // Default implementation is the old register-by-register code, so a
+    // backend that doesn't override this stays correct unchanged.
     virtual void regs_gp(uint32_t* out) {
         for (int r = R_EAX; r <= R_EDI; ++r) out[r] = reg(r);
     }
 
-    // ---- Entree et sortie de trap, GROUPEES --------------------------------
-    // Le chemin de trap manipulait les registres UN PAR UN : 2 reg() + 3
-    // set_reg() par trap, chacun repayant sa propre resolution d'etat par fil.
-    // Mesure console en jeu (2026-08-31, histogramme par appelant) :
-    // reg()+set_reg() portaient 73 % des 9,92 chaines emutls par prise de GIL.
+    // ---- Batched trap entry/exit -------------------------------------------
+    // Handling registers one at a time (2 reg() + 3 set_reg() per trap) pays a
+    // per-thread state resolution on every call; this path is hot enough that
+    // batching them matters.
     //
-    // L'IMPLEMENTATION PAR DEFAUT EST L'ANCIEN CODE, effet pour effet : un
-    // backend qui ne surcharge pas reste correct sans qu'on y touche. C'est le
-    // cas de CpuUnicorn, l'oracle de verification — sa semantique ne bouge pas
-    // d'un bit, et c'est ce qui rend ce changement d'interface sur.
+    // Default implementation has the same effect as the old per-register
+    // code, so a backend that doesn't override it (e.g. CpuUnicorn, the
+    // verification oracle) keeps identical semantics — that's what makes this
+    // interface change safe.
     virtual uint32_t trap_retaddr() { return read_u32(reg(R_ESP)); }
-    // esp_add : ce que `ret [imm]` retire de la pile (4, plus 4*argc en stdcall).
-    // eip     : la destination FINALE, redirection deja arbitree par l'appelant.
+    // esp_add: what `ret [imm]` pops off the stack (4, plus 4*argc for stdcall).
+    // eip: the final destination, already resolved by the caller.
     virtual void trap_epilogue(uint32_t eax, uint32_t esp_add, uint32_t eip) {
         set_reg(R_EAX, eax);
         set_reg(R_ESP, reg(R_ESP) + esp_add);
         set_reg(R_EIP, eip);
     }
 
-    // ---- B5 : entree ET sortie d'un trap stdcall argc=0, en UN SEUL appel ---
-    // Le couple trap_retaddr() + trap_epilogue() coute DEUX resolutions d'etat
-    // par fil : le backend Box86 les groupe chacune de son cote, mais il n'a
-    // aucun moyen de savoir que les deux appels concernent le meme trap. Pour
-    // le chemin d'horloge — le creneau le plus pris de tout le binaire — la
-    // valeur rendue ne depend PAS de l'adresse de retour : on peut donc lire
-    // la pile et publier EAX/ESP/EIP dans la meme resolution.
+    // ---- Combined entry+exit for a stdcall trap with argc=0, in one call ---
+    // trap_retaddr() + trap_epilogue() each pay a per-thread state resolution,
+    // and the backend has no way to know two separate calls belong to the
+    // same trap. For a trap whose returned value doesn't depend on the return
+    // address, the stack read and the EAX/ESP/EIP writes can share one
+    // resolution instead.
     //
-    // L'IMPLEMENTATION PAR DEFAUT EST L'ANCIEN CODE, effet pour effet et dans
-    // le meme ordre observable (lecture de ESP, lecture de [ESP], puis les
-    // trois ecritures) : un backend qui ne la surcharge pas reste correct.
-    // C'est ce qui rend ce changement d'interface sur pour tout appelant.
+    // Default implementation preserves the old code's effect and observable
+    // order (read ESP, read [ESP], then the three writes), so a backend that
+    // doesn't override it stays correct for any caller.
     //
-    // PRECONDITION, la meme que trap_retaddr() : ESP pointe sur l'adresse de
-    // retour (juste apres le `call`, aucun argument empile — argc=0).
+    // Precondition (same as trap_retaddr()): ESP points at the return address
+    // (right after the `call`, no arguments pushed — argc=0).
     virtual void trap_ret0(uint32_t eax) {
         const uint32_t esp = reg(R_ESP);
         const uint32_t ret = read_u32(esp);
@@ -198,18 +190,18 @@ struct Cpu {
     virtual void set_run_limit(uint64_t) {}
     virtual bool take_limit_hit() { return false; }
 
-    // Filet anti-famine (spec 2026-08-29 §3.3) : zéroe le budget de blocs d'UN
-    // emu (handle thread_emu_create, ou nullptr = emu de base) pour forcer sa
-    // sortie du code traduit au prochain prologue — préemption à la demande.
-    // CONTRAT : ne touche JAMAIS quit ni g_stop — ils sont MONOTONES en natif,
-    // réservés au shutdown (voir request_stop ci-dessus) ; nudge est répétable
-    // et sans effet sur la sémantique invitée (il raccourcit une tranche, rien
-    // d'autre). Course RMW bénigne assumée : le prologue dyn86 fait
-    // load-décrément-store sur le budget ; un zéro écrit entre le load et le
-    // store est perdu — rattrapé à la fenêtre de détection suivante (§3.3).
-    // Appelant : tient le GIL et parcourt le registre append-only des emus
-    // (même discipline que request_stop appelé sous GIL). No-op par défaut
-    // (backends sans budget de blocs — l'ex-CpuUnicorn en héritait).
+    // Anti-starvation valve: zeroes one emu's block budget (handle from
+    // thread_emu_create, or nullptr for the base emu) to force it out of
+    // translated code at the next prologue — on-demand preemption.
+    // Contract: never touches quit or g_stop — those are monotonic in native
+    // mode and reserved for shutdown (see request_stop above); nudge is
+    // repeatable and has no effect on guest semantics (it only shortens a
+    // time slice). Benign RMW race assumed: the dyn86 prologue does a
+    // load-decrement-store on the budget, so a zero written between the load
+    // and the store is lost — caught at the next starvation-detection pass.
+    // Caller must hold the GIL and iterate the append-only emu registry (same
+    // discipline as request_stop under the GIL). No-op by default (backends
+    // without a block budget).
     virtual void nudge_thread_budget(void* emu) { (void)emu; }
 
     // ---- Native-scheduler backend support (one x86emu per guest thread) ----
@@ -228,36 +220,36 @@ struct Cpu {
     virtual void thread_emu_bind(void* emu) { (void)emu; }
     // Racily-sampleable EIP storage of one emu (per-thread watchdog dumps).
     virtual const uint32_t* thread_emu_ip(void* emu) { (void)emu; return nullptr; }
-    // Vivacité PAR FIL (diagnostic famine/interblocage du backend natif).
-    // Rend dans *out le nombre de blocs traduits exécutés par l'emu de ce fil
-    // depuis le boot — MONOTONE (modulo 2^32 : seules les DIFFÉRENCES sont
-    // exploitées, et une différence non signée reste exacte à travers le
-    // repli). Le compteur est dérivé du budget de blocs, que le prologue de
-    // CHAQUE bloc traduit décrémente déjà : il bouge dès que le fil exécute du
-    // code traduit, y compris une boucle qui ne franchit AUCUN shim, et il ne
-    // coûte rien sur le chemin chaud (une addition par TRANCHE, pas par bloc).
-    // POURQUOI MONOTONE et pas le budget nu : le filet anti-famine ZÉROTE le
-    // budget de tous les fils Running à chaque détection, donc deux relevés
-    // successifs d'un fil qui tourne à débit constant affichaient la MÊME
-    // valeur (« blocs depuis le dernier poke ») — et la règle de lecture
-    // « aucun compteur ne bouge => interblocage » désignait alors comme
-    // interbloqué le fil qui AFFAME les autres (revue I1).
-    // Lecture racy assumée (même régime que thread_emu_ip), MAIS ordonnée :
-    // l'implémentation lit le total, PUIS l'armement, PUIS le budget, et
-    // l'écrivain désarme avant d'accumuler (cpu_box86.cpp, ordre commenté sur
-    // place). Conséquence, et c'est le contrat du champ : le seul relevé faux
-    // possible est une SOUS-estimation d'une tranche, sur une fenêtre de
-    // quelques instructions ; JAMAIS un bond en avant, qui se lirait « ce fil
-    // galope » — le sens faux. Toute réimplémentation doit garder cet ordre.
-    // Rend false = backend sans compteur de blocs (champ ABSENT, pas un zéro
-    // menteur). nullptr = emu de base (main).
+    // Per-thread liveness (starvation/deadlock diagnostics for the native
+    // backend). Writes to *out the number of translated blocks executed by
+    // this thread's emu since boot — MONOTONIC (mod 2^32: only DIFFERENCES
+    // are used, and an unsigned difference stays exact across wraparound).
+    // Derived from the block budget, which every translated block's prologue
+    // already decrements: it moves as soon as the thread runs translated
+    // code, even a loop that never crosses a shim, and costs nothing extra on
+    // the hot path (one add per slice, not per block).
+    // Why monotonic rather than the raw budget: the anti-starvation valve
+    // zeroes every Running thread's budget on each detection pass, so two
+    // consecutive reads of a thread running at a steady rate would show the
+    // same value ("blocks since the last nudge") — and the rule "no counter
+    // moves => deadlock" would then flag the thread STARVING the others as
+    // the deadlocked one.
+    // Read is racy (same regime as thread_emu_ip) but ORDERED: the
+    // implementation reads the total, THEN the arm flag, THEN the budget, and
+    // the writer disarms before accumulating (order commented in place in
+    // cpu_box86.cpp). Consequence, and this is the field's contract: the only
+    // possible wrong reading is an UNDER-estimate over a window of a few
+    // instructions, NEVER a forward jump that would misread as "this thread
+    // is racing ahead." Any reimplementation must preserve this ordering.
+    // Returns false when the backend has no block counter (field ABSENT, not
+    // a lying zero). nullptr = the base emu (main).
     virtual bool thread_emu_blocks(void* emu, uint32_t* out) { (void)emu; (void)out; return false; }
-    // coeur2 (06/09/2026) : densite de traps et contention du GIL PAR FIL —
-    // traps = entrees dans la fenetre de trap (une prise du GIL chacune),
-    // cont = prises contendues (trylock echoue), wait_us = attente cumulee sur
-    // ces prises. Comptes UNIQUEMENT sous D2_FILSTAT=1 ; rend false si le
-    // backend ne compte pas (champ ABSENT, pas un zero menteur). Lecture racy
-    // assumee (meme regime que thread_emu_blocks). nullptr = emu de base.
+    // Per-thread trap density and GIL contention — traps = entries into the
+    // trap window (one GIL acquisition each), cont = contended acquisitions
+    // (trylock failed), wait_us = cumulative wait time on those acquisitions.
+    // Counted only under D2_FILSTAT=1; returns false when the backend doesn't
+    // count (field ABSENT, not a lying zero). Read is racy (same regime as
+    // thread_emu_blocks). nullptr = the base emu.
     virtual bool thread_emu_filstat(void* emu, uint32_t* traps, uint32_t* cont, uint32_t* wait_us) {
         (void)emu; (void)traps; (void)cont; (void)wait_us; return false; }
 

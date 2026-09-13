@@ -31,11 +31,11 @@ struct X86Context {
     uint32_t fs_base = 0;   // per-thread TIB
     // Per-thread FPU/SIMD state (opaque blob, Box86 backend: x87 stack +
     // control/status/tags, MMX, XMM, mxcsr, long-double/int64 shadows).
-    // Quantum preemption lands MID-COMPUTATION where this state is live;
+    // Quantum preemption lands mid-computation where this state is live;
     // sharing one copy across guest threads corrupts whichever thread
-    // resumes (realclock gameplay: DCC decode output byte-shifted -> D2CMP
-    // assert 1454 / wild jump in D2Game). fpu_valid=false = thread has not
-    // run yet -> backend loads its pristine power-on FPU state instead.
+    // resumes (stale FPU state surfaces as corrupted float results or a
+    // wild jump in guest code). fpu_valid=false = thread has not run yet
+    // -> backend loads its pristine power-on FPU state instead.
     uint8_t fpu[768] = {0};
     bool fpu_valid = false;
 };
@@ -132,21 +132,20 @@ public:
     // Diagnostics.
     virtual int live_count() = 0;
 
-    // ---- Widened contract (etape 1 natif): everything the Win32 shims call.
+    // ---- Extended contract: everything the Win32 shims call.
     // Timed wait whose wake must NOT decide the shim's return value (the shim
     // already returned it — e.g. the real-clock PeekMessage throttle).
     virtual void wait_noresult(Waitable* w, uint32_t timeout_ms) = 0;
     // Timed wait with a custom timeout return value. RETURNS the value the
-    // shim must return as EAX. Cooperative backend: returns a placeholder (the
-    // real EAX is written into the saved context on wake — behaviour-identical
-    // to the historical `wait(); return 0;` pattern). Native backend: blocks
-    // and returns the REAL outcome (w->result() on acquire, eax_on_timeout on
-    // timeout). Shims MUST `return` this value.
+    // shim must return as EAX. Cooperative backend: returns a placeholder —
+    // the real EAX is written into the saved context on wake. Native backend:
+    // blocks and returns the REAL outcome (w->result() on acquire,
+    // eax_on_timeout on timeout). Shims MUST `return` this value.
     virtual uint32_t wait_timeout_result(Waitable* w, uint32_t timeout_ms,
                                          uint32_t eax_on_timeout) = 0;
     // Loader-lock semantics around DllMain (see sched_cooperative.h). Native
     // backend: no-op (the hazards it guarded — shared emu, hot slots_ growth —
-    // are fixed by design there; documented in the spec D7).
+    // are fixed by design there).
     virtual void set_no_preempt(bool on) = 0;
     virtual void request_shutdown() = 0;
     virtual GuestThread* thread_by_id(uint32_t id) = 0;

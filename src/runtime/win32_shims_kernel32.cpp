@@ -1,33 +1,24 @@
-// src/runtime/win32_shims_kernel32.cpp — voir win32_shims_kernel32.h.
-// Premiere vague de l'extraction du groupe KERNEL32 de tools/rt_boot.cpp
-// (2026-09-11). KERNEL32 etait le plus gros bloc jamais audite : 252 cles,
-// dont 248 encore cote portage.
+// src/runtime/win32_shims_kernel32.cpp — see win32_shims_kernel32.h.
 //
-// CRITERE DE CETTE VAGUE — deux conditions cumulees, pas une intuition :
-//   1. le corps est IDENTIQUE (hors commentaires et espaces) a celui du
-//      second consommateur du moteur, carn-vita, qui porte un tout autre
-//      jeu. carn-vita descend du meme socle mais en a RETIRE la part
-//      specifique a Diablo II (CheckRevision, Authenticode, automatisation
-//      Battle.net) : ce qui y a survecu intact n'est donc pas du jeu.
-//      C'est une constatation, pas un raisonnement.
-//   2. le corps ne depend d'AUCUN symbole exterieur — ni helper heberge par
-//      le portage, ni etat global, ni ordonnanceur, ni horloge. Il ne touche
-//      que l'objet Cpu et des constantes.
+// Criterion for a body living here rather than with a consumer: it is
+// byte-identical (ignoring comments/whitespace) across both consumers of
+// this engine, which port unrelated games, and it depends on no external
+// symbol — no consumer-hosted helper, no global state, no scheduler, no
+// clock; only the Cpu object and constants.
 //
-// Les fonctions qui echouent a la condition 2 sont laissees au portage pour
-// cette vague : les atomiques (ilk_ptr/ilk_add_fetch), le TLS et la derniere
-// erreur (cur_tib, donc l'ordonnanceur), les fichiers (chemins de l'hote),
-// la synchronisation et l'horloge. Elles sont generiques pour la plupart,
-// mais leur deplacement demande d'abord d'exposer proprement le TIB courant
-// et les atomiques cote moteur — un point d'extension a concevoir pour LES
-// DEUX portages, pas un simple deplacement de texte.
+// What stays with the consumer for now: the atomics (ilk_ptr/ilk_add_fetch),
+// TLS and last-error (both need the current TIB, i.e. the scheduler), file
+// paths (host-specific), synchronization, and the clock. Most of these are
+// generic too, but moving them needs the engine to expose the current TIB
+// and the atomics cleanly first — a shared extension point, not a plain
+// text move.
 #include "win32_shims_kernel32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
 #include "guest_atomics.h"
 #include "guest_thread_ctx.h"
 extern "C" {
-#include "my_cpuid.h"     // wx86_cpuid_features : les bits que NOTRE cpuid annonce
+#include "my_cpuid.h"     // wx86_cpuid_features: the bits OUR cpuid reports
 }
 #include <cstdlib>
 #include <cstdint>
@@ -36,9 +27,9 @@ extern "C" {
 #include <string>
 using namespace d2rt;
 
-// ---- identite process / fils (voir l'en-tete) ---------------------------
-// 0x0AE4 = 2788 : multiple de 4, != 1, dans la plage ou un vrai Windows
-// distribue ses PID. 0x0AF0 pour le premier fil, puis +4 par fil.
+// ---- process/thread identity (see the header) ------------------------------
+// 0x0AE4 = 2788: a multiple of 4, != 1, in the range a real Windows hands
+// out PIDs from. 0x0AF0 for the first thread, then +4 per thread.
 static const uint32_t WX86_PID  = 0x00000AE4u;
 static const uint32_t WX86_TID0 = 0x00000AF0u;
 bool wx86_fid_avant() {
@@ -56,9 +47,8 @@ uint32_t wx86_sched_tid(uint32_t winTid) {
          ? (winTid - WX86_TID0) / 4u : 0u;
 }
 
-// Alias locaux : les corps de la vague 2 sont deplaces mot pour mot depuis le
-// portage, ou ces noms courts designaient les memes fonctions. Les definir ici
-// evite de reecrire les corps, donc de les relire a l'aveugle.
+// Local aliases matching the short names the bodies below were written
+// against, so those bodies can stay as-is instead of being retyped.
 static inline uint32_t* ilk_ptr(Cpu& c, uint32_t va){ return wx86_ilk_ptr(c,va); }
 static inline uint32_t ilk_add_fetch(uint32_t* h, uint32_t v){ return wx86_ilk_add_fetch(h,v); }
 static inline uint32_t ilk_sub_fetch(uint32_t* h, uint32_t v){ return wx86_ilk_sub_fetch(h,v); }
@@ -89,7 +79,7 @@ void win32_shims_kernel32_install(Bridge& br){
     K("FreeEnvironmentStringsW",1,[](Cpu&){ return 1u; });
     K("FreeLibrary",1,[](Cpu&){ return 1u; });
     K("GetCPInfo",2,[](Cpu&c){ uint32_t p=c.arg(1); c.write_u32(p,1); return 1u; });   // MaxCharSize=1
-    K("GetCurrentProcessId",0,[](Cpu&){ return wx86_win_pid(); });   // jamais 1 : ce PID n'existe pas
+    K("GetCurrentProcessId",0,[](Cpu&){ return wx86_win_pid(); });   // never 1: that PID does not exist
     K("GetDriveTypeA",1,[](Cpu&){ return 3u; });   // DRIVE_FIXED
     K("GetFileType",1,[](Cpu&){ return 1u; });                           // FILE_TYPE_CHAR
     K("GetProcessAffinityMask",3,[](Cpu&c){ if(c.arg(1))c.write_u32(c.arg(1),1); if(c.arg(2))c.write_u32(c.arg(2),1); return 1u; });
@@ -107,21 +97,19 @@ void win32_shims_kernel32_install(Bridge& br){
     K("IsBadReadPtr",2,[](Cpu&){ return 0u; });
     K("IsBadWritePtr",2,[](Cpu&){ return 0u; });
     K("IsDebuggerPresent",0,[](Cpu&){ return 0u; });                       // not debugged
-    // Rendait 0 POUR TOUT, alors que notre propre cpuid annonce FPU/CMOV/MMX/
-    // FXSR/SSE/SSE2. Deux vues du meme processeur qui se contredisent : c'est
-    // la signature la moins chere de tout l'audit a lever. Les reponses sont
-    // DERIVEES de wx86_cpuid_features(), pas choisies — si la feuille 1 change,
-    // celles-ci suivent sans qu'on y pense.
+    // Responses are DERIVED from wx86_cpuid_features(), not hardcoded, so
+    // they stay consistent with what our own cpuid reports — two views of
+    // the same processor must never contradict each other.
     K("IsProcessorFeaturePresent",1,[](Cpu&c)->uint32_t{
-        if(wx86_fid_avant()) return 0u;                 // reponse D'AVANT (bouton coupant)
+        if(wx86_fid_avant()) return 0u;                 // legacy response (compatibility toggle)
         uint32_t edx=0, ecx=0; wx86_cpuid_features(&edx,&ecx);
         switch(c.arg(0)){
             case 0:  return 0u;                          // PF_FLOATING_POINT_PRECISION_ERRATA
-            case 1:  return (edx&1u)?0u:1u;              // PF_FLOATING_POINT_EMULATED : FPU materiel => 0
+            case 1:  return (edx&1u)?0u:1u;              // PF_FLOATING_POINT_EMULATED: hardware FPU => 0
             case 2:  return (edx>>8)&1u;                 // PF_COMPARE_EXCHANGE_DOUBLE (CX8)
             case 3:  return (edx>>23)&1u;                // PF_MMX_INSTRUCTIONS_AVAILABLE
             case 6:  return (edx>>25)&1u;                // PF_XMMI_INSTRUCTIONS_AVAILABLE (SSE)
-            case 8:  return 1u;                          // PF_RDTSC_INSTRUCTION_AVAILABLE (ReadTSC implemente)
+            case 8:  return 1u;                          // PF_RDTSC_INSTRUCTION_AVAILABLE (implemented)
             case 10: return (edx>>26)&1u;                // PF_XMMI64_INSTRUCTIONS_AVAILABLE (SSE2)
             case 13: return ecx&1u;                      // PF_SSE3_INSTRUCTIONS_AVAILABLE
             default: return 0u; } });
@@ -146,11 +134,10 @@ void win32_shims_kernel32_install(Bridge& br){
     K("WriteConsoleW",5,[](Cpu&c){ if(c.arg(3)) c.write_u32(c.arg(3),c.arg(2)); return 1u; });
     K("WritePrivateProfileStringA",4,[](Cpu&){ return 1u; });
 
-    // ---- Vague 2 (2026-09-11) : debloquee par les points d'extension --------
-    // Ces corps dependaient de helpers que le portage hebergeait ; ils vivent
-    // desormais dans le moteur (guest_atomics.h, guest_thread_ctx.h). Les noms
-    // courts restent des alias locaux pour que les corps soient deplaces SANS
-    // etre reecrits — un deplacement qu'on peut relire ligne a ligne.
+    // ---- Bodies unblocked by shared extension points --------------------------
+    // These depend on helpers that now live in the engine (guest_atomics.h,
+    // guest_thread_ctx.h) rather than a consumer. The short names stay local
+    // aliases so each body reads identically to its original.
     K("CreateProcessW",10,[](Cpu&c){ set_lasterr(c,2); return 0u; });          // no child processes (crash reporter)
     K("GetLastError",0,[](Cpu&c){ return get_lasterr(c); });
     K("InterlockedAnd",2,[](Cpu&c){ uint32_t p=c.arg(0), v=c.arg(1);

@@ -1,17 +1,14 @@
-// src/runtime/win32_shims_gdi32.cpp — see win32_shims_gdi32.h. Split out of
-// d2vita's tools/rt_boot.cpp GDI32 shim group (2026-09-10): fake handles,
+// src/runtime/win32_shims_gdi32.cpp — see win32_shims_gdi32.h. Fake handles,
 // honest no-ops, and pure functions of their arguments — no game-window
-// state (g_dibBits/g_palette/g_hwnd), no dependency on any d2vita-hosted
-// helper (misc/gread_mb/env_filelog).
+// state, no dependency on any consumer-hosted helper.
 //
-// Left d2vita-side (src/runtime/win32_shims_gdi32_d2.cpp is NOT created —
-// these stay inline in tools/rt_boot.cpp, entangled with large per-frame
-// closures that aren't worth forcibly relocating): CreateDIBSection,
-// SetDIBColorTable (own g_dibBits/g_palette), BitBlt/StretchBlt (the
-// frame-boundary hook driving dumpFrame/frameTick — the actual per-image
-// orchestration hub, not a generic GDI operation), and TextOutA (needs
-// gread_mb + env_filelog). GetDIBColorTable is a pure constant stub
-// (unlike its Set counterpart, it never touches the palette) so it moved.
+// Stays consumer-side (not generalized here), each for a concrete reason:
+// CreateDIBSection, SetDIBColorTable (own the DIB bits/palette state),
+// BitBlt/StretchBlt (the frame-boundary hook driving the per-image
+// orchestration, not a generic GDI operation), and TextOutA (needs
+// consumer-hosted string/logging helpers). GetDIBColorTable is a pure
+// constant stub — unlike its Set counterpart it never touches the palette,
+// so it lives here instead.
 #include "win32_shims_gdi32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"

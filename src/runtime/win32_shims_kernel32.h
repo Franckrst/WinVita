@@ -1,47 +1,40 @@
-// src/runtime/win32_shims_kernel32.h — shims KERNEL32 generiques : aucun
-// litteral, chemin ou comportement propre a un jeu donne. Inscrits via
-// Bridge::register_shim, le meme mecanisme qu'un consommateur utilise pour
-// en redefinir un pour son propre jeu (semantique d'ecrasement sur cle
-// dupliquee, cf. bridge.h).
+// src/runtime/win32_shims_kernel32.h — generic KERNEL32 shims: no literal,
+// path, or behavior specific to any one guest. Registered via
+// Bridge::register_shim, the same mechanism a consumer uses to override one
+// for its own game (overwrite-on-duplicate-key semantics, see bridge.h).
 #pragma once
 #include <cstdint>
 namespace d2rt { class Bridge; }
 
-// --- IDENTITE PROCESS / FILS, telle qu'un vrai Windows la distribue --------
-// Windows alloue les PID et les TID par pas de 4 — ce sont des index dans une
-// table du noyau — et ne rend JAMAIS 1 : le PID 1 n'existe pas. Un runtime qui
-// rend 1 pour le process et 1, 2, 3... pour ses fils pose une contradiction
-// gratuite sous les yeux du premier code qui regarde.
+// --- Process/thread identity, matching real Windows ------------------------
+// Windows allocates PIDs and TIDs in steps of 4 (kernel table indices) and
+// never returns 1 — PID 1 does not exist. These three functions live in the
+// engine because it owns the real ID table and registers
+// GetCurrentProcessId; a consumer filling a PROCESSENTRY32/THREADENTRY32
+// must read the guest-facing IDs from here rather than inventing its own
+// numbering, or the two views drift apart.
 //
-// Ces trois fonctions appartiennent au MOTEUR parce que la propriete qu'elles
-// portent est la sienne : c'est lui qui possede la table effective, et c'est
-// lui qui inscrit GetCurrentProcessId. L'embarqueur qui remplit un
-// PROCESSENTRY32 ou un THREADENTRY32 lit ICI, il ne se refait pas sa propre
-// numerotation — sinon les deux derivent, et la divergence n'est visible
-// qu'a l'execution.
-//
-// Les identifiants INTERNES de l'ordonnanceur ne changent pas (1, 2, 3...) :
-// journaux, bancs et profils les citent partout. Seule la vue INVITEE est
-// convertie, dans les deux sens.
+// Internal scheduler IDs stay small integers (1, 2, 3...) since logs,
+// benchmarks, and profiles reference them everywhere; only the guest-facing
+// view is translated, in both directions.
 uint32_t wx86_win_pid();
-uint32_t wx86_win_tid(uint32_t schedId);    // id d'ordonnanceur -> vue invitee
-uint32_t wx86_sched_tid(uint32_t winTid);   // vue invitee -> id d'ordonnanceur (0 si invalide)
+uint32_t wx86_win_tid(uint32_t schedId);    // scheduler id -> guest-facing view
+uint32_t wx86_sched_tid(uint32_t winTid);   // guest-facing view -> scheduler id (0 if invalid)
 
-// BOUTON COUPANT. WX86_FID_AVANT=1 (alias D2_FID_AVANT) restaure les reponses
-// D'AVANT cette campagne de fidelite : PID 1, tid 1/2/3...,
-// IsProcessorFeaturePresent qui rend 0 pour tout. Le DEFAUT est le
-// comportement FIDELE — patron « defaut = comportement fidele », jamais
-// l'inverse. Ce knob existe pour UNE raison : montrer qu'un test de fidelite
-// coupe vraiment. Un test qui passe dans les deux jambes ne prouve rien.
+// Compatibility toggle: WX86_FID_AVANT=1 (alias D2_FID_AVANT) reverts to the
+// legacy, non-faithful responses (PID 1, tid 1/2/3...,
+// IsProcessorFeaturePresent always 0). Default is the faithful behavior,
+// never the reverse. Exists so a fidelity test can be shown to actually fail
+// when the toggle flips it off — a test that passes either way proves nothing.
 bool wx86_fid_avant();
 
-// --- FREQUENCE DU COMPTEUR DE PERFORMANCE --------------------------------
-// QueryPerformanceFrequency rend cette valeur ; l'embarqueur qui inscrit son
-// propre QueryPerformanceCounter DOIT compter dans la meme unite (lire
-// wx86_perf_frequency()). Defaut 1 000 000 (compteur en microsecondes, le
-// contrat historique). Un Windows 10 moderne a TSC invariant rend 10 000 000 :
-// un embarqueur qui veut ressembler a un PC pose cette valeur ET met son
-// compteur a l'echelle — les deux ensemble, jamais l'un sans l'autre.
+// --- Performance-counter frequency ------------------------------------------
+// QueryPerformanceFrequency's return value; a consumer registering its own
+// QueryPerformanceCounter must count in the same unit (read
+// wx86_perf_frequency()). Default 1,000,000 (microsecond counter). A modern
+// Windows with an invariant TSC reports 10,000,000: matching that requires
+// setting this value AND scaling the counter together — never one without
+// the other.
 void     wx86_set_perf_frequency(uint64_t hz);
 uint64_t wx86_perf_frequency();
 

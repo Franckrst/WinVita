@@ -1,24 +1,21 @@
-// src/runtime/win32_shims_locale.h — shims KERNEL32 de LOCALE, de CHAINES et
-// de CONSOLE. Vague 2 de l'extraction du groupe KERNEL32.
+// src/runtime/win32_shims_locale.h — KERNEL32 shims for LOCALE, STRING, and
+// CONSOLE handling.
 //
-// POURQUOI CES TROIS SOUS-GROUPES ENSEMBLE. Ils partagent la meme dependance,
-// et c'est elle qui les bloquait : lire ou ecrire une chaine a une adresse
-// INVITEE (guest_str.h), et parfois la ranger dans le brouillon invite
-// (guest_scratch.h). Tant que ces deux primitifs vivaient chez le
-// consommateur, aucun de ces corps ne pouvait partir. Ils sont dans le moteur
-// depuis winx86 b124f1f ; ce fichier encaisse ce deblocage.
+// Why these three sub-groups share a file: they all need to read or write a
+// string at a GUEST address (guest_str.h), and sometimes stash one in guest
+// scratch space (guest_scratch.h). Both primitives live in the engine,
+// which is what lets these bodies live here too.
 //
-// GENERICITE : constatee, pas deduite. Les 36 corps sont IDENTIQUES au
-// caractere pres (hors commentaires et espaces) a ceux du second consommateur
-// du moteur, qui porte un tout autre jeu — verifie un par un, pas par
-// echantillon. Les six qui « different » ne different que par l'accesseur du
-// LCID (wx86_locale_lcid() ici, une globale la-bas) : meme semantique, le
-// second portage n'a simplement pas encore migre.
+// Genericity here is observed, not assumed: all bodies are byte-identical
+// (ignoring comments/whitespace) to the second consumer of this engine,
+// which ports an unrelated game — checked one by one, not sampled. The few
+// that differ only in their LCID accessor (wx86_locale_lcid() here, a plain
+// global there) carry the same semantics; that consumer just hasn't
+// migrated to the accessor yet.
 //
-// CE QUI N'EST PAS ICI. GetPrivateProfileStringA/IntA, qui vivent au milieu de
-// la meme zone du portage, restent chez lui : leur corps lit un VRAI fichier
-// .ini par ini_lookup(), un service que le portage possede. Ce n'est pas de la
-// prudence, c'est une dependance nommee.
+// What stays out: GetPrivateProfileStringA/IntA, which live in the same
+// area on the consumer side, because their body reads a real .ini file via
+// a consumer-owned lookup service — a named dependency, not caution.
 #pragma once
 namespace d2rt { class Bridge; }
 

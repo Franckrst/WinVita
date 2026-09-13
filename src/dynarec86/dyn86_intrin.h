@@ -1,86 +1,71 @@
-/* src/dynarec86/dyn86_intrin.h — D2Vita : INTRINSEQUES NATIVES reconnues
- * A LA TRADUCTION. Generalisation du mecanisme prouve par D2_MEMINTRIN.
+/* src/dynarec86/dyn86_intrin.h — table-driven recognition of native
+ * intrinsics at translation time. Generalizes the mechanism proven by
+ * D2_MEMINTRIN.
  * ------------------------------------------------------------------------
  *
- * POURQUOI CE MODULE EXISTE
+ * WHY THIS MODULE EXISTS
  *
- * Le profil EIP du chemin Glide, mesure sur CONSOLE le 07/09 et reproduit sur
- * trois passes (docs/perf/profil_glide_console_20260907.md), designe une
- * fonction unique :
+ * A hook (alternate + trap) round-trips through the dispatcher on every
+ * call, which can cost more than just letting a small, hot guest function
+ * run its own translated body -- so hooking is a poor fit for small,
+ * frequently-called functions. D2_MEMINTRIN proved that a direct native call
+ * emitted at translation time (no trap, no dispatcher) works at scale
+ * instead.
  *
- *     Game+0x10dd60 (VA 0x50dd60) = 11,8-12,6 % de tout le temps invite
- *     projection monde -> ecran, 173 octets d'entiers PURS, aucun appel,
- *     3 700-5 300 appels par image.
+ * This module extracts that mechanism from memintrin and makes it
+ * table-driven, so a new target doesn't need a bespoke hook-vs-native
+ * tradeoff analysis.
  *
- * Cette cible avait deja ete reperee le 06/09 (dessin_glide_20260906.md:143)
- * et REFUSEE, avec un motif exact :
+ * WHAT THE TRANSLATOR EMITS, when a block BEGINS at a registered VA:
  *
- *     « non — 409 o d'entiers purs, mais 4-5 k traps par image ; le corps
- *       invite est de l'ordre de 2-3 blocs traduits, LE TRAP COUTE PLUS »
- *
- * Le refus portait sur le mecanisme de CROCHET (alternate + trap), qui coute
- * ~1,3 us console par aller-retour. Il ne portait pas sur l'idee de porter la
- * fonction. Or D2_MEMINTRIN a prouve sur console le 07/09 qu'un appel natif
- * DIRECT emis a la traduction — pas de trap, pas de repartiteur — fonctionne a
- * l'echelle : 514 214 appels servis, 0 repli, 0 rejet.
- *
- * Ce module extrait ce mecanisme de memintrin et le rend TABULAIRE, pour que
- * la question « le trap coute plus que le corps » ne se pose plus jamais.
- *
- * CE QUE LE TRADUCTEUR EMET, quand un bloc COMMENCE a une VA enregistree :
- *
- *     mov r1, xESP                  ; ESP invite (les arguments de pile)
- *     bl  <helper>                  ; r0 = xEmu, contrat int fn(emu, esp)
+ *     mov r1, xESP                  ; guest ESP (stack arguments)
+ *     bl  <helper>                  ; r0 = xEmu, contract: int fn(emu, esp)
  *     cmp r0, #0
- *     beq <corps traduit d'origine> ; REPLI FIDELE : rien n'a ete fait
- *     [ldr xREG, [xEmu, regs[REG]]] ; pour chaque registre de `regmask`
+ *     beq <original translated body> ; faithful fallback: nothing was done
+ *     [ldr xREG, [xEmu, regs[REG]]] ; for each register in `regmask`
  *     <ret_to_epilog | retn_to_epilog(retn)>
  *
- * Aucun trap, aucun passage par le repartiteur : un appel natif direct depuis
- * le code traduit, comme les helpers div32/imul8 de box86.
+ * No trap, no dispatcher: a direct native call from translated code, just
+ * like box86's div32/imul8 helpers.
  *
- * ⚡ CE QUI REND LA RECONNAISSANCE PAR DEBUT DE BLOC LEGITIME
+ * WHAT MAKES BLOCK-START RECOGNITION VALID
  *
- * Elle ne capture une fonction que si TOUTE entree cree un bloc qui COMMENCE a
- * son premier octet. Il faut donc, pour chaque cible, verifier au
- * desassemblage qu'il n'existe :
- *   - aucun `jmp` direct vers l'entree (ce serait une queue d'appel : le bloc
- *     ne recommencerait pas) — un `call` direct, lui, va tres bien ;
- *   - aucun saut ENTRANT dans le CORPS (au-dela du premier octet).
- * Les references en DONNEE (creneau de vtable) ne sont pas un probleme : un
- * appel indirect cree lui aussi un bloc a l'entree.
+ * It only captures a function if EVERY entry creates a block that BEGINS at
+ * its first byte. For each target, disassembly must confirm there is:
+ *   - no direct `jmp` to the entry (that would be a tail call: the block
+ *     wouldn't restart there) -- a direct `call` is fine;
+ *   - no jump INTO the body (past the first byte).
+ * Data references (a vtable slot) are not a problem: an indirect call also
+ * creates a block at the entry point. A verification script
+ * (tools/verif_intrin_capture.py) checks these properties by disassembly
+ * before a target is registered.
  *
- * Preuve faite pour 0x50dd60 (tools/verif_intrin_capture.py) : 1 reference en
- * donnee (vtable VA 0x72f1dc), 16 `call rel32` DIRECTS, 0 `jmp` entrant,
- * 0 saut dans le corps.
+ * SAFETY. The helper returns 0 as soon as it isn't SURE -- the guest then
+ * does the work with its own translated code, untouched. The fallback is not
+ * an error path, it is the contract: anything the native side can't
+ * reproduce identically must be refused.
  *
- * SURETE. Le helper rend 0 des qu'il n'est pas SUR — l'invite fait alors le
- * travail avec son propre code traduit, intact. Le repli n'est pas un chemin
- * d'erreur, c'est le contrat : tout ce que le natif ne sait pas reproduire a
- * l'identique doit etre refuse.
+ * INPUTS: `inmask` IS NOT OPTIONAL.
+ * The 8 x86 registers live PERMANENTLY in r4-r11 and are only stored into
+ * `emu` AT THE BLOCK EPILOGUE (arm_epilog.S: `stm r0,{r4-r12,r14}`). A helper
+ * that reads `emu->regs[...]` without the corresponding bit set in `inmask`
+ * therefore reads a STALE value -- the one from the last return to the
+ * dispatcher, not the value at the current call. memintrin didn't have this
+ * problem: it only reads the guest STACK, via `esp`. A client of this module
+ * can take arguments in registers instead, which is exactly why `inmask` is
+ * a mandatory field rather than an option: a helper reading a register
+ * outside `inmask` silently reads garbage.
  *
- * ⚡ ENTREES : `inmask` N'EST PAS FACULTATIF.
- * Les 8 registres x86 vivent en PERMANENCE dans r4-r11 et ne sont ranges dans
- * `emu` QU'A L'EPILOGUE du bloc (arm_epilog.S : `stm r0,{r4-r12,r14}`). Un
- * helper qui lit `emu->regs[...]` sans que le bit correspondant soit dans
- * `inmask` lit donc une valeur PERIMEE — celle du dernier retour au
- * repartiteur, pas celle de l'appel en cours.
- * memintrin n'avait pas ce probleme : il ne lit que la PILE invitee, via `esp`.
- * Le premier client de ce module (proj 0x50dd60) prend deux de ses arguments
- * en REGISTRE, et l'oubli s'est vu tout de suite : 10 912 330 divergences sur
- * 10 919 963 comparaisons a l'oracle croise. C'est pour cela que `inmask` est
- * un champ obligatoire et non une option.
- *
- * REGISTRES ET DRAPEAUX. Le natif n'ecrit QUE les registres declares dans
- * `regmask` (recharges depuis `emu` par le code emis). Les autres gardent la
- * valeur qu'ils avaient a l'entree — ce qui est CONSERVATEUR quand le corps
- * invite les salissait, et FAUX si un appelant lisait un registre que le corps
- * invite ecrasait de facon observable. C'est pourquoi `regmask` doit lister
- * tout registre que le corps invite modifie ET qu'un appelant peut lire, y
- * compris les registres « volatils » de la convention : c'est le
- * desassemblage qui tranche, pas la convention.
- * Les DRAPEAUX sont laisses intacts (le differe de box86 reste valide) la ou
- * l'invite les detruisait : plus conservateur, pas moins.
+ * REGISTERS AND FLAGS. The native path writes ONLY the registers declared in
+ * `regmask` (reloaded from `emu` by the emitted code). Every other register
+ * keeps the value it had at entry -- CONSERVATIVE when the guest body used to
+ * clobber it, WRONG if a caller reads a register the guest body clobbered
+ * observably. This is why `regmask` must list every register the guest body
+ * modifies AND that a caller may read, including the calling convention's
+ * "volatile" registers: disassembly decides this, not the calling
+ * convention. FLAGS are left intact (box86's deferred-flags state stays
+ * valid) wherever the guest body used to destroy them -- more conservative,
+ * not less.
  *
  * Box86 is (c) ptitSeb, MIT license — see third_party/box86-dynarec/LICENSE
  */
@@ -93,15 +78,15 @@
 extern "C" {
 #endif
 
-/* Contrat d'un helper : rend 1 s'il a SERVI (l'appel est fini, le code emis
- * execute le RET), 0 pour REPLIER sur le corps traduit d'origine.
- *   emu = x86emu_t*  (r0, invariant du dynarec)
- *   esp = ESP invite AU MOMENT DE L'ENTREE : [esp] = adresse de retour,
- *         [esp+4] = 1er argument de pile, etc. */
+/* Helper contract: return 1 if it SERVED the call (the emitted code then
+ * executes RET), 0 to FALL BACK to the original translated body.
+ *   emu = x86emu_t* (r0, dynarec invariant)
+ *   esp = guest ESP AT ENTRY: [esp] = return address, [esp+4] = first stack
+ *         argument, etc. */
 typedef int (*dyn86_intrin_fn)(void* emu, uint32_t esp);
 
-/* Indices de registres pour `regmask` — memes valeurs que regs.h (_AX..._DI).
- * Un bit par registre a RECHARGER depuis emu apres l'appel. */
+/* Register indices for `regmask` -- same values as regs.h (_AX.._DI). One bit
+ * per register to RELOAD from emu after the call. */
 #define DYN86_IR_AX (1u<<0)
 #define DYN86_IR_CX (1u<<1)
 #define DYN86_IR_DX (1u<<2)
@@ -112,48 +97,49 @@ typedef int (*dyn86_intrin_fn)(void* emu, uint32_t esp);
 #define DYN86_IR_DI (1u<<7)
 
 typedef struct dyn86_intrin_s {
-    uintptr_t         va;       /* VA invitee de l'ENTREE (0 = creneau libre) */
+    uintptr_t         va;       /* guest VA of the entry point (0 = free slot) */
     dyn86_intrin_fn   fn;
-    uint16_t          retn;     /* octets depiles par le RET (stdcall) ; 0 = RET nu */
-    uint16_t          inmask;   /* registres RANGES dans emu AVANT l'appel      */
-    uint16_t          regmask;  /* registres recharges depuis emu APRES l'appel */
-    const char*       name;     /* pour la ligne de preuve d'armement */
-    unsigned long long calls;   /* entrees dans le helper                      */
-    unsigned long long served;  /* dont servies (calls - served = replis)      */
+    uint16_t          retn;     /* bytes popped by RET (stdcall); 0 = bare RET */
+    uint16_t          inmask;   /* registers STORED to emu BEFORE the call    */
+    uint16_t          regmask;  /* registers reloaded from emu AFTER the call */
+    const char*       name;     /* for the arming-proof line */
+    unsigned long long calls;   /* entries into the helper                    */
+    unsigned long long served;  /* of which served (calls - served = fallbacks) */
 } dyn86_intrin_t;
 
 #define DYN86_INTRIN_MAX 16
 
-/* 0 = rien n'est emis (defaut, code d'avant a l'instruction pres)
- * 1 = SERVIR en natif
- * 2 = PLOMBERIE SEULE : le helper est appele et rend TOUJOURS 0, donc l'invite
- *     execute son corps traduit. Tout client DOIT honorer ce mode.
- *     C'est le seul moyen de separer les deux couts d'un portage :
- *        mode 2 - temoin          = ce que coute la PLOMBERIE
- *        mode 1 - mode 2          = ce que rapporte le CORPS natif
- *     Sans lui, une jambe qui regresse ne dit pas si le natif est lent ou si
- *     c'est l'aller-retour qui mange le gain. */
+/* 0 = nothing emitted (default, byte-for-byte the original code)
+ * 1 = serve natively
+ * 2 = PLUMBING ONLY: the helper is called and ALWAYS returns 0, so the guest
+ *     still runs its translated body. Every client MUST honor this mode.
+ *     It is the only way to separate a port's two costs:
+ *        mode 2 - baseline   = cost of the PLUMBING
+ *        mode 1 - mode 2     = benefit of the native BODY
+ *     Without it, a regression can't tell whether the native code is slow or
+ *     the round trip itself is eating the gain. */
 extern int dyn86_intrin_on;
 extern int dyn86_intrin_n;
 extern dyn86_intrin_t dyn86_intrin_tbl[DYN86_INTRIN_MAX];
 
-/* Enregistre une cible. A appeler APRES le chargement du PE (les VA ne sont
- * pas des constantes : Game.exe peut etre relocalise) et AVANT la premiere
- * traduction. Rend 1 si l'entree est posee, 0 si la table est pleine ou si la
- * VA est deja enregistree. N'arme RIEN par lui-meme : voir dyn86_intrin_on. */
+/* Registers a target. Must be called AFTER the PE is loaded (VAs are not
+ * constants: the guest executable may be relocated) and BEFORE the first
+ * translation. Returns 1 if the entry was added, 0 if the table is full or
+ * the VA is already registered. Does not arm anything by itself: see
+ * dyn86_intrin_on. */
 int dyn86_intrin_add(uintptr_t va, dyn86_intrin_fn fn, uint16_t retn,
                      uint16_t inmask, uint16_t regmask, const char* name);
 
-/* Consultee A LA TRADUCTION, une fois par debut de bloc. Rend NULL si la VA
- * n'est pas une cible ou si le mecanisme est eteint. La table est figee avant
- * la premiere traduction, donc ce predicat est PUR : passes 2 et 3 emettent
- * exactement la meme chose (exigence du detecteur de divergence de box86). */
+/* Consulted AT TRANSLATION TIME, once per block start. Returns NULL if the VA
+ * isn't a target or the mechanism is off. The table is frozen before the
+ * first translation, so this predicate is PURE: passes 2 and 3 emit exactly
+ * the same thing (box86's divergence detector requires this). */
 const dyn86_intrin_t* dyn86_intrin_find(uintptr_t va);
 
-/* Ligne de preuve d'armement, publiee par la fenetre de 10 s. Rend le nombre
- * d'octets ecrits. Ecrit « intrin: eteint » si rien n'est arme — un compteur
- * muet ne prouve rien (lecon du 07/09 : la preuve doit sortir dans la fenetre
- * PERIODIQUE, pas au rapport final que la console n'atteint jamais). */
+/* Arming-proof line, published by the periodic status window. Returns the
+ * number of bytes written, with a distinct marker when nothing is armed --
+ * a silent counter proves nothing if the run never reaches a final report,
+ * so this must surface periodically rather than only at the end. */
 int dyn86_intrin_report(char* out, unsigned cap);
 
 #ifdef __cplusplus

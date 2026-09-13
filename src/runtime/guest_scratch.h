@@ -1,77 +1,70 @@
-// src/runtime/guest_scratch.h — allocateur de brouillon INVITE.
+// src/runtime/guest_scratch.h — guest scratch allocator.
 //
-// POURQUOI C'EST UN PRIMITIF DU MOTEUR, ET PAS DU CONSOMMATEUR.
-// Une bonne partie de l'API Win32 rend un POINTEUR vers de la memoire que
-// l'appelant ne libere pas : GetCommandLineA, GetEnvironmentStrings,
-// inet_ntoa, gethostbyname, le bloc RTL_CRITICAL_SECTION_DEBUG... Sur une
-// machine reelle cette memoire appartient a la DLL systeme. Ici les DLL
-// systeme n'existent pas : c'est le moteur qui les incarne, donc c'est au
-// moteur de posseder l'endroit ou ces valeurs de retour vivent. Et ce
-// pointeur doit etre une adresse INVITEE (x86 32 bits, lisible par le jeu),
-// pas une adresse hote — un new/malloc de l'hote ne convient pas.
-// Tout portage vers ce moteur a exactement le meme besoin ; le laisser chez
-// le consommateur obligeait chaque portage a le reecrire.
+// Engine-level primitive, not consumer code: a good chunk of the Win32 API
+// returns a POINTER to memory the caller never frees (GetCommandLineA,
+// GetEnvironmentStrings, inet_ntoa, gethostbyname, the
+// RTL_CRITICAL_SECTION_DEBUG block...). On real hardware that memory
+// belongs to a system DLL; here there is no system DLL, so the engine must
+// own where these return values live. The pointer must be a GUEST address
+// (32-bit x86, readable by the game), not a host address — host new/malloc
+// won't do. Any port onto this engine has the same need, so it lives here
+// rather than being reimplemented per port.
 //
-// PARTAGE DES ROLES. Le MOTEUR possede l'allocateur (allocation, bornage,
-// signalement d'epuisement). Le CONSOMMATEUR declare la plage qu'il concede
-// (wx86_scratch_init) : le plan memoire, lui, est bien specifique au projet
-// — l'arene compacte de d2vita n'a rien d'universel.
+// ROLE SPLIT. The ENGINE owns the allocator (allocation, bounds, OOM
+// signaling). The CONSUMER declares the range it grants
+// (wx86_scratch_init) — the memory layout itself is project-specific and
+// not universal.
 //
-// CONTRAT, ecrit noir sur blanc parce qu'il a deja coute une enquete :
-// l'allocation est DEFINITIVE. Rien n'est jamais libere, il n'y a pas de
-// free et il n'y en aura pas. Cet allocateur est reserve aux valeurs de
-// retour a duree de vie PROCESSUS — typiquement une chaine constante ou une
-// structure allouee UNE FOIS et mise en cache par l'appelant. Allouer ici a
-// CHAQUE appel sur un chemin repete est un defaut, pas un usage : c'est
-// ainsi qu'on epuise la plage en session longue. Pour de la memoire a duree
-// de vie bornee, l'embarqueur a ses propres tas invites.
+// CONTRACT: allocation is PERMANENT. Nothing is ever freed, there is no
+// free, and there will not be one. This allocator is reserved for
+// process-lifetime return values — typically a constant string or a
+// structure allocated ONCE and cached by the caller. Allocating here on
+// every call on a hot path is a bug, not a use case: that's how the range
+// gets exhausted in a long session. For bounded-lifetime memory, the
+// embedder has its own guest heaps.
 #pragma once
 #include <cstdint>
 
 namespace d2rt { class Cpu; }
 
-// Declare la plage invitee concedee a l'allocateur : base est l'adresse
-// INVITEE du premier octet utilisable, size la taille en octets. Le pointeur
-// repart de base a chaque appel — un embarqueur qui bascule de plan memoire
-// en a besoin (le plan compact de d2vita est choisi apres coup).
+// Declares the guest range granted to the allocator: base is the guest
+// address of the first usable byte, size is the size in bytes. The pointer
+// resets to base on every call, which an embedder that switches memory
+// layout needs.
 //
-// size == 0 signifie EXPRESSEMENT « plage non bornee » : on alloue sans
-// verifier la borne. C'est le comportement d'avant le correctif C6, garde ici
-// parce que l'embarqueur connait souvent son point de depart bien avant de
-// connaitre sa taille (chez d2vita, la taille ne se sait qu'une fois la
-// region invitee cartographiee). Armer la borne ensuite, quand elle est
-// connue, se fait par wx86_scratch_set_limit — SANS toucher au pointeur,
-// donc sans perdre ce qui a deja ete alloue entre-temps.
+// size == 0 EXPLICITLY means "unbounded range": allocate without checking
+// the limit. Kept because an embedder often knows its start address well
+// before it knows its size (the guest region may only be sized once it is
+// mapped out). Arm the bound later, once known, via
+// wx86_scratch_set_limit — WITHOUT touching the pointer, so nothing
+// already allocated is lost.
 void wx86_scratch_init(uint32_t base, uint32_t size);
 
-// Arme (ou deplace) la borne haute, pointeur courant INCHANGE. limit est
-// l'adresse invitee du premier octet HORS plage ; 0 la retire.
+// Arms (or moves) the upper bound; current pointer UNCHANGED. limit is the
+// guest address of the first byte OUTSIDE the range; 0 clears it.
 void wx86_scratch_set_limit(uint32_t limit);
 
-// Alloue n octets (arrondis a 8) et rend l'adresse INVITEE, ou 0 si la plage
-// bornee est epuisee. Un 0 est bien plus supportable pour les appelants qu'un
-// debordement silencieux dans la region voisine : c'est exactement ce qui
-// menacait ici, l'allocateur n'etant borne que depuis le correctif C6 (une
-// session longue marchait dans le trou d'arene puis dans les reserves VA,
-// avec pour seul symptome une faute hote sous qemu).
+// Allocates n bytes (rounded up to 8) and returns the guest address, or 0
+// if the bounded range is exhausted. Returning 0 is far safer for callers
+// than silently overflowing into the neighboring region.
 uint32_t wx86_scratch_alloc(uint32_t n);
 
-// Ecrit la chaine s (terminateur compris) dans le brouillon et rend son
-// adresse invitee, ou 0 si l'allocation echoue. Le raccourci dont chaque
-// shim qui rend un char* a besoin.
+// Writes string s (including its terminator) into the scratch range and
+// returns its guest address, or 0 if the allocation fails. The shortcut
+// every shim that returns a char* needs.
 uint32_t wx86_scratch_put_cstr(d2rt::Cpu& c, const char* s);
 
-// Etat, pour le diagnostic de l'embarqueur (occupation, bilan de fin de
-// session). used = octets consommes depuis base ; size = plage concedee.
+// State, for the embedder's diagnostics (occupancy, end-of-session
+// summary). used = bytes consumed since base; size = range granted.
 uint32_t wx86_scratch_used();
 uint32_t wx86_scratch_size();
 uint32_t wx86_scratch_base();
 
-// Signalement d'EPUISEMENT. Le moteur est muet par construction (il ne
-// connait ni le journal, ni la console, ni le format de l'embarqueur) : il
-// appelle ce rappel AU PLUS UNE FOIS, a la premiere allocation refusee, avec
-// l'adresse courante, la taille demandee et la borne. A l'embarqueur d'en
-// faire une ligne de journal. Non arme = epuisement silencieux, l'allocation
-// rend 0 comme toujours.
+// OOM signal. The engine is silent by construction (it knows nothing of
+// the embedder's log, console, or format): it invokes this callback AT
+// MOST ONCE, on the first refused allocation, with the current address,
+// the size requested, and the limit. The embedder turns that into a log
+// line. No handler registered = silent exhaustion, allocation still
+// returns 0.
 typedef void (*Wx86ScratchOomFn)(uint32_t at, uint32_t want, uint32_t limit);
 void wx86_scratch_set_oom_handler(Wx86ScratchOomFn cb);

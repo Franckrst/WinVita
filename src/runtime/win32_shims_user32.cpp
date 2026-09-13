@@ -1,18 +1,15 @@
-// src/runtime/win32_shims_user32.cpp — see win32_shims_user32.h. Split out
-// of d2vita's tools/rt_boot.cpp USER32 shim group (2026-09-10): these bodies
-// are pure functions of their arguments (RECT geometry, string scan/lower)
-// or honest constant no-op stubs — no game-window state (g_hwnd/g_wndProc/
-// g_msgQ), no dependency on any d2vita-hosted helper. The rest of the same
-// original group — window-subclassing (SetWindowLongA/GetWindowLongA/
-// CallWindowProcA), message routing (PostMessageA/SendMessageA), the
-// diagnostic MessageBoxA, and wsprintfA/wvsprintfA (need d2vita's
-// gread_mb-based do_wsprintf) — stays d2vita-side
-// (src/runtime/win32_shims_user32_d2.cpp).
+// src/runtime/win32_shims_user32.cpp — see win32_shims_user32.h. These
+// bodies are pure functions of their arguments (RECT geometry, string
+// scan/lower) or honest constant no-op stubs — no game-window state, no
+// dependency on any consumer-hosted helper. The rest of the same group —
+// window-subclassing (SetWindowLongA/GetWindowLongA/CallWindowProcA),
+// message routing (PostMessageA/SendMessageA), the diagnostic MessageBoxA,
+// and wsprintfA/wvsprintfA (need a consumer-hosted string formatter) —
+// stays on the consumer side (win32_shims_user32_d2.cpp).
 //
-// DISCLOSED BEHAVIOR CHANGE: same as win32_shims_advapi32.cpp — the original
-// `U` helper's TRACE/TRACEAFTER diagnostic wrapper (g_calls/g_traceOn,
-// d2vita-hosted) is dropped here; functional behavior is unchanged, only the
-// TRACE=1 debug log loses coverage of these calls.
+// No consumer-side tracing here either (see win32_shims_advapi32.cpp):
+// functional behavior is unchanged, only debug-log coverage of these calls
+// lives on the consumer side.
 #include "win32_shims_user32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
@@ -69,10 +66,6 @@ void win32_shims_user32_install(Bridge& br){
         c.write_u32(r,(uint32_t)((int32_t)c.read_u32(r)+dx)); c.write_u32(r+4,(uint32_t)((int32_t)c.read_u32(r+4)+dy));
         c.write_u32(r+8,(uint32_t)((int32_t)c.read_u32(r+8)+dx)); c.write_u32(r+12,(uint32_t)((int32_t)c.read_u32(r+12)+dy));
         return 1u; });
-    // CopyRect — found UNSHIMMED 2026-08-25: the Rogue-camp-to-Blood-Moor
-    // zone transition calls it, halting the run on every platform the
-    // instant town was left. Fixed as a full RECT family in one pass so the
-    // next helper of the same group wouldn't replay the same halt.
     U("CopyRect",2,[](Cpu&c){ uint32_t d=c.arg(0),s=c.arg(1); if(!d||!s) return 0u;
         uint8_t b[16]; c.read(s,b,16); c.write(d,b,16); return 1u; });
     U("SetRect",5,[](Cpu&c){ uint32_t p=c.arg(0); if(!p) return 0u;
@@ -99,10 +92,9 @@ void win32_shims_user32_install(Bridge& br){
     U("FindWindowA",2,[](Cpu&){ return 0u; });
     U("GetDesktopWindow",0,[](Cpu&){ return 0u; });
     U("DestroyWindow",1,[](Cpu&){ return 1u; });
-    // Couverture Win32 generique (jamais appelees par les binaires D2, cf.
-    // tools/box86_local_patches.diff — audit d'import 2026-09; portees pour
-    // qu'un autre binaire Win32 les trouve deja la, meme prudence que le
-    // reste du fichier : arite Win32 standard, retour honnete).
-    U("EnableWindow",2,[](Cpu&){ return 0u; });                 // ancien etat : la fenetre n'etait pas desactivee
-    U("MessageBeep",1,[](Cpu&){ return 1u; });                  // aucun peripherique audio
+    // Generic Win32 coverage: not exercised by any guest observed so far,
+    // kept so another Win32 binary already finds it here — standard Win32
+    // arity, honest return, same caution as the rest of this file.
+    U("EnableWindow",2,[](Cpu&){ return 0u; });                 // previous state: the window was not disabled
+    U("MessageBeep",1,[](Cpu&){ return 1u; });                  // no audio device
 }

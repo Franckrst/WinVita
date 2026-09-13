@@ -42,10 +42,10 @@ int   mprotect(void* addr, size_t len, int prot);
  * (which would issue a Linux cacheflush syscall that doesn't exist here).
  * The build redefines __clear_cache(b,e) to this via -D. */
 void dyn86_vita_clear_cache(void* beg, void* end);
-/* VM domain PAR FIL : tout fil susceptible d'ECRIRE l'arene JIT doit l'appeler
- * avant sa premiere ecriture (idempotent par fil ; DACR = contexte de fil —
- * commentaire complet dans mman_vita.c). mmap() couvre le fil allocateur ;
- * le NativeScheduler l'appelle a l'entree du main et de chaque runner. */
+/* Per-thread VM domain: any thread that may WRITE the JIT arena must call
+ * this before its first write (idempotent per thread; DACR is per-thread
+ * context -- full comment in mman_vita.c). mmap() covers the allocating
+ * thread; NativeScheduler calls this on entry to main and to each runner. */
 void dyn86_vita_open_vm_thread(void);
 
 #ifdef __cplusplus

@@ -1,139 +1,104 @@
-// src/platform/vita_host.h — les services de la CONSOLE, pas ceux du jeu.
+// Console-specific services — not generic, not game-specific. The engine
+// targets the Vita, so hardware access like this belongs here rather than in
+// a port, which only consumes the hardware.
 //
-// POURQUOI CE FICHIER EXISTE
-// --------------------------
-// Le tri « generique / specifique au jeu » manque une troisieme categorie :
-// specifique a la CONSOLE. Elle appartient au moteur, parce que le moteur cible
-// la Vita — pas au portage, qui ne fait que consommer le materiel. Confondue
-// avec « specifique au jeu », elle reste du mauvais cote, et elle y est restee.
+// What a port keeps: the path of its own log file, and whatever policy it
+// wants to apply. Everything else lives here.
 //
-// La preuve n'est pas theorique. Les deux portages consommateurs ont ecrit ces
-// blocs chacun de son cote, et la comparaison ligne a ligne donne :
-//
-//   journal de progression   corps IDENTIQUE au caractere pres (seul le chemin
-//                            du fichier differe : c'est la seule donnee du
-//                            portage, elle est donc injectee)
-//   repartition des coeurs   76 lignes, ZERO ligne differente
-//   horloge monotone         identique
-//
-// Ce n'est donc pas une abstraction inventee a l'avance : c'est la forme commune
-// constatee apres coup, sur du code qui existait deja en double.
-//
-// CE QUE LE PORTAGE GARDE
-// -----------------------
-// Le CHEMIN de son journal (chaque portage ecrit dans son propre dossier), et
-// la politique qu'il veut appliquer. Tout le reste est ici.
-//
-// COUT
-// ----
-// Aucune indirection n'est ajoutee sur le chemin par image : ces services sont
-// appeles au demarrage, a la creation d'un fil, ou une fois par fenetre de
-// 10 s. Le journal ouvre et ferme le fichier a chaque ligne — c'est deliberé,
-// c'est ce qui le rend durable a travers un plantage.
+// No indirection is added on the per-frame path: these services are called
+// at startup, at thread creation, or once per 10-second window. The log
+// opens and closes the file on every line on purpose, so a line survives a
+// hard crash.
 #pragma once
 #include <stdint.h>
 
-// ---- Journal de progression durable ---------------------------------------
-// Sur console, un printf ne prouve rien : il n'y a pas de sortie standard a
-// lire. Ce journal est la SEULE fenetre sur un demarrage sans ecran. Il ouvre,
-// ecrit et ferme a chaque ligne pour que la ligne survive a un plantage dur.
+// ---- Durable progress log ----------------------------------------------------
+// On console, printf proves nothing — there's no stdout to read. This log is
+// the only window into a screenless boot. It opens, writes, and closes on
+// every line so the line survives a hard crash.
 //
-// Le verrou n'est pas un ornement : sur carn-vita, le 2026-09-06, un demarrage
-// sur sept mourait sous Vita3K (`Invalid read at 0x30302e30` — les octets ASCII
-// « 0.00 » d'un horodatage ecrits PAR-DESSUS un pointeur du tas newlib) parce
-// que deux fils faisaient fopen/fprintf/fclose sur ce meme fichier. Un journal
-// de demarrage qui peut tuer le demarrage qu'il observe est le pire defaut
-// possible.
+// The lock is not decorative: without it, two threads doing
+// fopen/fprintf/fclose on the same file can corrupt the newlib heap (a
+// timestamp's ASCII bytes landing on top of a heap pointer). A boot log that
+// can crash the boot it's observing is the worst possible failure mode.
 
-// LE CHEMIN EST FOURNI PAR LE PORTAGE, et c'est la seule chose qu'il fournit.
-// Il est DEFINI, pas pose par un setter : une ligne de journal peut partir
-// avant n'importe quel point d'initialisation qu'on choisirait, et une
-// initialisation paresseuse rameuterait __cxa_guard_acquire — la famille de
-// pieges que la garde `nm` des scripts de build existe pour attraper. Un
-// initialiseur constant n'a ni ordre ni garde.
+// The path is provided by the port — the only thing it provides. It is a
+// constant definition rather than a setter: a log line can fire before any
+// initialization point we could pick, and lazy init would pull in
+// __cxa_guard_acquire (the class of trap the build script's `nm` guard exists
+// to catch). A constant initializer has no ordering and no guard.
 //
-// Le portage ecrit, une fois, a portee de fichier :
+// The port writes it once, at file scope:
 //     extern "C" const char* const wx86_vita_progress_path = "ux0:data/…/x.txt";
 //
-// HORS CONSOLE, le portage n'a rien a definir : voir juste en dessous.
+// Off console, the port defines nothing — see below.
 extern "C" const char* const wx86_vita_progress_path;
 
-// CES DEUX POINTS D'ENTREE EXISTENT SUR LES DEUX CIBLES.
+// These two entry points exist on both targets. Unlike the rest of this file
+// (a pure console service, guarded by `#ifdef __vita__` on both the
+// declaration and its callers), the log is also called from the engine's
+// generic body (bridge, cpu_box86, both schedulers, the mapper), which also
+// compiles for the qemu/desktop harness. A console-only declaration would
+// leave an unresolved reference there.
 //
-// Pourquoi ca n'allait pas de soi. Le reste de ce fichier est du service
-// console pur : ses appelants vivent tous sous `#ifdef __vita__`, donc une
-// definition sous la meme garde suffit. Le journal, non — il est appele depuis
-// le CORPS GENERIQUE du moteur (bridge, cpu_box86, les deux ordonnanceurs, le
-// mappeur), qui se compile aussi pour le harnais qemu/bureau. Une declaration
-// console-seulement y laisserait une reference non resolue.
-//
-// La solution retenue est la plus ennuyeuse, et c'est pour ca qu'elle est la
-// bonne : hors `__vita__`, vita_host.cpp definit ces deux fonctions comme des
-// NO-OP. Consequences voulues —
-//   * le corps generique appelle en lien FORT, partout, sans test de nullite ;
-//   * aucun portage n'a de symbole a fournir hors console (le chemin du
-//     journal n'est pas lu par le no-op, donc pas de reference a resoudre) ;
-//   * le comportement hors console est IDENTIQUE a ce qu'il etait du temps des
-//     references faibles non resolues — silence. Le correctif ne change que
-//     QUI est appele, jamais CE QUI se passe.
-//
-// L'alternative — une reference FAIBLE au nom du moteur — a ete ecartee : elle
-// aurait garde le mode de panne (un portage qui ne fournit rien reste muet
-// sans le savoir) en se contentant de renommer le symbole fautif.
+// Off `__vita__`, vita_host.cpp defines both functions as no-ops instead of
+// using a weak symbol:
+//   * the generic body links strongly, everywhere, with no null check;
+//   * no port needs to provide a symbol off console;
+//   * off-console behavior stays silent either way.
+// A weak reference to the engine's name was considered and rejected: it would
+// keep the same failure mode (a port providing nothing stays silently mute)
+// under a different symbol name.
 void wx86_vita_progress(const char* msg);
 extern "C" void wx86_vita_progress_c(const char* msg);
 
-// ---- Sommeil reel ----------------------------------------------------------
-// L'HORLOGE monotone n'est PAS ici : elle vit dans runtime/host_clock.h
-// (wx86_now_us / wx86_now_ms), parce qu'elle a un sens hors console aussi.
-// Seul le sommeil reste ici — il passe par l'ordonnanceur Sony.
+// ---- Real sleep ----------------------------------------------------------
+// The monotonic clock is not here: it lives in runtime/host_clock.h
+// (wx86_now_us / wx86_now_ms) because it's also meaningful off console. Only
+// sleep stays here — it goes through the Sony scheduler.
 void wx86_vita_sleep_ms(uint32_t ms);
 
-// ---- Repartition des fils hotes sur les coeurs user ------------------------
-// WX86_COEURS (repli : D2_COEURS) — trois chiffres 0..3, un par role :
-//   position 0 = presentation, 1 = chien de garde, 2 = battement anti-famine.
-// Defaut « 222 ».
+// ---- Host thread placement across user cores ---------------------------------
+// WX86_COEURS (falls back to D2_COEURS) — three digits 0..3, one per role:
+//   position 0 = presentation, 1 = watchdog, 2 = anti-starvation heartbeat.
+// Default "222".
 //
-// LE QUATRIEME COEUR. Le SDK ne definit que USER_0/1/2 (0x10000/0x20000/
-// 0x40000), mais la sonde a relu `activeCpuMask=0x000f0000` sur CONSOLE, soit
-// QUATRE bits de coeur user actifs. Le chiffre `3` le demande ; s'il est
-// refuse, le rc le dit et rien ne bouge.
+// The fourth core: the SDK only defines USER_0/1/2 masks (0x10000/0x20000/
+// 0x40000), but the console reports activeCpuMask=0x000f0000 — four active
+// user-core bits. Digit `3` requests this core; if the kernel refuses it, the
+// rc reports that and nothing changes.
 #define WX86_CPU_MASK_USER_3  0x00080000
 
 int  wx86_vita_core_mask(int who);
 
-// AUTO-EPINGLAGE A L'ENTREE DU FIL — pas au moment de la creation. Constat
-// console : un masque pose PAR LE CREATEUR avant sceKernelStartThread rend
-// rc=0 mais se RELIT 0 une fois le fil parti, et les fils migrent (deux
-// ouvriers finissent sur le MEME coeur, -15 %). Chaque fil hote doit donc
-// refaire l'epinglage sur lui-meme en premiere instruction.
+// Self-pinning happens at thread entry, not at creation time: setting the
+// affinity mask from the creator before sceKernelStartThread returns rc=0 but
+// reads back as 0 once the thread is running, and threads migrate (two
+// workers can end up on the same core). Each host thread must therefore
+// re-pin itself as its first instruction.
 extern "C" int wx86_vita_pin_self(int mask, unsigned* relu);
 
-// EPINGLER UN AUTRE FIL. Le moteur n'offrait que l'auto-epinglage, si bien que
-// tout portage qui doit poser le masque d'un fil QU'IL CREE appelait
-// sceKernelChangeThreadCpuAffinityMask directement — le premier en avait cinq
-// sites. Rendu ici, c'est le meme service que pin_self, du cote du createur.
+// Pins a thread other than the caller. Exists so a caller that needs to set
+// the mask of a thread it creates doesn't call
+// sceKernelChangeThreadCpuAffinityMask directly.
 //
-// A LIRE AVANT DE S'EN SERVIR : le paragraphe ci-dessus n'est pas annule. Un
-// masque pose PAR LE CREATEUR avant sceKernelStartThread rend rc=0 et se relit
-// 0 une fois le fil parti. Cette fonction sert donc a EXPRIMER l'intention (et
-// a publier son rc) ; la seule pose fiable reste wx86_vita_pin_self, faite par
-// le fil lui-meme a son entree.
+// Caveat: the limitation above still applies — a mask set by the creator
+// before the thread starts reads back as 0 once the thread is running. This
+// function only expresses intent and publishes its rc; the only reliable
+// pinning is self-pinning via wx86_vita_pin_self at thread entry.
 //
-// `relu` : masque relu apres la pose, comme pin_self. Passer nullptr n'appelle
-// PAS sceKernelGetThreadCpuAffinityMask — un site qui ne relit pas garde donc
-// exactement un appel systeme, comme avant. (pin_self, lui, relit toujours :
-// son unique appelant a nullptr est ancien et on ne change pas son compte
-// d'appels au passage d'un ajout d'API.)
+// `relu`: mask read back after setting, like pin_self. Passing nullptr skips
+// the extra sceKernelGetThreadCpuAffinityMask call, so a call site that
+// doesn't read back keeps exactly one syscall.
 extern "C" int wx86_vita_pin_thread(int thread_uid, int mask, unsigned* relu);
 
-// Inscrit un fil au tableau publie par wx86_vita_core_window_line().
+// Registers a thread in the table published by wx86_vita_core_window_line().
 void wx86_vita_core_register(const char* nom, int uid, unsigned wanted, int pin_rc);
-// Nombre de fils hotes deja inscrits (contexte des diagnostics de creation de
-// fil : un quota d'UID epuise et une memoire epuisee ne se separent pas avec le
-// seul rc).
+// Number of host threads registered so far — useful context for thread
+// creation diagnostics, since an exhausted UID quota and exhausted memory
+// otherwise look the same from the rc alone.
 int  wx86_vita_core_count();
 
-// Ligne « coeurs: » de la fenetre de 10 s, publiee dans le journal. Joue la
-// sonde du 4e coeur a la premiere invocation.
+// "cores:" line of the 10-second window, published to the log. Runs the
+// 4th-core probe on first invocation.
 void wx86_vita_core_window_line();

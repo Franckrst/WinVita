@@ -48,7 +48,7 @@ void top_eips(int n, void (*cb)(uint32_t, uint64_t, void*), void* u) {
         cb(v[i].second << 6, v[i].first, u);
 }
 
-// ---- par fil invite ------------------------------------------------------
+// ---- per guest thread ------------------------------------------------------
 struct TidProf { uint32_t entry = 0; uint64_t samples = 0, blocks = 0;
                  std::unordered_map<uint32_t, uint64_t> hist; };
 static std::map<uint32_t, TidProf> g_tid;

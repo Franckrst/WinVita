@@ -1,21 +1,14 @@
-// src/runtime/win32_shims_sync.cpp — voir win32_shims_sync.h.
-// Famille evenement / mutex / semaphore de KERNEL32, portee depuis
-// tools/rt_boot.cpp de d2vita (2026-09-11).
+// src/runtime/win32_shims_sync.cpp — see win32_shims_sync.h.
 //
-// PROPRIETE, PAS SEULEMENT LE TYPE. Ces corps ne pouvaient pas partir tant que
-// la table de handles, la carte des sections critiques et le compteur
-// d'identifiants vivaient encore chez le portage : deplacer un type en
-// laissant son etat derriere fabrique un jumeau vide cote moteur, invisible a
-// la compilation et payable en interblocage. C'est arrive TROIS fois cette
-// semaine. L'etat est desormais entierement cote moteur, les corps peuvent
-// donc suivre — et il ne reste aucun jumeau au portage.
+// Ownership, not just the type: the handle table, critical-section map, and
+// id counter all live in the engine, so these bodies can too without leaving
+// a duplicate copy of state on the consumer side (a state split like that is
+// invisible at compile time and surfaces later as a deadlock).
 //
-// L'INSTRUMENTATION NE SUIT PAS. Les corps d'origine portaient une trace de
-// synchronisation et un journal d'attente, tous deux derriere des interrupteurs
-// d'environnement eteints par defaut, plus des compteurs de profilage. Rien de
-// tout cela ne decide quoi que ce soit : ce sont des observateurs. Ils passent
-// par wx86_sync_notify(), et le portage les rebranche dans SON observateur.
-// Le moteur raconte, il ne demande jamais d'avis.
+// Instrumentation does not follow: sync tracing and wait logging, plus
+// profiling counters, are observers reached through wx86_sync_notify(). The
+// consumer wires its own observer back in. The engine reports; it never
+// asks for permission.
 #include "win32_shims_sync.h"
 #include "guest_sync.h"
 #include "guest_thread_ctx.h"
@@ -55,10 +48,9 @@ void win32_shims_sync_install(Bridge& br){
             wx86_sync_notify({WX86_SYNC_EVENT_RESET,&c,w,h}); }
         return 1u; });
 
-    // PulseEvent — infidelite DELIBEREE conservee telle quelle : ne reveille
-    // PERSONNE, se contente de laisser l'evenement non signale. Le vrai
-    // PulseEvent de Windows est lui-meme reconnu comme non fiable ; aucun
-    // appelant observe ici n'en depend.
+    // PulseEvent: a DELIBERATE infidelity, kept as-is — wakes NO ONE, just
+    // leaves the event unsignaled. Real Windows PulseEvent is itself
+    // documented as unreliable; no observed caller depends on it.
     K("PulseEvent",1,[](Cpu&c){ const uint32_t h=c.arg(0);
         Waitable* w=wx86_handle_find(h);
         if(w && wx86_is_kind(w,"event")){
@@ -67,8 +59,8 @@ void win32_shims_sync_install(Bridge& br){
             return 1u; }
         return 0u; });
 
-    // Mutex modelise par un evenement auto-reset : l'acquisition consomme le
-    // signal, la liberation le repose. Fidele pour un mutex non recursif.
+    // Mutex modeled as an auto-reset event: acquiring consumes the signal,
+    // releasing restores it. Faithful for a non-recursive mutex.
     auto mkmutex=[](Cpu&c){
         WxEvent* e=new WxEvent(); e->manual=false; e->signaled=(c.arg(1)==0);
         uint32_t h=wx86_handle_add(e); wx86_set_lasterr(c,0);
@@ -92,10 +84,8 @@ void win32_shims_sync_install(Bridge& br){
     K("CreateSemaphoreA",4,mksema);
     K("CreateSemaphoreW",4,mksema);
 
-    // ReleaseSemaphore etait reste au portage alors que CreateSemaphore etait
-    // deja ici : le moteur savait creer un semaphore mais pas le rendre. Le
-    // plafond est honore comme sur Windows — un depassement ECHOUE et laisse le
-    // compte intact, il ne saturne pas en silence.
+    // The cap is honored like real Windows: an overflow FAILS and leaves the
+    // count intact rather than silently saturating.
     K("ReleaseSemaphore",3,[](Cpu&c){ Waitable* itw=wx86_handle_find(c.arg(0));
         if(!itw||!wx86_is_kind(itw,"sema")) return 0u;
         WxSemaphore* s=static_cast<WxSemaphore*>(itw);

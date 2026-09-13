@@ -1,23 +1,23 @@
-// tools/authenticode_selftest.cpp — filet de src/runtime/authenticode.cpp.
+// tools/authenticode_selftest.cpp — safety net for src/runtime/authenticode.cpp.
 //
-// CE QUI EST TESTE, SANS AUCUN FICHIER EXTERIEUR :
-//   * SHA-1 / SHA-256 contre les vecteurs FIPS 180 (dont le million de 'a'),
-//     et l'egalite « d'un coup » == « par morceaux » ;
-//   * l'exponentiation RSA contre pow() de Python (vecteur 1024 bits) ;
-//   * le decodage OID et des temps DER (bascule UTCTime 1950/2049) ;
-//   * le condensat Authenticode d'un PE signe de test, contre une implementation
-//     python independante de la specification ;
-//   * verify_pe sur ce PE : non ancre -> CERT_E_CHAINING ; racine ajoutee ->
-//     0 ; apres expiration sans horodatage -> CERT_E_EXPIRED ; 1 octet de .text
-//     -> TRUST_E_BAD_DIGEST ; 1 octet de signature -> TRUST_E_CERT_SIGNATURE ;
-//     checksum PE modifie -> toujours 0 (champ exclu) ; non-PE, PE non signe,
-//     repertoire de securite tronque.
-// TEMOIN POSITIF : chaque cas negatif est precede du meme fichier qui PASSE,
-// sinon « echoue » et « n'a jamais pu reussir » rendraient le meme verdict.
+// WHAT IS TESTED, WITHOUT ANY EXTERNAL FILE:
+//   * SHA-1 / SHA-256 against the FIPS 180 vectors (including the million
+//     'a's), and equality of "all at once" == "in chunks";
+//   * RSA exponentiation against Python's pow() (1024-bit vector);
+//   * OID decoding and DER time decoding (UTCTime 1950/2049 pivot);
+//   * the Authenticode digest of a signed test PE, against an independent
+//     Python implementation of the spec;
+//   * verify_pe on that PE: unanchored -> CERT_E_CHAINING; root added -> 0;
+//     after expiry with no timestamp -> CERT_E_EXPIRED; 1 byte of .text ->
+//     TRUST_E_BAD_DIGEST; 1 byte of signature -> TRUST_E_CERT_SIGNATURE;
+//     modified PE checksum -> still 0 (excluded field); non-PE, unsigned PE,
+//     truncated security directory.
+// POSITIVE WITNESS: every negative case is preceded by the same file that
+// PASSES, otherwise "fails" and "could never have passed" would look the same.
 //
-// OPTIONNEL : AC_REFS=<dossier> ajoute des fichiers signes reels (ex. les
-// binaires d'un portage), verifies a la date courante ; on n'y affirme que ce
-// qui est stable (aucun code attendu n'est code en dur pour eux).
+// OPTIONAL: AC_REFS=<dir> adds real signed files (e.g. a port's binaries),
+// verified at the current date; only stable properties are asserted for
+// them (no expected code is hardcoded for them).
 #include "runtime/authenticode.h"
 #include "tests/authenticode_fixture.h"
 
@@ -47,7 +47,7 @@ static void check_hr(uint32_t got, uint32_t want, const char* what) {
 }
 
 int main() {
-    // ---- SHA ------------------------------------------------------------------
+    // ---- SHA ----
     uint8_t d20[20], d32[32];
     sha1((const uint8_t*)"abc", 3, d20);
     check(hexs(d20, 20) == "a9993e364706816aba3e25717850c26c9cd0d89d", "SHA-1(abc)");
@@ -69,7 +69,7 @@ int main() {
       uint8_t e[32]; s.final(e);
       check(std::memcmp(e, d32, 32) == 0, "SHA-256 par morceaux == d'un coup"); }
 
-    // ---- RSA brut ---------------------------------------------------------------
+    // ---- Raw RSA ----
     { std::vector<uint8_t> out; const uint8_t e[] = {0x01, 0x00, 0x01};
       check(rsa_public(fixture::rsa_n, sizeof fixture::rsa_n, e, 3, fixture::rsa_s, sizeof fixture::rsa_s, out) &&
             out.size() == sizeof fixture::rsa_out && std::memcmp(out.data(), fixture::rsa_out, out.size()) == 0,
@@ -77,7 +77,7 @@ int main() {
       check(!rsa_public(fixture::rsa_n, sizeof fixture::rsa_n, e, 3, fixture::rsa_n, sizeof fixture::rsa_n, out),
             "RSA refuse une signature >= n"); }
 
-    // ---- OID, temps -----------------------------------------------------------------
+    // ---- OID, time ----
     { const uint8_t o1[] = {0x2a,0x86,0x48,0x86,0xf7,0x0d,0x01,0x07,0x02};
       check(oid_to_string(o1, sizeof o1) == "1.2.840.113549.1.7.2", "OID signedData");
       const uint8_t o2[] = {0x55,0x1d,0x25,0x00};
@@ -92,7 +92,7 @@ int main() {
       const uint8_t g[] = {0x18,19,'2','0','2','0','0','2','2','5','2','2','0','3','3','8','.','1','2','3','Z'};
       check(der_time(g, sizeof g, t) && t == 1582668218LL, "GeneralizedTime avec fraction"); }
 
-    // ---- PE ---------------------------------------------------------------------------
+    // ---- PE ----
     const std::vector<uint8_t> pe(fixture::signed_pe, fixture::signed_pe + sizeof fixture::signed_pe);
     { std::vector<uint8_t> dg; std::string why;
       check(pe_image_digest(pe, HASH_SHA256, dg, &why) && dg.size() == 32 &&
@@ -120,18 +120,18 @@ int main() {
       check_hr(verify_pe(t, opt, rep), TRUST_E_BAD_DIGEST, "1 octet de .text -> TRUST_E_BAD_DIGEST"); }
     { auto t = pe; t[0x58 + 64] ^= 0x5a;
       check_hr(verify_pe(t, opt, rep), 0, "checksum PE modifie -> toujours 0 (champ exclu)"); }
-    { auto t = pe; t[t.size() - 20] ^= 1;          // dans la signature RSA (derniers octets du PKCS#7)
+    { auto t = pe; t[t.size() - 20] ^= 1;          // inside the RSA signature (last bytes of the PKCS#7)
       check_hr(verify_pe(t, opt, rep), TRUST_E_CERT_SIGNATURE, "1 octet de signature -> TRUST_E_CERT_SIGNATURE"); }
-    { std::vector<uint8_t> t(pe.begin(), pe.begin() + 0x400);   // PE sans table de certificats
+    { std::vector<uint8_t> t(pe.begin(), pe.begin() + 0x400);   // PE without a certificate table
       t[0x58 + 128] = t[0x58 + 129] = t[0x58 + 132] = t[0x58 + 133] = 0;
       check_hr(verify_pe(t, opt, rep), TRUST_E_NOSIGNATURE, "PE non signe -> TRUST_E_NOSIGNATURE"); }
-    { std::vector<uint8_t> t(pe.begin(), pe.begin() + 0x420);   // repertoire de securite tronque
+    { std::vector<uint8_t> t(pe.begin(), pe.begin() + 0x420);   // truncated security directory
       check_hr(verify_pe(t, opt, rep), TRUST_E_NOSIGNATURE, "repertoire tronque -> TRUST_E_NOSIGNATURE");
       check(rep.last_error != TRUST_E_NOSIGNATURE, "... avec un GetLastError distinct (signature presente mais illisible)"); }
     { std::vector<uint8_t> t = {'h','e','l','l','o'};
       check_hr(verify_pe(t, opt, rep), TRUST_E_SUBJECT_FORM_UNKNOWN, "non-PE -> TRUST_E_SUBJECT_FORM_UNKNOWN"); }
 
-    // ---- Fichiers reels optionnels ------------------------------------------------------
+    // ---- Optional real files ----
     if (const char* dir = std::getenv("AC_REFS")) {
         for (const char* f : {"CheckRevision.dll", "Game.exe"}) {
             std::string p = std::string(dir) + "/" + f;
@@ -142,12 +142,12 @@ int main() {
             std::printf("  [AC_REFS] %s : 0x%08x (%s) horodate=%d\n", f, (unsigned)hr, r.detail.c_str(), (int)r.timestamped);
             for (auto& s : r.chain) std::printf("      signataire : %s\n", s.c_str());
             for (auto& s : r.ts_chain) std::printf("      horodateur : %s\n", s.c_str());
-            // MESURE WINDOWS du 2026-09-13 : Get-AuthenticodeSignature = Valid pour les
-            // deux fichiers. Game.exe en est la preuve qui coupe : son horodateur
-            // remonte a Thawte Timestamping CA, desactivee par Microsoft en 2023.
+            // On real Windows, Get-AuthenticodeSignature reports both files as Valid.
+            // Game.exe is the decisive case: its timestamp authority chains to Thawte
+            // Timestamping CA, which Microsoft disabled in 2023.
             check_hr(hr, AC_OK, (std::string(f) + " : Valid comme sous Windows").c_str());
             if (std::string(f) == "Game.exe") {
-                VerifyOptions l; l.lifetime_signing = true; VerifyReport lr;   // chaines jugees a la date courante
+                VerifyOptions l; l.lifetime_signing = true; VerifyReport lr;   // chains evaluated at the current date
                 check(verify_pe(b, l, lr) != AC_OK, "Game.exe juge a la date courante -> refuse (racine desactivee, certificats expires)");
                 std::vector<uint8_t> t = b; t[0x1000] ^= 1;
                 check_hr(verify_pe(t, o, lr), TRUST_E_BAD_DIGEST, "Game.exe 1 bit modifie -> TRUST_E_BAD_DIGEST");

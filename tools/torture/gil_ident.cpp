@@ -1,30 +1,31 @@
-// tools/torture/gil_ident.cpp — banc de l'IDENTITÉ du détenteur du GIL.
+// GIL holder identity test bench.
 //
-// gil::lock() est sur le chemin de CHAQUE trap. Il n'appelle plus pthread_self()
-// (sur pte : pthread_getspecific -> pte_osTlsGetValue -> vitasdk_get_tls_data ->
-// sceKernelGetTLSAddr, un appel INTER-MODULE) : il publie une MARQUE DE PILE,
-// que le LECTEUR traduit en étiquette via la table gil::register_stack().
+// gil::lock() is on the path of every trap. It no longer calls pthread_self()
+// (on pte: pthread_getspecific -> pte_osTlsGetValue -> vitasdk_get_tls_data ->
+// sceKernelGetTLSAddr, an inter-module call): instead it publishes a stack
+// mark, which the reader translates into a label via the
+// gil::register_stack() table.
 //
-// Ce banc répond aux deux seules questions que ce remplacement pose :
-//   1. la traduction nomme-t-elle le BON fil, et SE TAIT-elle quand elle ne sait
-//      pas (fil non enregistré) — le « diagnostic qui ment » serait de nommer le
-//      voisin ;
-//   2. assert_held() détecte-t-il ENCORE un vrai défaut, y compris le cas fort
-//      « le GIL est tenu, mais par QUELQU'UN D'AUTRE » ?
-//   3. une pile RECYCLÉE prête-t-elle son nom ? C'est le SEUL nom faux que ce
-//      mécanisme puisse produire (un fil non enregistré tournant sur la pile
-//      d'un mort encore inscrit), et c'est ce que la moitié « désenregistrement »
-//      de l'invariant de gil.h ferme. glibc recycle ses piles, donc l'hôte sait
-//      exercer le cas — pte non (gil.h).
+// This test answers the questions that replacement raises:
+//   1. does the translation name the RIGHT thread, and stay SILENT when it
+//      doesn't know (unregistered thread) — naming the neighbor would be the
+//      "diagnostic that lies";
+//   2. does assert_held() still detect a real fault, including the strong
+//      case "the GIL is held, but by SOMEONE ELSE"?
+//   3. does a RECYCLED stack lend its name? That's the only false name this
+//      mechanism can produce (an unregistered thread running on a dead
+//      thread's still-registered stack), and it's exactly what the
+//      "unregister" half of gil.h's invariant closes. glibc recycles its
+//      stacks, so the host can exercise this case — pte can't (see gil.h).
 //
-// HÔTE seulement (fork + SIGABRT). Le mécanisme testé est identique sur cible :
-// des piles disjointes et l'adresse d'une locale. Il ne remplace donc PAS
-// rt_boot_arm_check.sh, il isole ce que celui-ci ne peut pas montrer.
+// Host only (fork + SIGABRT). The mechanism under test is identical
+// on-target: disjoint stacks and the address of a local. So this does not
+// replace rt_boot_arm_check.sh — it isolates what that script cannot show.
 //
 //   g++ -std=gnu++17 -O2 -I src tools/torture/gil_ident.cpp src/runtime/gil.cpp \
 //       -lpthread -o /tmp/gil_ident && /tmp/gil_ident
 //
-// NE PAS compiler avec -DNDEBUG : la phase 2 attend les assertions.
+// Do not build with -DNDEBUG: phase 2 relies on assertions.
 #include "runtime/gil.h"
 #include <pthread.h>
 #include <unistd.h>
@@ -40,15 +41,15 @@ static void expect(bool ok, const char* what) {
     g_checks++;
     if (!ok) { g_fail++; std::printf("  ECHEC: %s\n", what); }
 }
-// Fenêtre déclarée, très inférieure aux 8 MiB d'une pile hôte : SOUS-ENSEMBLE
-// strict, comme sur cible (gil.h).
+// Declared window, well under a host stack's 8MiB: a strict subset, same as
+// on-target (gil.h).
 static const uintptr_t SPAN = 240 * 1024;
 static void reg(uint32_t tag) { char ici; uintptr_t hi = (uintptr_t)&ici; gil::register_stack(hi - SPAN, hi, tag); }
 
-// ---- phase 1 : qui tient le GIL ? ------------------------------------------
+// ---- phase 1: who holds the GIL? --------------------------------------------
 
-// Profondeur variable : la marque publiée par lock() CHANGE d'une prise à
-// l'autre pour un même fil ; l'étiquette, elle, ne doit pas bouger.
+// Variable depth: the mark published by lock() CHANGES from one acquisition
+// to the next for the same thread; the label must not.
 static void take_and_check(uint32_t mytag, int depth) {
     if (depth > 0) { volatile char pad[512]; pad[0] = (char)depth; take_and_check(mytag, depth - 1); (void)pad; return; }
     gil::lock();
@@ -59,10 +60,10 @@ static void take_and_check(uint32_t mytag, int depth) {
     gil::unlock();
 }
 
-// MONO-FIL : l'attribution du shim doit survivre à un Release/relock pris à une
-// AUTRE profondeur (donc sous une AUTRE marque) — c'est exactement ce qu'une
-// comparaison brute des marques perdrait, et pourquoi probe() compare les
-// étiquettes résolues.
+// Single-thread: shim attribution must survive a Release/relock taken at a
+// DIFFERENT depth (so under a different mark) — that's exactly what a raw
+// mark comparison would lose, and why probe() compares resolved labels
+// instead.
 static void shim_across_release(int depth) {
     if (depth > 0) { volatile char pad[512]; pad[0] = (char)depth; shim_across_release(depth - 1); (void)pad; return; }
     gil::lock();
@@ -83,7 +84,7 @@ static void* worker(void* a) {
     for (int i = 0; i < 200; ++i) take_and_check(tag, i % 5);
     return nullptr;
 }
-// Fil DÉLIBÉRÉMENT non enregistré : il ne doit JAMAIS hériter du nom d'un autre.
+// Deliberately unregistered thread: it must NEVER inherit another thread's name.
 static void* stranger(void*) {
     for (int i = 0; i < 50; ++i) {
         gil::lock();
@@ -107,7 +108,7 @@ static int phase_identite() {
     return g_fail ? 1 : 0;
 }
 
-// ---- phase 2 : assert_held() détecte-t-il encore ? --------------------------
+// ---- phase 2: does assert_held() still detect it? ---------------------------
 
 static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  c = PTHREAD_COND_INITIALIZER;
@@ -120,10 +121,10 @@ static void* holder(void*) {
 }
 static int enfant_defaut(int which) {
     gil::enable(); reg(1);
-    if (which == 0) { gil::assert_held(); return 0; }        // (A) GIL libre
+    if (which == 0) { gil::assert_held(); return 0; }        // (A) GIL free
     pthread_t t; pthread_create(&t, nullptr, holder, nullptr);
     pthread_mutex_lock(&m); while (!held) pthread_cond_wait(&c, &m); pthread_mutex_unlock(&m);
-    gil::assert_held();                                      // (B) tenu par thr2
+    gil::assert_held();                                      // (B) held by thr2
     return 0;
 }
 static int phase_assert() {
@@ -141,11 +142,12 @@ static int phase_assert() {
     return bad;
 }
 
-// ---- phase 3 : une pile RECYCLÉE ne prête pas son nom ----------------------
-// Le fil éphémère s'enregistre, prend le GIL, se DÉSENREGISTRE, meurt. Le
-// squatteur, créé juste après, hérite très probablement de sa pile (cache de
-// piles de glibc) et ne s'enregistre PAS : il doit rester anonyme. Sans le
-// désenregistrement, il porterait le nom du mort — le « diagnostic qui ment ».
+// ---- phase 3: a RECYCLED stack doesn't lend its name -------------------------
+// The ephemeral thread registers, takes the GIL, unregisters, and dies. The
+// squatter, created right after, most likely inherits its stack (glibc's
+// stack cache) and does not register — it must stay anonymous. Without the
+// unregister step, it would carry the dead thread's name — the "diagnostic
+// that lies".
 static std::atomic<uintptr_t> g_markA{0}, g_markB{0};
 static void* ephemere(void*) {
     char ici; uintptr_t hi = (uintptr_t)&ici;
@@ -171,9 +173,9 @@ static int phase_recyclage() {
     pthread_create(&b, nullptr, squatteur, nullptr); pthread_join(b, nullptr);
     unsigned long A = (unsigned long)g_markA.load(), B = (unsigned long)g_markB.load();
     unsigned long d = A > B ? A - B : B - A;
-    // Si la pile n'a PAS été réutilisée, le cas n'est pas exercé : on le DIT,
-    // on ne compte pas un PASS gratuit (doctrine : l'absence de preuve est une
-    // information, jamais un artefact).
+    // If the stack was NOT reused, the case isn't exercised: this says so
+    // rather than counting a free pass — absence of proof is information,
+    // never a free pass.
     std::printf("  phase 3 (pile recyclee) : marques %#lx / %#lx, ecart %lu -> %s\n", A, B, d,
                 d < (unsigned long)SPAN ? "pile REUTILISEE, cas EXERCE"
                                         : "pile NON reutilisee : cas NON EXERCE, ce PASS ne prouve rien");
@@ -181,13 +183,12 @@ static int phase_recyclage() {
 }
 
 int main() {
-    // Le contrôle d'IDENTITÉ d'assert_held() est éteint par défaut depuis qu'il
-    // s'est avéré coûter un parcours de table par shim de synchronisation en
-    // production (D2_GILCHECK). Ce test est justement là pour l'éprouver : on
-    // l'arme explicitement, avant tout fork et tout fil.
+    // assert_held()'s identity check is off by default: it costs a table
+    // walk per sync shim in production (D2_GILCHECK). This test exists to
+    // exercise it, so it's armed explicitly here, before any fork or thread.
     gil::set_identity_check(true);
-    // Les phases 1/3 et 2 sont séparées par fork() : enfant_defaut() rappelle
-    // gil::enable(), dont le contrat est « une seule fois par processus ».
+    // Phases 1/3 and 2 are separated by fork(): enfant_defaut() calls
+    // gil::enable() again, whose contract is "once per process."
     int bad = phase_assert();
     bad |= phase_identite();
     bad |= phase_recyclage();

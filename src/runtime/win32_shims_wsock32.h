@@ -1,16 +1,14 @@
 // src/runtime/win32_shims_wsock32.h — Winsock 1.1/2 ordinal shims
 // (WSOCK32.dll / WS2_32.dll) and the generic socket-handle table backing
-// them. See win32_shims_wsock32.cpp for the exact ordinal-by-ordinal split
-// rationale versus what stays embedder-side. connect/recv/send live HERE and
-// are fully generic since 2026-09-11: application policy reaches them through
-// the observer and the connect route declared below. The address helpers
-// (inet_addr/inet_ntoa/gethostbyname) joined them the same day, once the
-// guest scratch allocator they write through became an engine primitive
-// (guest_scratch.h). select is now the only ordinal the embedder still
-// registers itself.
+// them. See win32_shims_wsock32.cpp for the ordinal-by-ordinal split between
+// what lives here and what stays embedder-side. connect/recv/send are fully
+// generic: application policy reaches them through the observer and the
+// connect route declared below. The address helpers (inet_addr/inet_ntoa/
+// gethostbyname) write through the guest scratch allocator (guest_scratch.h).
+// select is the only ordinal the embedder still registers itself.
 #pragma once
 #include <cstdint>
-#include "runtime/net_guard.h"   // le verrou de sortie, unite feuille
+#include "runtime/net_guard.h"   // the exit lock, a leaf unit
 namespace d2rt { class Bridge; class Cpu; }
 
 // --- socket-handle table -------------------------------------------------
@@ -64,8 +62,8 @@ int wx86_connect_wait(int fd, int timeout_ms, uint32_t* outWsaErr);
 // Returns the same shape as POSIX recv/send: >=0 bytes (0 on EOF for recv),
 // or -1 with *outWsaErr set. `blocking` is the guest-visible mode (i.e. the
 // caller's own !nonblock check on the WsockHandle).
-// wait_ms : 0 = politique Windows (attente infinie, ou SO_RCVTIMEO pose par
-// setsockopt -> WSAETIMEDOUT) ; > 0 = borne explicite imposee par l'appelant.
+// wait_ms: 0 = Windows policy (block indefinitely, or WSAETIMEDOUT if
+// SO_RCVTIMEO was set via setsockopt); > 0 = explicit caller-imposed bound.
 int wx86_recv_blocking(int fd, void* buf, uint32_t len, bool blocking, int wait_ms, uint32_t* outWsaErr);
 int wx86_send_simple(int fd, const void* buf, uint32_t len, uint32_t* outWsaErr);
 
@@ -83,29 +81,27 @@ int wx86_send_simple(int fd, const void* buf, uint32_t len, uint32_t* outWsaErr)
 void     wx86_net_set_redirect(uint32_t ip);   // 0 = disabled
 uint32_t wx86_net_redirect();
 
-// --- verrou de sortie : « rien ne part vers l'internet public » ------------
-// Un bac a sable de la couche socket, au meme titre que la route ci-dessus, et
-// tout aussi ignorant du protocole : la seule question posee est « cette
-// adresse peut-elle atteindre l'internet public ? ». Arme, toute destination
-// NON privee (hors 127/8, 0.0.0.0, 10/8, 172.16/12, 192.168/16, 169.254/16,
-// multicast 224/4 et diffusion 255.255.255.255) est refusee avec WSAEACCES
-// (10013) sur connect et sendto, et tout datagramme venant d'une telle adresse
-// est jete par recvfrom. Un refus ne touche AUCUNE socket hote : aucune poignee
-// TCP entamee, aucun octet emis.
+// --- outbound exit lock: nothing reaches the public internet unless
+// explicitly allowed -------------------------------------------------------
+// A socket-layer sandbox, as protocol-agnostic as the route above: the only
+// question asked is "can this address reach the public internet?". When
+// armed, any non-private destination (outside 127/8, 0.0.0.0, 10/8,
+// 172.16/12, 192.168/16, 169.254/16, multicast 224/4, and the
+// 255.255.255.255 broadcast) is refused with WSAEACCES (10013) on connect
+// and sendto, and any datagram from such an address is dropped by recvfrom.
+// A refusal touches no host socket: no TCP handshake started, no bytes sent.
 //
-// DEFAUT : DESARME. Le moteur n'a pas d'avis sur la politique reseau de son
-// consommateur ; c'est l'embarqueur qui l'arme, et qui decide a quelles
-// conditions il la leve. Le verdict est applique EN AVAL de la route, donc sur
-// la destination reellement composee. Le moteur n'imprime rien : il signale le
-// refus par WX86_NET_REFUSED a l'observateur, qui journalise ou il veut.
+// Default OFF. The engine has no opinion on its consumer's network policy;
+// the embedder arms it and decides when to lift it. The verdict is applied
+// AFTER routing, i.e. against the destination actually dialed. The engine
+// prints nothing itself — it reports a refusal via WX86_NET_REFUSED to the
+// observer, which logs it however it wants.
 //
-// Les declarations elles-memes vivent dans runtime/net_guard.h, une unite
-// FEUILLE : le drapeau est interroge par deux etages (ici, et la resolution
-// de nom dans net_nonblock.cpp), et ce fichier-ci tire tout le pont et le
-// processeur. Une feuille qui l'aurait interroge a travers cet en-tete aurait
-// du lier la moitie du moteur — ce qui avait deja casse un banc et force un
-// filet a redefinir le predicat. Inclus ici pour que les consommateurs
-// existants de cet en-tete gardent les memes symboles sous la main.
+// The declarations themselves live in runtime/net_guard.h, a leaf unit: the
+// flag is queried from two layers (here, and name resolution in
+// net_nonblock.cpp), and this file alone pulls in the whole bridge and CPU.
+// Included here so existing consumers of this header keep the same symbols
+// available.
 
 // --- generic socket-layer observer ---------------------------------------
 // ONE passive observation point over the whole socket layer. The engine
@@ -124,21 +120,18 @@ enum {
     WX86_NET_RECV,           // after a recv: data/len = payload, result = bytes
                              // (0 = orderly shutdown, -1 = error)
     WX86_NET_CLOSE,
-    WX86_NET_RESOLVE,        // resolution de nom : data/len = le nom demande,
-                             // result 0 = resolu (ip = adresse obtenue),
-                             // -1 = echec (wsa_err renseigne). Le moteur
-                             // etant muet, c'est par ici que l'embarqueur
-                             // apprend qu'un nom n'a pas pu etre resolu —
-                             // premier echec attendu sur une plateforme
-                             // embarquee, il ne doit pas rester invisible.
-    WX86_NET_REFUSED,        // le verrou de sortie (wx86_net_set_private_only)
-                             // a REFUSE une destination : ip/port = celle qui
-                             // etait visee, result = l'operation refusee
+    WX86_NET_RESOLVE,        // name resolution: data/len = requested name,
+                             // result 0 = resolved (ip = address obtained),
+                             // -1 = failed (wsa_err set). The engine is
+                             // otherwise silent, so this is how the embedder
+                             // learns a name failed to resolve.
+    WX86_NET_REFUSED,        // the exit lock (wx86_net_set_private_only)
+                             // REFUSED a destination: ip/port = the one
+                             // targeted, result = the refused operation
                              // (WX86_NET_CONNECT / _SEND / _RECV), wsa_err =
-                             // 10013. AUCUNE socket hote n'a ete touchee. Le
-                             // moteur etant muet, c'est la seule facon pour
-                             // l'embarqueur d'apprendre qu'un paquet a ete
-                             // retenu — et de le crier ou il faut.
+                             // 10013. NO host socket was touched. The engine
+                             // is otherwise silent, so this is the only way
+                             // the embedder learns a packet was withheld.
 };
 struct WsockEvent {
     int         kind;
@@ -154,9 +147,9 @@ struct WsockEvent {
     int         len;       // SEND/RECV payload length, else 0
 };
 typedef void (*WsockObserverFn)(const WsockEvent&);
-// Exactly ONE observer, deliberately: a registry that silently accepts a
-// second registration is how this project once lost a login regression to a
-// duplicate hook. Setting it twice replaces the first.
+// Exactly ONE observer, deliberately: silently accepting a second
+// registration would let a duplicate hook shadow the first unnoticed.
+// Setting it twice replaces the first.
 void wx86_net_set_observer(WsockObserverFn cb);
 
 void win32_shims_wsock32_install(d2rt::Bridge& br);

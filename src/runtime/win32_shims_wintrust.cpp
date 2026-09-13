@@ -1,4 +1,4 @@
-// src/runtime/win32_shims_wintrust.cpp — voir win32_shims_wintrust.h.
+// src/runtime/win32_shims_wintrust.cpp — see win32_shims_wintrust.h.
 #include "win32_shims_wintrust.h"
 #include "runtime/authenticode.h"
 #include "runtime/bridge.h"
@@ -19,7 +19,7 @@ namespace ac = wx86::ac;
 
 namespace {
 
-// ---- Codes -------------------------------------------------------------------
+// ---- Codes ----
 const uint32_t ERROR_FILE_NOT_FOUND        = 2;
 const uint32_t ERROR_INVALID_HANDLE        = 6;
 const uint32_t ERROR_INVALID_PARAMETER     = 87;
@@ -31,16 +31,16 @@ const uint32_t CRYPT_E_INVALID_MSG_TYPE    = 0x80091004u;
 const uint32_t CRYPT_E_INVALID_INDEX       = 0x80091008u;
 const uint32_t CRYPT_E_NOT_FOUND           = 0x80092004u;
 
-// ---- Constantes wintrust.h / wincrypt.h ----------------------------------------
+// ---- Constants from wintrust.h / wincrypt.h ----
 const uint8_t GUID_GENERIC_VERIFY_V2[16] = { 0x6b,0xc5,0xaa,0x00, 0x44,0xcd, 0xd0,0x11,
                                              0x8c,0xc2,0x00,0xc0,0x4f,0xc2,0x95,0xee };
-// Valeurs relues dans wintrust.h (mingw-w64), pas de memoire.
+// Values copied from wintrust.h (mingw-w64), not typed from memory.
 const uint32_t WTD_REVOKE_NONE = 0, WTD_CHOICE_FILE = 1;
 const uint32_t WTD_STATEACTION_VERIFY = 1, WTD_STATEACTION_CLOSE = 2;
 const uint32_t WTD_REVOCATION_CHECK_NONE = 0x10, WTD_REVOCATION_CHECK_ANY = 0x20 | 0x40 | 0x80;
 const uint32_t WTD_HASH_ONLY_FLAG = 0x200, WTD_LIFETIME_SIGNING_FLAG = 0x800;
-// WTD_SAFER_FLAG (0x100) : « reserve » dans la documentation, sans effet
-// documente sur le verdict ; lu mais ignore.
+// WTD_SAFER_FLAG (0x100): "reserved" in the documentation, no documented
+// effect on the verdict; read but ignored.
 const uint32_t X509_PKCS7 = 0x00010001u;
 const uint32_t CERT_QUERY_OBJECT_FILE = 1;
 const uint32_t CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED = 0x400;
@@ -54,19 +54,19 @@ const uint32_t CERT_FIND_ANY = 0, CERT_FIND_SHA1_HASH = 0x10000, CERT_FIND_SUBJE
 const uint32_t CERT_NAME_ATTR_TYPE = 3, CERT_NAME_SIMPLE_DISPLAY_TYPE = 4, CERT_NAME_FRIENDLY_DISPLAY_TYPE = 5;
 const uint32_t CERT_NAME_ISSUER_FLAG = 1;
 
-// ---- Etat ----------------------------------------------------------------------
+// ---- State ----
 std::mutex g_mu;
 Wx86WintrustFileSource g_src;
 int64_t (*g_clock)() = nullptr;
 Wx86WintrustObserverFn g_obs = nullptr;
 
 std::map<uint32_t, std::shared_ptr<ac::SignedData>> g_msgs, g_stores;
-std::map<uint32_t, int> g_states;                     // hWVTStateData ouverts
+std::map<uint32_t, int> g_states;                     // open hWVTStateData handles
 uint32_t g_nextHandle = 0;
-std::map<std::string, uint32_t> g_ctxByDer;            // CERT_CONTEXT par certificat
+std::map<std::string, uint32_t> g_ctxByDer;            // CERT_CONTEXT per certificate
 std::map<uint32_t, std::string> g_derByCtx;
 
-uint32_t new_handle() {                                // poignee opaque, jamais 0
+uint32_t new_handle() {                                // opaque handle, never 0
     g_nextHandle++;
     return 0x7E5C0000u + 8u * g_nextHandle;
 }
@@ -106,10 +106,10 @@ bool load_file(const std::string& path, std::vector<uint8_t>& bytes) {
     return src && src(path, bytes);
 }
 
-// ---- Constructeur de structures x86 a pointeurs internes ------------------------
-// Tout est pose dans UN tampon dont l'adresse invitee de base est connue a
-// l'avance : la disposition ne depend pas de la base, donc une premiere passe a
-// base 0 donne la taille exacte (protocole « pvData = NULL » de CryptoAPI).
+// ---- Builder for x86 structures with internal pointers ----
+// Everything is laid out in ONE buffer whose guest base address is known in
+// advance: the layout doesn't depend on the base, so a first pass with
+// base 0 gives the exact size (CryptoAPI's "pvData = NULL" protocol).
 struct Layout {
     std::vector<uint8_t> b; uint32_t base;
     explicit Layout(uint32_t bs) : base(bs) {}
@@ -130,7 +130,7 @@ struct Layout {
     }
 };
 
-std::vector<uint8_t> reversed(const uint8_t* p, size_t n) {     // INTEGER DER -> CRYPT_INTEGER_BLOB (petit-boutiste)
+std::vector<uint8_t> reversed(const uint8_t* p, size_t n) {     // INTEGER DER -> CRYPT_INTEGER_BLOB (little-endian)
     std::vector<uint8_t> r(p, p + n); std::reverse(r.begin(), r.end()); return r;
 }
 uint64_t filetime(int64_t t) { return (uint64_t)(t + 11644473600LL) * 10000000ULL; }
@@ -152,7 +152,7 @@ void put_attrs(Layout& L, size_t off, const ac::SignedData& sd, const std::vecto
     }
 }
 
-// CMSG_SIGNER_INFO (0x44 octets + donnees)
+// CMSG_SIGNER_INFO (0x44 bytes + data)
 std::vector<uint8_t> build_signer_info(const ac::SignedData& sd, const ac::SignerInfo& si, uint32_t base) {
     Layout L(base);
     size_t h = L.reserve(0x44);
@@ -169,7 +169,7 @@ std::vector<uint8_t> build_signer_info(const ac::SignedData& sd, const ac::Signe
     return L.b;
 }
 
-// CERT_INFO (0x70) a l'offset `h` de L.
+// CERT_INFO (0x70) at offset `h` of L.
 void fill_cert_info(Layout& L, size_t h, const ac::Certificate& c) {
     L.u32(h + 0x00, c.version);
     auto ser = reversed(c.p(c.serial), c.serial.len);
@@ -183,7 +183,7 @@ void fill_cert_info(Layout& L, size_t h, const ac::Certificate& c) {
     L.alg(h + 0x38, c.spkiAlgOid, c.p(c.spkiAlgParams), c.spkiAlgParams.len);
     L.blob(h + 0x44, c.p(c.pubKey), c.pubKey.len);          // PublicKey {cbData, pbData, cUnusedBits}
     L.u32(h + 0x4c, c.pubKeyUnusedBits);
-    // IssuerUniqueId (0x50) / SubjectUniqueId (0x5c) : absents -> zeros
+    // IssuerUniqueId (0x50) / SubjectUniqueId (0x5c): absent -> zeros
     L.u32(h + 0x68, (uint32_t)c.exts.size());
     if (c.exts.empty()) { L.u32(h + 0x6c, 0); return; }
     size_t arr = L.reserve(16 * c.exts.size());
@@ -212,7 +212,7 @@ std::vector<uint8_t> build_cert_context(const ac::Certificate& c, uint32_t base,
     return L.b;
 }
 
-// Rend le CERT_CONTEXT invite du certificat (cree une fois), 0 si le brouillon est epuise.
+// Returns the certificate's guest CERT_CONTEXT (created once), 0 if the scratch area is exhausted.
 uint32_t context_for(Cpu& cpu, const ac::Certificate& c, uint32_t hStore) {
     std::string key(c.der.begin(), c.der.end());
     uint32_t p = 0;
@@ -227,12 +227,12 @@ uint32_t context_for(Cpu& cpu, const ac::Certificate& c, uint32_t hStore) {
         std::lock_guard<std::mutex> lk(g_mu);
         g_ctxByDer[key] = p; g_derByCtx[p] = key;
     } else {
-        cpu.write_u32(p + 16, hStore);                       // hCertStore du magasin qui le rend
+        cpu.write_u32(p + 16, hStore);                       // hCertStore of the store returning it
     }
     return p;
 }
 
-// Protocole de taille CryptoAPI : pvData NULL -> taille ; trop petit -> ERROR_MORE_DATA.
+// CryptoAPI size protocol: pvData NULL -> size; too small -> ERROR_MORE_DATA.
 uint32_t give(Cpu& c, uint32_t pvData, uint32_t pcbData, const std::vector<uint8_t>& bytes) {
     uint32_t need = (uint32_t)bytes.size();
     if (!pcbData) { wx86_set_lasterr(c, ERROR_INVALID_PARAMETER); return 0; }
@@ -272,14 +272,14 @@ uint32_t WinVerifyTrust(Cpu& c) {
     if (!pPath) return ret(HR_NOT_IMPLEMENTED, HR_NOT_IMPLEMENTED, "-", "hFile-only subject not implemented");
     std::string path = gread_wide_utf8(c, pPath);
     std::vector<uint8_t> bytes;
-    // Fichier introuvable : ERROR_FILE_NOT_FOUND NU (pas un HRESULT), retour et
-    // GetLastError — mesure sur le wintrust de Wine ; Windows non mesure.
+    // File not found: raw ERROR_FILE_NOT_FOUND (not an HRESULT) -- matches
+    // Wine's wintrust; unconfirmed against real Windows.
     if (!load_file(path, bytes)) return ret(ERROR_FILE_NOT_FOUND, ERROR_FILE_NOT_FOUND, path.c_str(), "file not found");
 
     ac::VerifyOptions opt;
     opt.now = g_clock ? g_clock() : 0;
-    // Voir authenticode.h : hors ligne, la politique par defaut rend le meme
-    // resultat que la revocation soit demandee ou non ; on garde la trace.
+    // See authenticode.h: offline, the default policy returns the same result
+    // whether revocation is requested or not; the report still records it.
     opt.revocation_requested = (revoke != WTD_REVOKE_NONE || (provFlags & WTD_REVOCATION_CHECK_ANY)) &&
                                !(provFlags & WTD_REVOCATION_CHECK_NONE);
     opt.hash_only = (provFlags & WTD_HASH_ONLY_FLAG) != 0;
@@ -307,8 +307,8 @@ uint32_t CryptQueryObject(Cpu& c) {
         return fail(ERROR_CALL_NOT_IMPLEMENTED, "-", "content/format not implemented");
     std::string path = gread_wide_utf8(c, pv);
     std::vector<uint8_t> bytes;
-    // Tout echec -> CRYPT_E_NO_MATCH, fichier absent compris (mesure sur le
-    // crypt32 de Wine ; Windows non mesure).
+    // Any failure -> CRYPT_E_NO_MATCH, including file-not-found -- matches
+    // Wine's crypt32; unconfirmed against real Windows.
     if (!load_file(path, bytes)) return fail(ac::CRYPT_E_NO_MATCH, path.c_str(), "file not found");
     std::vector<uint8_t> p7; uint32_t e = 0;
     if (!ac::pe_extract_pkcs7(bytes, p7, &e)) return fail(ac::CRYPT_E_NO_MATCH, path.c_str(), "no embedded PKCS#7");
@@ -381,7 +381,7 @@ uint32_t CertFreeCertificateContext(Cpu&) { return 1u; }
 
 bool blob_eq_int_le(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
     size_t la = a.size(), lb = b.size();
-    while (la > 1 && !a[la - 1]) la--;                       // zeros de poids fort (petit-boutiste)
+    while (la > 1 && !a[la - 1]) la--;                       // high-order zeros (little-endian)
     while (lb > 1 && !b[lb - 1]) lb--;
     return la == lb && std::memcmp(a.data(), b.data(), la) == 0;
 }

@@ -1,6 +1,4 @@
-// src/runtime/guest_thread_ctx.cpp — voir guest_thread_ctx.h.
-// Porte depuis tools/rt_boot.cpp de d2vita (2026-09-11) ; carn-vita, l'autre
-// consommateur, hebergeait la MEME fonction, mot pour mot.
+// src/runtime/guest_thread_ctx.cpp — see guest_thread_ctx.h.
 #include "guest_thread_ctx.h"
 #include "runtime/cpu.h"
 #include "runtime/guest_thread.h"
@@ -19,6 +17,6 @@ uint32_t wx86_cur_tib(){
                                               : g_wxMainTib;
 }
 
-// 0x34 = TEB.LastErrorValue, offset fixe de l'ABI Win32 32 bits.
+// 0x34 = TEB.LastErrorValue, fixed offset in the 32-bit Win32 ABI.
 void     wx86_set_lasterr(Cpu& c, uint32_t v){ c.write_u32(wx86_cur_tib()+0x34, v); }
 uint32_t wx86_get_lasterr(Cpu& c)            { return c.read_u32(wx86_cur_tib()+0x34); }

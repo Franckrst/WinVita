@@ -1,32 +1,30 @@
-// src/runtime/guest_locale.h — la locale que le programme invite croit voir.
+// src/runtime/guest_locale.h — locale the guest program believes it sees.
 //
-// DECOUPE. La *correspondance* LCID -> page de codes, nom de langue, separateur
-// decimal... est de la connaissance Windows : elle ne depend d'aucun jeu, et les
-// deux portages en portaient la meme copie, table pour table. Elle vit donc ici.
-// *Quelle* locale est active depend de la machine et du consommateur : il la
-// pose avec wx86_locale_set_lcid(). Par defaut le moteur repond en-US (0x0409),
-// jamais une valeur choisie pour un jeu particulier.
+// The LCID -> codepage/language-name/decimal-separator mapping is fixed
+// Windows knowledge, independent of any game, so it lives here. Which
+// locale is active depends on the consumer, set via wx86_locale_set_lcid().
+// Default is en-US (0x0409), never a value picked for a specific game.
 //
-// wx86_locale_detect_posix() est offert comme defaut raisonnable pour un hote
-// POSIX ; une console qui expose sa propre langue systeme n'a qu'a poser le
-// LCID elle-meme.
+// wx86_locale_detect_posix() is offered as a reasonable default for a POSIX
+// host; a console that exposes its own system language can just set the
+// LCID itself.
 #pragma once
 #include <cstdint>
 
-// LCID actif. Defaut 0x0409 (en-US) tant que le consommateur n'a rien pose.
+// Active LCID. Defaults to 0x0409 (en-US) until the consumer sets one.
 uint32_t wx86_locale_lcid();
 void     wx86_locale_set_lcid(uint32_t lcid);
 
-// Locale de l'hote POSIX, deduite de LC_ALL / LC_MESSAGES / LANG.
-// Rend 0x0409 pour « C »/« POSIX »/absent.
+// POSIX host locale, derived from LC_ALL / LC_MESSAGES / LANG.
+// Returns 0x0409 for "C"/"POSIX"/unset.
 uint32_t wx86_locale_detect_posix();
 
-// Pages de codes ANSI et OEM de la locale active.
+// ANSI and OEM code pages for the active locale.
 uint32_t wx86_cp_ansi();
 uint32_t wx86_cp_oem();
 
-// Valeur texte d'un LCTYPE (GetLocaleInfoA/W). Jamais nul.
+// Text value of an LCTYPE (GetLocaleInfoA/W). Never null.
 const char* wx86_locale_info(uint32_t lctype);
 
-// Classification de caractere facon GetStringType (CT_CTYPE1).
+// Character classification like GetStringType (CT_CTYPE1).
 uint16_t wx86_ctype1(uint32_t ch);

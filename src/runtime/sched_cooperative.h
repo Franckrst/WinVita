@@ -33,8 +33,9 @@ public:
                          uint32_t stack_region, uint32_t stack_each,
                          uint32_t tib_region);
 
-    // Wrap the initial/main thread (e.g. Game.exe entry). Uses the given stack
-    // top (the bridge's main stack) and tib (linear 0). Returns the main thread.
+    // Wrap the initial/main thread (the guest executable's entry point). Uses
+    // the given stack top (the bridge's main stack) and tib (linear 0).
+    // Returns the main thread.
     GuestThread* set_main(uint32_t entry, uint32_t stack_top, uint32_t tib) override;
 
     GuestThread* create_thread(uint32_t entry, uint32_t param,
@@ -68,16 +69,15 @@ public:
     // Loader-lock semantics: pin the CURRENT thread so a time-slice preempt
     // re-runs it instead of switching away. Used around a DLL's DllMain (CRT
     // init): if another guest thread runs mid-DllMain it mutates the SHARED
-    // dynarec state (block cache) and the CRT resumes into an unrelocated
-    // address (observed EIP=0x10042ab8 in the lockdown CheckRevision.dll). A
-    // plain I/O yield still deschedules normally (the pin only overrides a
-    // time-slice preempt). Cleared when DllMain returns. Mirrors Windows
-    // serializing DLL_PROCESS_ATTACH under the loader lock.
+    // dynarec state (block cache), and the CRT can resume into an unrelocated
+    // address. A plain I/O yield still deschedules normally (the pin only
+    // overrides a time-slice preempt). Cleared when DllMain returns. Mirrors
+    // Windows serializing DLL_PROCESS_ATTACH under the loader lock.
     void set_no_preempt(bool on) override { no_preempt_thread_ = on ? cur_ : nullptr; }
     // Optional per-instruction probe (breakpoints in scheduler mode), chained
     // inside the preemption hook. Runs on EVERY instruction — keep it cheap.
     void set_probe(std::function<void(uint32_t)> p) { probe_ = std::move(p); }
-    // SEH dispatcher (audit p8): called in the fault branch BEFORE terminating a
+    // SEH dispatcher: called in the fault branch BEFORE terminating a
     // faulting thread, with (thread, windows_exception_code, fault_addr). It walks
     // fs:[0] and runs guest handlers. Returns 0 = terminate (search exhausted /
     // resume not supported yet), 1 = resume (reserved). Only fires on a real fault,
@@ -103,7 +103,8 @@ public:
     void request_shutdown() override { shutdown_ = true; if (cpu_) cpu_->request_stop(); }
     // Silent scheduler-event ring (diag): RUN/PREEMPT/BLOCK/FINISH/WAKE events
     // with thread id, guest EIP and virtual ms — recorded with zero I/O so a
-    // timing race is not perturbed; dumped at a Fog Halt (Crash.txt hook).
+    // timing race is not perturbed; dumped when the guest reports a fatal
+    // error (crash-log hook).
     struct SwEv { uint32_t seq; uint8_t tid, ev; uint16_t aux; uint32_t eip; uint32_t ms; };
     SwEv sw_ring_[256] = {}; uint32_t sw_seq_ = 0;
     inline void sw_rec(uint32_t tid, uint8_t ev, uint16_t aux, uint32_t eip) {
@@ -129,9 +130,9 @@ public:
                             g->wait_obj ? static_cast<Waitable*>(g->wait_obj)->kind() : "-",
                             g->ctx.eip, (unsigned long long)g->slices); }
     }
-    // Same dump routed through a sink (Vita: boot_progress heartbeats).
-    // C14 (deep review): this runs on the WATCHDOG host thread, concurrently
-    // with the scheduler. Iterating threads_ was a use-after-free waiting to
+    // Same dump routed through a sink (Vita: boot_progress heartbeats). This
+    // runs on the WATCHDOG host thread, concurrently with the scheduler:
+    // iterating threads_ directly would be a use-after-free waiting to
     // happen — a push_back reallocates the vector under the reader. Walk the
     // flat snapshot instead: entries are published (release) before the count
     // is bumped, and the GuestThread objects themselves never move (unique_ptr
@@ -150,7 +151,7 @@ public:
                           g->ctx.eip, (unsigned long long)g->slices);
             sink(m); }
     }
-    uint32_t stacks_reused() const { return stacks_reused_; }   // C2 accounting
+    uint32_t stacks_reused() const { return stacks_reused_; }   // recycled-stack accounting
     // PROF_COUNTERS: per-thread run() time, all threads (finished included).
     void dump_thread_times() {
         for (auto& up : threads_) { GuestThread* g = up.get();
@@ -162,9 +163,9 @@ public:
     const uint64_t* switches_ptr() const { return &switches_; }   // watchdog sampling
     // Wake-source attribution (real-clock diagnosis): how blocked threads wake.
     uint64_t wake_signal_ = 0, wake_timeout_ = 0;
-    // Sieste HOTE cumulee (ms) quand tous les fils invites sont bloques en mode
-    // horloge reelle : le temps CPU reellement rendu a la machine. Lu par
-    // D2_PHASEPROF (« libre-hote= »). Zero en mode virtuel.
+    // Cumulative host sleep (ms) while every guest thread is blocked in
+    // real-clock mode: CPU time actually given back to the machine. Read via
+    // D2_PHASEPROF ("libre-hote="). Zero in virtual-clock mode.
     uint64_t idle_ms_ = 0;
     const char* stop_reason() const override { return stop_reason_; }
     // Real-time clock mode (hardware): virt_ms_ follows now_ms() instead of
@@ -180,7 +181,7 @@ public:
     // threads are runnable. false = idle-only expiry (the virtual-mode rule),
     // to isolate whether a bug is triggered by WAIT_TIMEOUT deliveries.
     void set_real_expire(bool on) { real_expire_ = on; }
-    void set_defer_towake(bool on) { defer_towake_ = on; }   // halt-316 containment
+    void set_defer_towake(bool on) { defer_towake_ = on; }   // see D2_TOWAKE_DEFER above
 
 private:
     GuestThread* pick_ready();     // round-robin; also wakes satisfiable Blocked
@@ -192,14 +193,14 @@ private:
     std::function<void(uint32_t)> real_sleep_;
     uint64_t real_base_ = 0; bool real_base_set_ = false;
     bool real_expire_ = true;
-    // Halt-316 containment (D2_TOWAKE_DEFER=1): while a thread was BUDGET-
-    // preempted mid-computation and has not yet reached a voluntary boundary
-    // (block/yield/finish), do not deliver timed-wait EXPIRY wakes to other
-    // threads — the {preempt -> WAKEto interleave -> resume} window is exactly
-    // what lets D2's room2-list churn free nodes under the main thread's
-    // iteration during a slow act-load (docs/audit/deep_review_2026-08-25.md).
-    // Signal wakes are unaffected; expiries deliver as soon as the interrupted
-    // thread blocks (it does every frame), so Sleep durations stay honest.
+    // D2_TOWAKE_DEFER=1: while a thread was BUDGET-preempted mid-computation
+    // and has not yet reached a voluntary boundary (block/yield/finish), do
+    // not deliver timed-wait EXPIRY wakes to other threads — the {preempt ->
+    // WAKEto interleave -> resume} window is exactly what would let another
+    // thread iterate a guest list while the preempted thread is mid-update,
+    // freeing nodes out from under that iteration. Signal wakes are
+    // unaffected; expiries deliver as soon as the interrupted thread blocks
+    // (it does every frame), so Sleep durations stay honest.
     bool defer_towake_ = false;
     GuestThread* preempted_last_ = nullptr;
 
@@ -207,11 +208,11 @@ private:
     uint32_t stack_region_, stack_each_, stack_next_;
     uint32_t tib_region_, tib_next_;
     std::vector<std::unique_ptr<GuestThread>> threads_;
-    // C14: stable flat view for cross-thread readers (the Vita watchdog).
+    // Stable flat view for cross-thread readers (the Vita watchdog).
     static constexpr uint32_t kFlatMax = 128;
     GuestThread* flat_[kFlatMax] = {nullptr};
     std::atomic<uint32_t> flat_n_{0};
-    uint32_t stacks_reused_ = 0;        // C2: recycled worker stacks/TIBs
+    uint32_t stacks_reused_ = 0;        // recycled worker stacks/TIBs
     GuestThread* cur_ = nullptr;
     GuestThread* no_preempt_thread_ = nullptr;  // loader-lock pin; see set_no_preempt
     uint32_t next_id_ = 1;
@@ -221,7 +222,7 @@ private:
     uint32_t quantum_ = 300000;   // instructions per slice before preemption
     bool preempted_ = false;
     bool hook_installed_ = false;
-    bool stack_overrun_warned_ = false;   // C2: one-shot worker-stack overrun warning
+    bool stack_overrun_warned_ = false;   // one-shot worker-stack overrun warning
     uint64_t virt_ms_ = 0;                                // virtual clock for timed waits
     std::function<void(uint64_t)> time_sink_;             // fires when virt_ms_ advances
     std::function<void(uint32_t)> probe_;                 // optional breakpoint probe

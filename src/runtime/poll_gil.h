@@ -1,11 +1,7 @@
 // src/runtime/poll_gil.h — cooperative-scheduler-aware ::poll wrapper.
 //
-// Moved out of d2vita's tools/rt_boot.cpp (2026-09-11, WSOCK32 genericity
-// pass) where it lived as d2rt_poll_gilfree/_n: the body only ever touched
-// gil::Release (this file's own gil.h) and g_native_sched->shutdown_requested()
-// (sched_native.h) — both already winx86-hosted, nothing D2-specific was
-// ever in here. Any shim that blocks on a host fd (recv, connect-completion,
-// select) should use this instead of a raw ::poll.
+// Any shim that blocks on a host fd (recv, connect-completion, select)
+// should use this instead of a raw ::poll.
 #pragma once
 #include <poll.h>
 

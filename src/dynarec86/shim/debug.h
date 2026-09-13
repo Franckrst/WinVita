@@ -40,8 +40,8 @@ typedef struct box86context_s box86context_t;
  * qemu/Linux path stays bit-identical). C-side derefs use DYN86_G2H. */
 extern uintptr_t dyn86_membase;
 #define DYN86_G2H(a)  ((uintptr_t)(a) + dyn86_membase)
-/* Chemin inverse : d'une adresse HOTE vers l'adresse INVITEE. Sert au
- * diagnostic (nommer l'instruction x86 fautive depuis la table instsize). */
+/* Inverse path: host address -> guest address. Used for diagnostics (naming
+ * the faulting x86 instruction via the instsize table). */
 #define DYN86_H2G(a)  ((uint32_t)((uintptr_t)(a) - dyn86_membase))
 
 /* ---- allocators: plain libc ---- */
@@ -67,84 +67,72 @@ static const int box86_dynarec_trace = 0;
 static const int box86_dynarec_forced = 0;
 static int box86_dynarec_largest __attribute__((unused)) = 0;
 static const int box86_dynarec_bigblock = 2;   // build larger blocks across cond. branches (fewer transitions)
-// D2_BUDGETTAIL=1 : sortir le chemin d'expiration du budget de blocs du
-// PROLOGUE et le poser en QUEUE de bloc (voir dynarec_arm_pass.c). Meme code,
-// autre placement. Defaut 0 = disposition historique.
-// ⚡ CE KNOB N'A JAMAIS ETE MESURE SEUL SUR CONSOLE : il n'a couru que noye
-// dans « les cinq ensemble » du lot dynarec (passe NALL, -3,7 %), dont les
-// quatre autres membres sont desormais retires. Le profil du code emis lui
-// donne une cible chiffree : 9,1 % des octets ARM emis sont ce chemin
-// d'expiration, mort a chaque entree de bloc, que le BGT enjambe.
+// D2_BUDGETTAIL=1: move the block-budget-expiry check out of the block
+// prologue and place it at the block tail instead (see dynarec_arm_pass.c).
+// Same code, different placement, letting the common-case branch skip over
+// it. Default 0 keeps the original placement.
 extern int box86_dynarec_budgettail;
-// D2_FORWARD=<n> : taille maximale du TROU qu'un bloc peut enjamber vers
-// l'avant pour continuer (dynarec_arm_pass.c, branche « forward extend »).
-// Defaut 256 = valeur historique de box86, comportement INCHANGE.
-// Comme box86_dynarec_callret, c'est une VRAIE variable definie dans
-// src/dynarec86/dyn86.c et lue par le GENERATEUR au moment de la traduction :
-// un binaire unique porte donc toutes les jambes de l'A/B (les blocs deja
-// traduits gardent leur forme, ceux d'apres prennent la nouvelle).
-// Plus grand = blocs plus longs, donc MOINS de transitions de bloc (chacune
-// coute ~283 cycles sur la Vita) — mais aussi plus de code traduit, donc plus
-// de pression sur l'I-cache et sur la table de saut. Le signe du resultat
-// n'est PAS predictible depuis qemu : verdict console uniquement.
+// D2_FORWARD=<n>: max size of the gap a block may bridge forward to keep
+// extending (dynarec_arm_pass.c, "forward extend" branch). Default 256
+// matches upstream box86 behavior.
+// Read by the translator at translation time (like box86_dynarec_callret
+// below), so a single binary can carry both arms of an A/B: already
+// translated blocks keep their shape, later ones pick up a changed value.
+// Larger = longer blocks = fewer block transitions (~283 cycles each on the
+// Vita), but more translated code, adding I-cache and jump-table pressure.
+// The net effect is not predictable from qemu; only hardware measurement
+// settles it.
 extern int box86_dynarec_forward;
 static const int box86_dynarec_strongmem = 0;
 static const int box86_dynarec_x87double = 0;
-// safeflags : conservatisme des DRAPEAUX x86 aux RET/RETN, valeur amont de
-// box86. NE PAS EN REFAIRE UN INTERRUPTEUR : le knob D2_SAFEFLAGS a existe et
-// a ete retire le 05/09/2026 comme INERTE PAR CONSTRUCTION. Le corps de
-// READFLAGS(A) est garde par `if(((A)!=X_PEND && ...) ...)` et X_PEND vaut
-// 0x80 : avec A = X_PEND la condition est fausse A LA COMPILATION, donc les
-// deux sites RET/RETN n'emettent RIEN, ni a 1 ni a 0. Les autres sites testent
-// « > 1 » : inertes eux aussi au defaut. Les drapeaux differes de box86 sont
-// deja paresseux aux retours ; il n'y a rien a prendre ici.
+// safeflags: x86 FLAGS conservatism at RET/RETN, upstream box86 value.
+// Do not turn this into a runtime switch: the body of READFLAGS(A) is guarded
+// by `if(((A)!=X_PEND && ...) ...)`, and X_PEND is 0x80 -- with A == X_PEND
+// the condition is false at compile time, so both RET/RETN sites emit
+// nothing regardless of the flag's value. Other call sites test `> 1`, also
+// dead at the default. box86's deferred flags are already lazy at returns;
+// there is nothing to gain from a toggle here.
 static const int box86_dynarec_safeflags = 1;
-/* Expansion du traducteur : octets ARM emis, octets x86 traduits, blocs. */
+/* Translator expansion counters: ARM bytes emitted, x86 bytes translated, blocks. */
 extern unsigned long long dyn86_emit_arm_bytes, dyn86_emit_x86_bytes, dyn86_emit_blocks;
-// D2_CALLRET=1 a la compilation : prediction de retour (le dynarec pousse la
-// paire (adresse x86 de retour, cible ARM) sur la PILE ARM au CALL et la
-// verifie au RET, ce qui evite la traversee de la table de saut).
-// Historique : essaye puis retire, avec deux raisons ecrites. La seconde —
-// « la pile de prediction vit dans l'emu, que nos fils cooperatifs PARTAGENT »
-// — est PERIMEE : sous D2SCHED=native il y a un x86emu_t par fil
-// (cpu_box86.cpp), et surtout arm_prolog/arm_epilog sauvent et restaurent
-// xSPSave a CHAQUE entree/sortie de DynaRun, donc une sortie anticipee
-// (budget de blocs, trap, couture) ne peut pas desynchroniser la pile.
-// Defaut inchange = 0 : c'est un A/B a la compilation, pas une bascule.
-// COMMUTABLE A CHAUD (D2_CALLRET=1 dans env.txt) : la valeur est lue par le
-// GENERATEUR au moment ou il traduit un bloc, donc un binaire unique porte les
-// deux jambes de l'A/B — le patron « defaut = ancien code » de la maison. Les
-// blocs deja traduits gardent leur forme ; ceux d'apres prennent la nouvelle.
+// D2_CALLRET=1: return-address prediction -- the dynarec pushes the pair
+// (x86 return address, ARM target) on the ARM stack at CALL and checks it at
+// RET, skipping the jump-table walk.
+// Safe under cooperative threads: each thread owns its own x86emu_t, and
+// arm_prolog/arm_epilog save and restore xSPSave on every DynaRun entry/exit,
+// so an early block exit (budget expiry, trap, block splice) can never
+// desync the prediction stack.
+// The value is read by the translator at the moment it translates a block
+// (like box86_dynarec_forward above), not per call -- so a single running
+// binary can carry both old and new behavior: already-translated blocks keep
+// their shape, blocks translated after the value changes (e.g. via env.txt)
+// pick up the new one. Default 0 keeps the original behavior.
 extern int box86_dynarec_callret;
-// D2_SIGNTAG=1 : neutralise l'idiome Blizzard « pointeur complemente,
-// discrimine par le BIT DE SIGNE » en discriminant sur le BIT 30. N'a de sens
-// que sous D2LAYOUT=haut (memoire invitee au-dessus de 2 Gio) ; rt_boot refuse
-// de l'armer ailleurs. Contrat et preuves :
+// D2_SIGNTAG=1: reworks the "complemented pointer, discriminated by its sign
+// bit" idiom to discriminate on bit 30 instead. Only meaningful under
+// D2LAYOUT=haut (guest memory above 2 GiB); rt_boot refuses to arm it
+// otherwise. Contract and proofs:
 // third_party/box86-dynarec/dynarec/dynarec_arm_signtag.h.
 extern int dyn86_signtag;
-extern unsigned long dyn86_signtag_seen;    // motifs reconnus (verdict pur)
-extern unsigned long dyn86_signtag_done;    // motifs reecrits
-// D2_MMUFOLD=1 / D2_MMUSTACK=1 : deux facons de retirer l'ADD de base fastmmu
-// du CHEMIN CRITIQUE d'un acces memoire invite. Meme regle que callret :
-// lus par le GENERATEUR a la traduction, defaut 0 = code d'avant.
-// Contrat, recensement des formes et preuves de surete :
+extern unsigned long dyn86_signtag_seen;    // patterns recognized (read-only tally)
+extern unsigned long dyn86_signtag_done;    // patterns rewritten
+// D2_MMUFOLD=1 / D2_MMUSTACK=1: two ways to remove the fastmmu base ADD from
+// the critical path of a guest memory access. Same rule as callret: read by
+// the translator at translation time, default 0 keeps the original code.
+// Contract, enumerated forms and safety proofs:
 // third_party/box86-dynarec/dynarec/dynarec_arm_mmu.h.
 extern int dyn86_mmufold;
 extern int dyn86_mmustack;
-extern unsigned long dyn86_mmu_folds;        // adressages absolus PLIES
-extern unsigned long dyn86_mmu_sites;        // sites GETED* passes par geted
-extern unsigned long dyn86_mmu_foldable;     // dont forme absolue = PLIABLES
-extern unsigned long dyn86_mmu_st_heads;     // tetes de chaine PUSH/POP r32
-extern unsigned long dyn86_mmu_st_links;     // maillons chaines
-extern unsigned long dyn86_mmu_st_pop;       // dont POP  : 1 maillon de moins
-extern unsigned long dyn86_mmu_st_push;      // dont PUSH : 1 instruction seule
-extern unsigned long dyn86_mmu_st_rej_pos;   // refus : code emis entre deux
-extern unsigned long dyn86_mmu_st_rej_pred;  // refus : cible de saut/barriere
-extern unsigned long dyn86_mmu_st_rej_kind;  // refus : autre famille/registre
-    // (uninitialized return-prediction stack in our minimal emu setup), and is
-    // structurally wrong for D2Vita anyway — the prediction stack lives in the
-    // emu, which our cooperative threads SHARE, so call/ret pairs from
-    // different guest threads would interleave and mispredict permanently.
+extern unsigned long dyn86_mmu_folds;        // absolute addressings folded
+extern unsigned long dyn86_mmu_sites;        // GETED* call sites routed through geted
+extern unsigned long dyn86_mmu_foldable;     // of which absolute form: foldable
+extern unsigned long dyn86_mmu_st_heads;     // PUSH/POP r32 chain heads
+extern unsigned long dyn86_mmu_st_links;     // chain links
+extern unsigned long dyn86_mmu_st_pop;       // of which POP: one fewer link
+extern unsigned long dyn86_mmu_st_push;      // of which PUSH: single instruction
+extern unsigned long dyn86_mmu_st_rej_pos;   // rejected: code emitted in between
+extern unsigned long dyn86_mmu_st_rej_pred;  // rejected: jump target / barrier
+extern unsigned long dyn86_mmu_st_rej_kind;  // rejected: other family/register
 static const uintptr_t box86_nodynarec_start = 0;
 static const uintptr_t box86_nodynarec_end = 0;
 static const int box86_dynarec_fastnan = 1;

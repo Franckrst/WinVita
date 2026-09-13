@@ -1,11 +1,6 @@
-// src/runtime/net_nonblock.cpp — see net_nonblock.h. Bodies copied
-// byte-for-byte from d2vita's src/platform/vita_net.cpp
-// d2vita_net_set_nonblock/d2vita_net_resolve (2026-09-11, WSOCK32
-// genericity pass); only names and the two diagnostic globals
-// (g_nbMethod/g_resolveRc, now exposed via getters instead of d2vita
-// reaching into a d2vita-local static) changed.
+// src/runtime/net_nonblock.cpp — see net_nonblock.h.
 #include "runtime/net_nonblock.h"
-#include "runtime/net_guard.h"   // wx86_net_private_only() — unite FEUILLE, voir cet en-tete
+#include "runtime/net_guard.h"   // wx86_net_private_only() — leaf unit, see its header
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -75,31 +70,23 @@ uint32_t wx86_net_resolve(const char* host) {
     in_addr a;
     if (inet_aton(host, &a)) return a.s_addr;
 
-    // --- verrou de sortie : une REQUETE DNS est deja un depart ------------
-    // Le verrou wx86_net_set_private_only promet que « rien ne part vers
-    // l'internet public ». Il etait applique a connect/sendto/recvfrom,
-    // c'est-a-dire APRES la resolution — donc une resolution de nom sortait
-    // de la machine, en clair, en nommant l'hote vise, alors meme que la
-    // connexion qui aurait suivi aurait ete refusee. Le nom demande est
-    // souvent plus revelateur que l'adresse obtenue.
+    // The exit lock must gate name resolution too, not just
+    // connect/sendto/recvfrom: a DNS query leaves the machine in the clear,
+    // naming the target host, even when the connect that would follow gets
+    // refused — the requested name is often more revealing than the
+    // resolved address.
     //
-    // L'en-tete du verrou anticipait ce cas a la lettre : wx86_net_addr_is_private
-    // y est expose « pour qu'un embarqueur puisse poser la meme question
-    // ailleurs (une resolution de nom, par exemple) ». La question etait
-    // ecrite ; personne ne la posait. Elle est posee ici, au seul point ou
-    // la requete part.
-    //
-    // Arme, seul le litteral pointe ci-dessus repond — il ne consulte
-    // personne. Tout NOM est refuse sans qu'aucun paquet ne parte. Ce n'est
-    // pas une restriction gratuite : la maniere fidele de pointer un client
-    // vers un serveur prive est de lui donner l'adresse dans sa propre
-    // configuration (voir wx86_net_set_redirect et le commentaire des
-    // passerelles dans win32_shims_wsock32.cpp), pas de faire resoudre un
-    // nom public. Un embarqueur qui a vraiment besoin d'un nom de reseau
-    // local desarme le verrou : c'est SA politique, pas celle du moteur.
+    // When armed, only the dotted-quad literal handled above is answered;
+    // any name is refused before any packet leaves. This isn't an arbitrary
+    // restriction: the faithful way to point a client at a private server is
+    // to give it that address in its own configuration (see
+    // wx86_net_set_redirect in win32_shims_wsock32.cpp), not to have it
+    // resolve a public name. An embedder that genuinely needs local-network
+    // name resolution disarms the lock — that's its own policy, not the
+    // engine's.
     if (::wx86_net_private_only()) {
         ++g_resolveRefused;
-        g_resolveRc = 0;   // aucun resolveur n'a ete cree : pas de code a rapporter
+        g_resolveRc = 0;   // no resolver was created: no code to report
         return 0;
     }
 #ifdef __vita__
@@ -118,16 +105,9 @@ uint32_t wx86_net_resolve(const char* host) {
             // writing anything must read as a failure, never as the
             // 0.0.0.0 address that would then reach connect().
             SceNetInAddr addr; addr.s_addr = 0;
-            // UNIT NOT DOCUMENTED by the header or SDK reference; the only
-            // other known use (libc above) passes zero. Risk is
-            // asymmetric, so use the value that fails fast under the WORST
-            // reading: with 3, a "seconds" reading gives 3s, a
-            // "microseconds" reading gives an immediate abort.
-            // UNIT SETTLED BY MEASUREMENT (console, 2026-08-28): with 3,
-            // resolution failed in 0ms — so the value is consumed as a
-            // very short duration, not 3 seconds. MICROSECONDS: 5s =
-            // 5,000,000. This is no longer a hypothesis, it is a
-            // measurement on the device.
+            // Timeout unit is undocumented by the header/SDK reference;
+            // confirmed to be MICROSECONDS, not seconds — hence
+            // 5 * 1000 * 1000 below for a 5s timeout.
             int r = sceNetResolverStartNtoa(rid, host, &addr, 5 * 1000 * 1000, 1, 0);
             g_resolveRc = r;   // >= 0 but addr null = resolved without an answer
             sceNetResolverDestroy(rid);

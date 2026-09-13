@@ -1,7 +1,7 @@
 // src/runtime/bridge.cpp — see bridge.h.
 #include "runtime/bridge.h"
 #include "runtime/layout.h"
-#include "runtime/gil.h"   // observabilité : nommer le shim en cours (§19)
+#include "runtime/gil.h"   // observability: name the currently running shim (§19)
 #include "runtime/prof.h"
 
 #include <algorithm>
@@ -10,9 +10,9 @@
 #include <cstdlib>
 #include <cstring>
 
-// ---- D2_NATPROF : temps par creneau --------------------------------------
+// ---- D2_NATPROF: per-slot time -------------------------------------------
 extern "C" {
-    int d2rt_natprof = 0;                       // lu au commit()
+    int d2rt_natprof = 0;                       // read in commit()
     extern int d2rt_wakeprof;                   // D2_WAKEPROF (sched_native.cpp)
 }
 namespace {
@@ -22,23 +22,15 @@ namespace {
     d2rt::Bridge* g_natprof_bridge = nullptr;
 }
 
-// JOURNAL DU MOTEUR. Le service appartient au moteur (platform/vita_host.h) :
-// sur console il ecrit la ligne durable, hors console il ne fait rien. L'appel
-// est DIRECT et en lien FORT — plus de reference faible a tester.
-//
-// Ce qu'il y avait avant, et pourquoi c'etait faux : une reference FAIBLE vers
-// `d2vita_progress_c`, le nom du PREMIER consommateur. Un portage dont les
-// symboles ne portent pas ce prefixe obtenait un journal muet, sans la moindre
-// erreur de lien pour l'en avertir. Un moteur generique ne connait pas le nom
-// de ses consommateurs.
+// Engine log service (platform/vita_host.h): writes a durable line on
+// console, no-ops elsewhere. Linked directly and strongly — never as a weak
+// reference to a specific consumer's symbol: a generic engine has no
+// business assuming its consumer's name, and a port whose symbols don't
+// match one would otherwise get a silently muted log.
 #include "platform/vita_host.h"
-// L'HORLOGE MONOTONE EST AU MOTEUR. Ces deux appels passaient par
-// `d2rt_natprof_now_us`, que CHAQUE portage devait definir — et que les deux
-// definissaient a l'identique, en une ligne, comme un renvoi vers leur propre
-// horloge, elle-meme un renvoi vers wx86_now_us. Trois sauts pour revenir a
-// l'endroit d'ou l'on part : le type avait demenage, la demande, non.
+// Monotonic clock lives in the engine — used directly, no per-port indirection.
 #include "runtime/host_clock.h"
-extern "C" { extern uint32_t d2rt_timeprof_base; }   // base invitee (cpu_box86.cpp)
+extern "C" { extern uint32_t d2rt_timeprof_base; }   // guest base (cpu_box86.cpp)
 
 namespace d2rt {
 
@@ -46,40 +38,32 @@ namespace d2rt {
 // per thread, no ctor needed.
 #ifdef D2_TLSCOUNT
 extern "C" { unsigned long long d2_tls_traps = 0; }
-// Compteur d'appels a E() (cpu_box86.cpp). Le recensement B3 en prend la
-// DIFFERENCE de part et d'autre d'une traversee : le chiffre est donc un
-// constat par creneau, pas un prix unitaire emprunte a une autre operation.
+// Calls to E() (cpu_box86.cpp). Counted as the DIFFERENCE across a
+// crossing, so the figure is a genuine per-slot measurement, never a unit
+// price borrowed from another operation.
 extern "C" { extern unsigned long long d2_e_calls; }
 #endif
-// Diagnostics d'environnement, lus UNE FOIS au commit et non a CHAQUE trap.
-// POURQUOI : « static X v = getenv(...) » dans trap_handler est une statique de
-// fonction a initialiseur NON TRIVIAL ; GCC protege son initialisation par une
-// variable de garde dont la lecture est ACQUISE, soit un `dmb ish` par trap et
-// par drapeau. Les deux etaient visibles dans le binaire livre
-// (0x8106e848 et 0x8106e8e4 : `ldr rN,[garde]` / `dmb ish` / `tst #1`), et les
-// gardes elles-memes sont dans la table des symboles
-// (« guard variable for ...::wva » et « ...::ttag ») — pour deux diagnostics
-// ETEINTS en production. Verifie au desassemblage le 2026-08-31, pas suppose.
-// PAS d'initialiseur de portee FICHIER : sur console il s'executerait AVANT que
-// d2vita_platform_init ne lise ux0:data/d2vita/env.txt, et le drapeau serait
-// alors TOUJOURS faux — exactement le piege deja documente pour g_netwatch_on
-// (rt_boot.cpp:1025-1032). D'ou la pose explicite dans commit(), qui suit la
-// lecture de l'environnement et precede le premier trap par construction.
-static uint32_t g_watch_va = 0;      // D2_WATCH=<adresse hexa>
+// Environment-derived diagnostic flags: read ONCE in commit(), never in
+// trap_handler. A function-static `static X v = getenv(...)` there would be
+// a non-trivial-init function static, which GCC guards with an
+// acquire-load check on every single trap — real cost for two flags that
+// stay off in production. Not a file-scope static either: on console that
+// would run before the environment file is read, so the flag would always
+// read false. Setting them explicitly in commit(), after the environment is
+// read and before the first trap can fire, avoids both problems.
+static uint32_t g_watch_va = 0;      // D2_WATCH=<hex address>
 static bool     g_traptag  = false;  // TRAPTAG=1
 
-// UNE SEULE variable __thread au lieu de trois. La semantique est identique
-// (meme portee par fil, meme initialisation a zero) ; ce qui change est le
-// nombre d'OBJETS emutls. Le GCC VitaSDK est --disable-tls : chaque variable
-// __thread distincte touchee dans une fonction coute son propre appel
-// __emutls_get_address, et c'est un appel INTER-MODULE
-// (pthread_getspecific -> pte_osTlsGetValue -> sceKernelGetTLSAddr). Avec un
-// seul objet, GCC mutualise la resolution entre les champs touches dans la
-// meme fonction — notamment t_b.yield_pending et t_b.redirect_eip, tous deux
-// sur le chemin d'UN trap (trap_handler lit le premier, et take_redirect(),
-// definie dans cette meme unite donc inlinable, consomme le second).
-// Mesure de reference : 9,39 chaines par prise de GIL (D2VPK_TLSWRAP=1,
-// appels=87 096 881 / prises=8 781 552 sur JEU_hist2).
+// A SINGLE __thread variable instead of three. Same semantics (per-thread
+// scope, zero-initialized); what changes is the number of emutls objects.
+// The VitaSDK's GCC is built --disable-tls: every distinct __thread
+// variable touched in a function costs its own __emutls_get_address call,
+// an INTER-MODULE call (pthread_getspecific -> pte_osTlsGetValue ->
+// sceKernelGetTLSAddr). With a single object, GCC shares that resolution
+// across every field touched in the same function — including
+// t_b.yield_pending and t_b.redirect_eip, both on the path of a single trap
+// (trap_handler reads the first, and take_redirect(), defined in this same
+// unit and therefore inlinable, consumes the second).
 struct BridgeTls { bool yield_pending; bool yielded; uint32_t redirect_eip; };
 static __thread BridgeTls t_b = { false, false, 0 };
 
@@ -103,44 +87,37 @@ Bridge::Bridge(Cpu* cpu) : cpu_(cpu) {
     // Compressed-layout overrides (D2LAYOUT=compact): repack module/stack/trap
     // bases LOW so the whole guest span fits in device RAM for the Vita
     // single-block arena. Defaults keep the validated sparse layout untouched.
-    // D2LAYOUT=haut : MEME pack, translate par layout_hi() (voir
-    // src/runtime/layout.h). Decalage 0 pour « compact » -> lignes identiques a
-    // l'octet pres.
+    // D2LAYOUT=haut: the SAME pack, translated via layout_hi() (see
+    // src/runtime/layout.h). Offset 0 for "compact" -> byte-identical lines.
     if (d2rt::layout_packed()) {
         const uint32_t HI = d2rt::layout_hi();
-        next_base_  = HI + 0x01900000;   // modules (relocatable) right after the 20 MiB heap (2026-08-25 squeeze: +14 MiB VA)
-        stack_base_ = HI + 0x10000000;   // main guest stack, just past the 220 MiB VA arena (08/09 : etait 0x10A00000 / 230 MiB)
-        trap_base_  = HI + 0x10E00000;   // native-thunk window, above the worker stacks/TIBs (08/09 : etait 0x11800000)
+        next_base_  = HI + 0x01900000;   // modules (relocatable) right after the 20 MiB heap
+        stack_base_ = HI + 0x10000000;   // main guest stack, just past the 220 MiB VA arena
+        trap_base_  = HI + 0x10E00000;   // native-thunk window, above the worker stacks/TIBs
         trap_next_  = trap_base_;
         trap_hi_    = HI + 0x10F00000;
-        // ⚠️ 08/09 : LA SENTINELLE DOIT SUIVRE LA REDUCTION DE VA.
-        // En ramenant VA de 230 a 220 MiB j'ai corrige stack_base_, trap_base_
-        // et trap_hi_ mais PAS celle-ci : elle est restee a 0x118FFFF0, soit
-        // 9 Mio AU-DELA de la fin de l'arene (0x10F00000). H(va)=va+membase ne
-        // faute jamais (bloc unique, sans garde), donc l'acces serait tombe
-        // silencieusement sur de la memoire hote qui ne nous appartient pas —
-        // exactement le mode de corruption que g_arena_span existe pour
-        // detecter. Le jeu n'a pas plante parce que la sentinelle sert surtout
-        // de valeur COMPAREE, mais redirect_next() y place l'EIP et le dynarec
-        // irait y chercher du code.
-        sentinel_   = HI + 0x10EFFFF0;   // derniere page DANS la fenetre de traps
+        // The sentinel must stay inside the trap window/VA arena, consistent
+        // with trap_base_/trap_hi_ above: H(va)=va+membase never faults
+        // (single block, no guard), so a sentinel outside the arena would
+        // silently corrupt host memory instead of crashing — the exact
+        // failure mode an arena-span check exists to catch. This matters
+        // doubly here because redirect_next() can place the EIP at this
+        // value and the dynarec would then fetch code from it.
+        sentinel_   = HI + 0x10EFFFF0;   // last page INSIDE the trap window
     }
-    // Surcharges NOMMEES : un hote qui porte deja son PROPRE plan memoire
-    // (typiquement une arene mono-bloc dimensionnee et placee pour SON jeu —
-    // les presets D2LAYOUT ci-dessus sont calibres sur le profil Diablo II et
-    // ne conviennent pas a toute image) le dit directement, variable par
-    // variable, plutot que de choisir parmi des presets qui ne correspondent
-    // a rien chez lui. Appliquees APRES les presets : un appelant peut partir
-    // de « compact »/« haut » et ne surcharger qu'un seul champ.
+    // Named overrides: a host that already has its OWN memory map (typically
+    // a single-block arena sized and placed for its own game — the D2LAYOUT
+    // presets above are calibrated for Diablo II and don't fit every image)
+    // states it directly, field by field, instead of picking from a preset
+    // that fits nothing on its side. Applied AFTER the presets, so a caller
+    // can start from "compact"/"haut" and override just one field.
     //
-    // Sans ceci, un hote qui pose son PROPRE D2ARENA (bloc unique, souvent
-    // quelques centaines de Mio) mais laisse next_base_/stack_base_/trap_base_
-    // a leurs defauts EPARS (jusqu'a 0x7F100000, penses pour un mmap par
-    // region hote, pas un bloc unique) fait deborder H(va)=va+membase en
-    // arithmetique 32 bits : l'ecriture retombe sur une adresse hote sans
-    // rapport avec l'arene, que l'hote refuse (observe sous Vita3K : un
-    // trap_base_ a 0x7F000000 additionne a un membase ~0x86000000 deborde
-    // exactement sur 0x05000000).
+    // Without this, a host that sets its own single-block D2ARENA (often a
+    // few hundred MiB) but leaves next_base_/stack_base_/trap_base_ at their
+    // scattered defaults (up to 0x7F100000, designed for a per-region host
+    // mmap, not one block) overflows H(va)=va+membase in 32-bit arithmetic:
+    // the write lands on a host address unrelated to the arena, which the
+    // host refuses.
     auto hx = [](const char* wx86Name, const char* legacyName, uint32_t& v) {
         const char* e = std::getenv(wx86Name);
         if (!e) e = std::getenv(legacyName);
@@ -152,9 +129,8 @@ Bridge::Bridge(Cpu* cpu) : cpu_(cpu) {
         const uint32_t oldTrapBase = trap_base_;
         hx("WX86_TRAPBASE", "D2_TRAPBASE", trap_base_);
         if (trap_base_ != oldTrapBase) {
-            // Meme etendue que les presets D2LAYOUT ci-dessus (1 Mio) : assez
-            // pour les creneaux de trap, jamais dimensionnee separement par
-            // aucun appelant connu.
+            // Same extent as the D2LAYOUT presets above (1 MiB): enough for
+            // the trap slots, never sized separately by any known caller.
             trap_hi_  = trap_base_ + 0x00100000u;
             sentinel_ = trap_hi_ - 0x10;
         }
@@ -309,8 +285,8 @@ uint32_t Bridge::alloc_trap(const Shim& s) {
     uint32_t va = trap_next_;
     trap_next_ += 16;
     slots_.push_back({s, va});
-    // Le nom stable vient de la CLÉ du map (voir TrapSlot::tagc) : insérée
-    // ici, elle ne sera ni déplacée ni effacée de tout le run.
+    // The stable name comes from the map's KEY (see TrapSlot::tagc): once
+    // inserted here, it is never relocated or erased for the rest of the run.
     auto ins = slot_by_tag_.emplace(s.tag, va);
     slots_.back().tagc = ins.first->first.c_str();
     return va;
@@ -318,9 +294,9 @@ uint32_t Bridge::alloc_trap(const Shim& s) {
 
 bool Bridge::commit(std::string& err) {
     if (committed_) return true;
-    // Drapeaux de diagnostic : lus ICI — une fois, apres env.txt, avant le
-    // premier trap (aucun trap ne peut partir avant que set_trap ait ouvert la
-    // fenetre, plus bas dans cette meme fonction).
+    // Diagnostic flags: read HERE — once, after env.txt, before the first
+    // trap (no trap can fire before set_trap opens the window, further below
+    // in this same function).
     { const char* w = getenv("WX86_WATCH"); if (!w) w = getenv("D2_WATCH");
       g_watch_va = w ? (uint32_t)strtoul(w, nullptr, 16) : 0u;
       g_traptag  = getenv("TRAPTAG") != nullptr; }
@@ -336,11 +312,11 @@ bool Bridge::commit(std::string& err) {
     // Trap window stays UNMAPPED — fetches into it vector to our handler.
     cpu_->set_trap(trap_base_, trap_hi_,
                    [this](Cpu& c, uint32_t va) { return trap_handler(c, va); });
-    // Compteur de prises par creneau (runtime/trapcnt.h) : la base est posee
-    // ICI, au meme endroit et au meme instant que la fenetre de trap, donc le
-    // chemin intrinseque (cpu_box86.cpp) et trap_handler indexent forcement
-    // avec le meme origine. Avant ce point, bump() est inerte (base == 0) —
-    // et aucun trap ne peut partir avant que set_trap ait ouvert la fenetre.
+    // Per-slot trap counter (runtime/trapcnt.h): the base is set HERE, at
+    // the same place and moment as the trap window, so the intrinsic path
+    // (cpu_box86.cpp) and trap_handler necessarily index from the same
+    // origin. Before this point, bump() is inert (base == 0) — and no trap
+    // can fire before set_trap opens the window.
     trapcnt::base = trap_base_;
     { const char* w = std::getenv("WX86_WAKEPROF"); if (!w) w = std::getenv("D2_WAKEPROF"); d2rt_wakeprof = (w && *w && *w != '0') ? 1 : 0;
       if (d2rt_wakeprof)
@@ -403,12 +379,10 @@ bool Bridge::link(std::string& err) {
             cpu_->write_u32(imp.iat_va, target);
         }
     }
-    // ⚡ 08/09 : la table doit atteindre le JOURNAL, pas stdout — sur console
-    // stdout n'arrive nulle part. C'est elle qui nomme le creneau que
-    // l'echantillonneur temporel accuse : « f500640 » vaut 30 a 55 % du TEMPS
-    // dans les fenetres lentes et est ABSENT dans les fenetres fluides.
-    // On publie le meme decalage que l'echantillonneur (VA - base invitee)
-    // pour que les deux se lisent l'un contre l'autre sans conversion.
+    // Published to the LOG, not stdout — on console stdout reaches nowhere.
+    // Uses the same offset convention as the external time sampler (VA -
+    // guest base) so the two can be read against each other without
+    // conversion.
     if (std::getenv("WX86_DUMPTRAPS") || std::getenv("D2_DUMPTRAPS")) {
         for (auto& sl : slots_) {
             char m[160];
@@ -422,8 +396,8 @@ bool Bridge::link(std::string& err) {
     return true;
 }
 
-// Fenetre : delta de temps par creneau depuis le dernier appel, top-k par us.
-// Ecrit des lignes separees par '\n' dans `out`. Rend le nombre de lignes.
+// Window: per-slot time delta since the last call, top-k by us. Writes
+// '\n'-separated lines into `out`. Returns the number of lines.
 int d2rt::Bridge::natprof_window(char* out, unsigned n, int topk) {
     if (!out || !n) return 0;
     const size_t cnt = slots_.size() < trapcnt::kMax ? slots_.size() : trapcnt::kMax;
@@ -436,7 +410,7 @@ int d2rt::Bridge::natprof_window(char* out, unsigned n, int topk) {
     std::sort(v.begin(), v.end(), [](auto& a, auto& b){ return a.first > b.first; });
     unsigned o = 0; int lines = 0;
     o += (unsigned)std::snprintf(out + o, n - o, "natif: total=%lluus creneaux=%lu\n",
-                                 (unsigned long long)tot, (unsigned long)v.size());   // pas de %zu : le printf de la Vita l'imprime « zu »
+                                 (unsigned long long)tot, (unsigned long)v.size());   // no %zu: the Vita's printf prints it literally as "zu"
     ++lines;
     for (int k = 0; k < topk && k < (int)v.size() && o + 8 < n; ++k) {
         const size_t i = v[k].second;
@@ -455,7 +429,7 @@ extern "C" int d2rt_natprof_lines(char* out, unsigned n, int topk) {
 
 bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
 #ifdef D2_TLSCOUNT
-    ++d2_tls_traps;   // denominateur du comptage emutls (build de mesure)
+    ++d2_tls_traps;   // denominator for the emutls count (measurement build)
 #endif
     // The final-return sentinel: the guest function we invoked has returned.
     if (trap_va == sentinel_) return false;   // stop run
@@ -468,23 +442,23 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
     uint32_t idx = (trap_va - trap_base_) / 16;
     if (idx >= slots_.size() || slots_[idx].va != trap_va) return false;   // unknown trap → stop
     TrapSlot* slot = &slots_[idx];
-    // Compteur de prises (runtime/trapcnt.h) : l'index vient d'etre calcule,
-    // on est sous le GIL de la repartition de trap. Une addition, rien de plus.
-    // Les creneaux servis en INTRINSEQUE n'arrivent jamais ici — ils sont
-    // comptes dans le meme tableau par CpuBox86::try_intrinsic, donc sans
-    // double compte (try_intrinsic rendant vrai, trap_fn_ n'est pas appele).
+    // Trap counter (runtime/trapcnt.h): the index was just computed, under
+    // the trap-dispatch GIL. Just an increment. Slots served as an
+    // INTRINSIC never reach here — they're counted in the same array by
+    // CpuBox86::try_intrinsic, so there's no double count (when
+    // try_intrinsic returns true, trap_fn_ is never called).
     if (idx < trapcnt::kMax) ++trapcnt::hits[idx];
 
 #ifdef D2_TLSCOUNT
-    // Borne du recensement B3 : ouverte AVANT la premiere resolution de la
-    // traversee et fermee APRES la derniere.
+    // Crossing boundary: opened BEFORE the first resolution and closed
+    // AFTER the last.
     const unsigned long long e0 = d2_e_calls;
 #endif
     // At trap entry, ESP points at the return address (call just executed).
     uint32_t retaddr = cpu.trap_retaddr();
     // D2_WATCH=<hexaddr>: integrity-check 24 bytes at addr on every trap, to
     // bracket a guest-memory trample between two traps (diagnostic only).
-    { const uint32_t wva = g_watch_va;   // simple chargement : plus de garde, plus de dmb
+    { const uint32_t wva = g_watch_va;   // plain load: no guard, no dmb
       if (wva) { static uint8_t ref[24]; static bool winit = false; uint8_t cur[24];
           cpu.read(wva, cur, 24);
           if (!winit) { std::memcpy(ref, cur, 24); winit = true; }
@@ -498,10 +472,10 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
 #ifdef PROF_COUNTERS
     uint64_t t0 = prof::now_ns();
 #endif
-    // Observabilité GIL (§19) : nommer le corps de shim en cours. On est ICI
-    // sous le GIL (gil::Guard de la répartition de trap), donc l'écriture est
-    // celle du détenteur. Inerte sous coop (test d'un booléen). Le nom est le
-    // pointeur STABLE du slot, jamais shim.tag.c_str().
+    // GIL observability (§19): name the shim body currently running. This
+    // runs under the GIL (trap-dispatch gil::Guard), so the write is the
+    // holder's own. Inert under coop (a single bool check). The name is the
+    // slot's STABLE pointer, never shim.tag.c_str().
     gil::note_shim_enter(trap_va, slot->tagc);
     uint32_t eax;
     if (d2rt_natprof) {
@@ -515,7 +489,7 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
     slot = &slots_[idx];   // re-derive: shim.fn may have alloc_trap'd (GetProcAddress /
                            // LoadLibrary DISK) and grown slots_ — the old pointer would dangle
     // TRAPTAG=1: log shim tags (debug; env checked once — hot path stays clean)
-    { static uint64_t tn = 0;   // initialisation CONSTANTE : zero garde, zero dmb
+    { static uint64_t tn = 0;   // CONSTANT initialization: zero guard, zero dmb
       if (g_traptag && ++tn <= 4000)
         std::fprintf(stderr,"[tag %llu] %s -> eax=0x%08x\n",
             (unsigned long long)tn, slot->shim.tag.c_str(), eax); }
@@ -528,14 +502,14 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
     uint32_t esp_add = 4;                              // pop return address
     if (slot->shim.stdcall_cleanup) esp_add += 4 * slot->shim.argc;
     // Guest-callback redirect: run a stub instead of returning to the call site.
-    // take_redirect() a un EFFET DE BORD (il consomme la redirection) et etait
-    // deja appele inconditionnellement : le hisser ici ne change pas le nombre
-    // d'appels, seulement l'endroit ou l'EIP final est arbitre.
+    // take_redirect() has a SIDE EFFECT (it consumes the redirect) and was
+    // already called unconditionally: hoisting it here doesn't change the
+    // call count, only where the final EIP gets decided.
     const uint32_t rd = take_redirect();
     cpu.trap_epilogue(eax, esp_add, rd ? rd : retaddr);
 #ifdef D2_TLSCOUNT
-    // Fermeture de la borne. On RE-DERIVE le slot : shim.fn a pu faire croitre
-    // slots_ (meme raison que la re-derivation ci-dessus).
+    // Close the boundary. RE-DERIVE the slot: shim.fn may have grown slots_
+    // (same reason as the re-derivation above).
     { TrapSlot* sc = &slots_[idx];
       sc->tls_calls += (unsigned long long)(d2_e_calls - e0); ++sc->tls_traps; }
 #endif
@@ -596,25 +570,19 @@ void Bridge::dump_trap_counts(int topn) const {
     const size_t n = slots_.size() < trapcnt::kMax ? slots_.size() : trapcnt::kMax;
     uint64_t total = 0;
     for (size_t i = 0; i < n; ++i) total += trapcnt::hits[i];
-    // Tri par simple selection sur les `topn` premiers : n vaut quelques
-    // centaines et on ne passe ici qu'a l'extinction — inutile d'allouer.
+    // Sorted plainly rather than optimized for it: n is only a few hundred
+    // at most, and this only runs at shutdown.
     std::vector<size_t> ord;
     ord.reserve(n);
     for (size_t i = 0; i < n; ++i) if (trapcnt::hits[i]) ord.push_back(i);
     std::sort(ord.begin(), ord.end(),
               [](size_t a, size_t b) { return trapcnt::hits[a] > trapcnt::hits[b]; });
     char m[160];
-    // ⚡ 13/09 : plantage a CHAQUE sortie de partie, trouve par bisection
-    // (boot_progress.txt s'arretait net juste apres "dump_trap_counts:
-    // entree"). Cause : %zu n'est PAS substitue par ce snprintf embarque (il
-    // laisse passer les caracteres "zu" tels quels sans consommer d'argument
-    // — verifie ici meme via une balise de diagnostic qui affichait
-    // litteralement "slots_.size()=zu"), ce qui decale de un cran l'argument
-    // suivant. Ici l'argument decale est le %s final : il lisait alors
-    // `ord.size()` (un petit entier) comme un POINTEUR de chaine — dereferencement
-    // sauvage garanti, deterministe a chaque appel puisque dump_trap_counts
-    // n'est appelee qu'a la fermeture. Fix : %u + cast, comme partout ailleurs
-    // dans ce fichier ou %zu n'est jamais suivi d'un %s.
+    // This embedded snprintf does NOT substitute %zu: it passes the literal
+    // characters "zu" through without consuming an argument, silently
+    // shifting every subsequent format argument by one — a %s downstream
+    // would then read an unrelated integer as a string pointer. Use %u plus
+    // a cast instead, as everywhere else in this file.
     std::snprintf(m, sizeof m, "trapcnt: %llu prises sur %u creneaux actifs%s",
                   (unsigned long long)total, (unsigned)ord.size(),
                   slots_.size() > trapcnt::kMax ? " (TRONQUE: slots_ > trapcnt::kMax)" : "");
@@ -641,8 +609,8 @@ void Bridge::dump_tls_counts(int topn) const {
     }
     char m[192];
     if (!traps) {
-        // Silence ACTIF : sans -DD2_TLSCOUNT les champs restent nuls, et une
-        // liste de zeros se lirait « aucune resolution », le sens faux.
+        // Active silence: without -DD2_TLSCOUNT the fields stay zero, and a
+        // list of zeros would misleadingly read as "no resolutions".
         std::snprintf(m, sizeof m,
             "tlscnt: RIEN A DIRE (build sans -DD2_TLSCOUNT, ou aucune traversee)");
         std::printf("  %s\n", m);
@@ -652,8 +620,8 @@ void Bridge::dump_tls_counts(int topn) const {
     }
     std::sort(ord.begin(), ord.end(),
               [this](size_t a, size_t b) { return slots_[a].tls_calls > slots_[b].tls_calls; });
-    // Moyenne en centiemes, en ENTIER : un %f dans un journal console est un
-    // risque inutile (meme regle que jp_fr dans rt_boot).
+    // Average in hundredths, as an INTEGER: %f in a console log is an
+    // unnecessary risk.
     const unsigned long long avg = (unsigned long long)((total * 100ull) / traps);
     std::snprintf(m, sizeof m,
                   "tlscnt: %llu appels E() sur %llu traversees => %llu.%02llu par traversee",

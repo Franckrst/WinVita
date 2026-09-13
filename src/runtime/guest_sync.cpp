@@ -1,6 +1,4 @@
-// src/runtime/guest_sync.cpp — voir guest_sync.h.
-// Porte depuis tools/rt_boot.cpp de d2vita (2026-09-11). carn-vita, l'autre
-// consommateur, portait les memes structures avec des corps identiques.
+// src/runtime/guest_sync.cpp — see guest_sync.h.
 #include "guest_sync.h"
 #include "runtime/cpu.h"
 #include <cstring>
@@ -11,7 +9,7 @@ bool wx86_is_kind(Waitable* w, const char* k){
     return w && std::strcmp(w->kind(), k)==0;
 }
 
-// ---- Table de handles -------------------------------------------------------
+// ---- Handle table ------------------------------------------------------------
 static std::map<uint32_t,Waitable*> g_handles;
 static uint32_t g_nextObj = 0x82000000;
 
@@ -28,7 +26,7 @@ void wx86_handle_erase(uint32_t h){ g_handles.erase(h); }
 unsigned wx86_handle_count(){ return (unsigned)g_handles.size(); }
 uint32_t wx86_handle_next_id(){ return g_nextObj++; }
 
-// ---- Sections critiques -----------------------------------------------------
+// ---- Critical sections --------------------------------------------------------
 static std::map<uint32_t,WxCrit*> g_crits;
 static uint32_t g_csLastVa = 0;
 static WxCrit*  g_csLastK  = nullptr;
@@ -68,10 +66,10 @@ void wx86_crit_each_held(void (*fn)(uint32_t,uint32_t,int,void*), void* ud){
 
 void wx86_crit_forget(uint32_t cs){
     g_crits.erase(cs);
-    if(g_csLastVa==cs){ g_csLastVa = 0; g_csLastK = nullptr; }   // MRU invalide
+    if(g_csLastVa==cs){ g_csLastVa = 0; g_csLastK = nullptr; }   // invalidate MRU cache
 }
 
-// ---- Observateur ------------------------------------------------------------
+// ---- Observer ------------------------------------------------------------
 static WxSyncObserverFn g_obs = nullptr;
 void wx86_sync_set_observer(WxSyncObserverFn cb){ g_obs = cb; }
 void wx86_sync_notify(const WxSyncEvent& e){ if(g_obs) g_obs(e); }

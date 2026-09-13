@@ -1,10 +1,7 @@
-// src/runtime/net_nonblock.h — generic socket-nonblocking + hostname
-// resolution helpers, moved out of d2vita's src/platform/vita_net.cpp
-// (2026-09-11, WSOCK32 genericity pass). vita_net.cpp itself stays
-// d2vita-hosted (its self-test bakes in Battle.net/BNCS specifics), but
-// these two functions never touched D2 data — they set O_NONBLOCK on an
-// arbitrary fd and resolve an arbitrary hostname to an IPv4 address, for
-// any guest. vita_net.cpp now calls these instead of defining them.
+// src/runtime/net_nonblock.h — generic socket-nonblocking and hostname
+// resolution helpers: set O_NONBLOCK on an arbitrary fd and resolve an
+// arbitrary hostname to an IPv4 address, with no protocol- or
+// application-specific assumptions.
 #pragma once
 #include <cstdint>
 
@@ -34,11 +31,11 @@ uint32_t wx86_net_resolve(const char* host);
 // create" from "created fine, no answer" when a name lookup fails.
 int wx86_net_last_resolve_rc();
 
-// Nombre de resolutions de NOM refusees par le verrou de sortie
-// (wx86_net_set_private_only) depuis le demarrage. Un litteral pointe ne
-// consulte personne et n'est donc jamais compte ici. Temoin positif : sans
-// lui, « aucune requete n'est sortie » et « le code n'a jamais ete atteint »
-// rendent le meme silence.
+// Count of name resolutions refused by the exit lock
+// (wx86_net_set_private_only) since startup. A dotted-quad literal never
+// consults the guard, so it's never counted here. Needed as a positive
+// signal: without it, "no request went out" and "this code path was never
+// reached" look identical.
 unsigned long long wx86_net_resolves_refused();
 
 } // namespace d2rt

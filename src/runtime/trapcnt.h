@@ -1,42 +1,40 @@
-// src/runtime/trapcnt.h — compteur de PRISES par créneau de trap.
+// src/runtime/trapcnt.h — HIT counter per trap slot.
 //
-// POURQUOI CE FICHIER. Bridge::dump_prof() donne un TEMPS par créneau, mais
-// jamais un COMPTE, et il est compilé DEHORS du binaire livré (PROF_COUNTERS).
-// Surtout, il rate totalement les intrinsèques : le chemin rapide
-// (cpu_box86.cpp try_intrinsic) rend la main AVANT d'entrer dans le Bridge, si
-// bien qu'un créneau servi en intrinsèque n'apparaît nulle part. Un
-// recensement bâti sur dump_prof sous-compte donc les créneaux les plus
-// chauds — exactement ceux qu'on veut chiffrer.
+// Why this file exists: Bridge::dump_prof() gives a TIME per slot but never
+// a COUNT, and it's compiled OUT of the shipped binary (PROF_COUNTERS). It
+// also completely misses intrinsics: the fast path (cpu_box86.cpp
+// try_intrinsic) returns BEFORE entering the Bridge, so a slot served as an
+// intrinsic never shows up there. Any count built on dump_prof therefore
+// undercounts the hottest slots — exactly the ones worth pricing.
 //
-// Ce compteur-ci est TOUJOURS armé (il est le dénominateur de tout prix
-// unitaire à venir), et il coûte : un chargement, deux comparaisons, une
-// addition 64 bits. Il est incrémenté sur des chemins DÉJÀ sous le GIL
-// (gil::Guard de la répartition de trap dans CpuBox86::run, et le corps de
-// Bridge::trap_handler qui court sous ce même Guard), donc aucune atomique et
-// aucun verrou supplémentaire.
+// This counter is ALWAYS armed (it's the denominator for any future
+// per-unit cost) and stays cheap: one load, two comparisons, one 64-bit add.
+// It's incremented on paths ALREADY under the GIL (the trap-dispatch
+// gil::Guard in CpuBox86::run, and Bridge::trap_handler's body, which runs
+// under that same Guard), so no extra atomic or lock.
 //
-// L'index est EXACTEMENT celui de trap_handler : (va - trap_base)/16, la même
-// division que celle qui trouve le slot. Aucun deuxième schéma d'adressage à
-// tenir cohérent.
+// The index is EXACTLY trap_handler's: (va - trap_base)/16, the same
+// division that finds the slot. No second addressing scheme to keep in
+// sync.
 #pragma once
 #include <cstdint>
 
 namespace d2rt {
 namespace trapcnt {
 
-// Bridge::alloc_trap espace les créneaux de 16 octets et slots_ en réserve
-// 2048 ; 4096 entrées (32 Ko de BSS) couvrent donc le double de la réserve.
-// Au-delà, bump() ignore silencieusement : un compteur tronqué vaut mieux
-// qu'une écriture hors tableau, et dump_trap_counts() le dit.
+// Bridge::alloc_trap spaces slots 16 bytes apart and reserves 2048 of them;
+// 4096 entries (32 KiB of BSS) cover twice that reservation. Past that,
+// bump() silently ignores: a truncated counter beats an out-of-bounds
+// write, and dump_trap_counts() says so.
 inline constexpr uint32_t kMax = 4096;
 
-inline uint32_t base = 0;          // = Bridge::trap_base_, posé par commit()
-inline uint64_t hits[kMax] = {};   // prises cumulées par créneau
+inline uint32_t base = 0;          // = Bridge::trap_base_, set by commit()
+inline uint64_t hits[kMax] = {};   // cumulative hits per slot
 
 inline void bump(uint32_t va) {
     const uint32_t b = base;
     if (!b || va < b) return;
-    const uint32_t i = (va - b) >> 4;   // /16 : le pas d'alloc_trap
+    const uint32_t i = (va - b) >> 4;   // /16: alloc_trap's stride
     if (i < kMax) ++hits[i];
 }
 

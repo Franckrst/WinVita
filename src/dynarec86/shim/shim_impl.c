@@ -91,13 +91,13 @@ void x86test_check(x86emu_t* ref, uintptr_t ip) { (void)ref; (void)ip; }
 int isRetX87Wrapper(wrapper_t fun) { (void)fun; return 0; }
 
 /* ---- cpuid: minimal 486-class answers ---- */
-/* Bits de fonctionnalites de la FEUILLE 1, definis UNE fois. IsProcessorFeature-
-   Present (win32_shims_kernel32.cpp) en DERIVE ses reponses au lieu de les
-   choisir : deux vues du meme processeur qui se contredisent — cpuid qui annonce
-   SSE2 et une API qui repond « non » — sont la contradiction la moins chere a
-   lever, et la plus facile a lire pour qui cherche un emulateur. */
+/* Leaf-1 feature bits, defined ONCE. IsProcessorFeaturePresent
+   (win32_shims_kernel32.cpp) derives its answers from these instead of
+   choosing its own -- two views of the same CPU that disagree (cpuid
+   reporting SSE2, the API saying no) are exactly the kind of inconsistency
+   that gives an emulator away. */
 #define WX86_CPUID1_EDX ((1<<0)|(1<<15)|(1<<23)|(1<<24)|(1<<25)|(1<<26)) /* FPU CMOV MMX FXSR SSE SSE2 */
-#define WX86_CPUID1_ECX (0)                                             /* pas de SSE3+ */
+#define WX86_CPUID1_ECX (0)                                             /* no SSE3+ */
 void wx86_cpuid_features(uint32_t* edx, uint32_t* ecx)
 {
     if(edx) *edx = WX86_CPUID1_EDX;

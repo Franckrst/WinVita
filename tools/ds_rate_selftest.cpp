@@ -1,33 +1,26 @@
-// tools/ds_rate_selftest.cpp — la frequence du melangeur vient de L'APPELANT.
+// The mixer's sample rate must come from the caller. A hardcoded rate would
+// have any game sampled at a different rate play at the wrong pitch, with no
+// error.
 //
-// CE QU'IL PROUVE. Le socle DirectSound du moteur melangeait a 22050 Hz, une
-// constante ecrite dans ds_emul.cpp : le chiffre du premier consommateur, dont
-// tous les echantillons sont a cette frequence. Un jeu echantillonne ailleurs
-// aurait joue a la mauvaise hauteur, EN SILENCE. (Le meme defaut avait deja ete
-// corrige un etage plus bas, au puits console, qui recevait la frequence et
-// l'ignorait ; le melangeur, lui, etait encore intact.)
+// Method: builds two WAV files through the sink's path (dsound::selftest) at
+// two different rates and reads back the rate actually written in each RIFF
+// header. If a hardcoded rate were used instead, both headers would match.
 //
-// Le filet fabrique deux WAV par le chemin du puits (dsound::selftest) a deux
-// frequences differentes et lit la frequence REELLEMENT ecrite dans l'en-tete
-// RIFF de chacun. Si la constante etait encore la, les deux en-tetes seraient
-// identiques.
-//
-// CONTROLE NEGATIF inclus : le test verifie que les deux valeurs DIFFERENT.
-// Un filet qui se contenterait de lire « 22050 attendu, 22050 trouve » aurait
-// signe l'ancien code aussi bien que le nouveau.
+// Negative control: the test verifies the two rates differ. A test that
+// just checked "22050 expected, 22050 found" would pass against a hardcoded
+// rate just as easily as against the real one.
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include "runtime/ds_emul.h"
 #include "runtime/bridge.h"
 
-// CE QUE CE FILET NE TESTE PAS, dit franchement. dsound::selftest() n'ouvre
-// qu'un puits WAV : il ne pose aucune vtable COM, donc dsound::install() n'est
-// jamais appele. Les trois methodes de Bridge que ds_emul.cpp reference depuis
-// install() n'ont pourtant pas de corps ici (bridge.cpp traine le dynarec, qui
-// ne se compile pas sur bureau) : on les definit VIDES, uniquement pour
-// l'edition de liens. Si l'une d'elles etait appelee, le test s'arreterait —
-// c'est ce que dit l'abort.
+// What this test does not cover: dsound::selftest() only opens a WAV sink
+// and never installs a COM vtable, so dsound::install() is never called.
+// The three Bridge methods ds_emul.cpp references from install() have no
+// real body here (bridge.cpp drags in the dynarec, which doesn't compile on
+// desktop) — they're defined empty purely to satisfy the linker. If one were
+// ever called, the abort below would end the test.
 namespace d2rt {
 static void jamais(const char* quoi) {
     std::printf("  ECHEC: %s appele — ce filet ne couvre pas ce chemin\n", quoi);
@@ -57,7 +50,7 @@ static void ok(bool c, const char* quoi) {
 int main() {
     const char* a = "/tmp/wx86_ds_rate_a.wav";
     const char* b = "/tmp/wx86_ds_rate_b.wav";
-    // 60 ms suffisent : on verifie l'EN-TETE, pas le contenu.
+    // 60ms is enough: this checks the header, not the content.
     const int rc_a = d2rt::dsound::selftest(a, 60, 11025);
     const int rc_b = d2rt::dsound::selftest(b, 60, 44100);
     ok(rc_a == 0, "selftest a 11025 Hz rend 0");
@@ -67,7 +60,7 @@ int main() {
     ok(fa == 11025, "le WAV demande a 11025 Hz est ECRIT a 11025 Hz");
     ok(fb == 44100, "le WAV demande a 44100 Hz est ECRIT a 44100 Hz");
     ok(fa != fb,    "CONTROLE NEGATIF : deux demandes differentes donnent deux en-tetes differents");
-    // Frequence absente = refus explicite, jamais une valeur devinee.
+    // Missing rate = explicit refusal, never a guessed value.
     ok(d2rt::dsound::selftest("/tmp/wx86_ds_rate_c.wav", 60, 0) != 0,
        "frequence non fournie : le test REFUSE au lieu de deviner");
     std::printf("ds_rate: %d verifications, %d echec(s)\n", verifs, erreurs);

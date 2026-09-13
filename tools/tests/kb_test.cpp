@@ -1,20 +1,18 @@
-// tools/tests/kb_test.cpp — ORACLE D'HOTE DU CLAVIER VIRTUEL.
+// Host oracle for the virtual keyboard.
 //
-// src/platform/vita_kb.h ne touche ni au VitaSDK ni a un appel systeme : tout
-// ce qui suit se compile et tourne sur la machine de developpement, donc se
-// PROUVE sans console. Ce qui reste a la console ne se prouve qu'a l'oeil : le
-// clavier apparait-il bien PAR-DESSUS l'image, dans les deux chemins de
-// presentation.
+// src/platform/vita_kb.h touches neither the VitaSDK nor a syscall, so
+// everything below compiles and runs on the development machine and is
+// provable without a console. What's left to console can only be checked by
+// eye: does the keyboard actually render OVER the image, on both
+// presentation paths.
 //
-// POURQUOI CE FICHIER EST ICI ET PLUS SEULEMENT CHEZ UN PORTAGE
-// ------------------------------------------------------------
-// Le clavier est parti au moteur ; SON ORACLE EST RESTE chez le premier
-// consommateur. C'est exactement le defaut que guest_sync.h avait deja montre
-// une fois : l'objet demenage, la preuve reste derriere, et un SECOND
-// consommateur herite d'un module sans filet — alors que le filet existe,
-// tourne, et ne depend de rien d'autre que de l'en-tete deplace.
+// Why this test lives here and not only in a port: the keyboard moved to
+// the engine, but its oracle needs to move with it — otherwise another
+// consumer inherits an untested module while believing it's covered (the
+// same failure guest_sync.h already showed: the code moves, the proof stays
+// behind). The test itself depends on nothing but the relocated header.
 //
-// Rejoue par tools/selftest.sh.
+// Replayed by tools/selftest.sh.
 #include "platform/vita_kb.h"
 #include <cstdio>
 #include <cstring>
@@ -55,7 +53,7 @@ static void t_dessin_borne_au_panneau() {
     CHECK(hors == 0, "%d pixels ecrits AU-DESSUS du panneau", hors);
 }
 
-// Couverture : les 95 caracteres ASCII imprimables sont atteignables.
+// Coverage: all 95 printable ASCII characters are reachable.
 static void t_couverture_ascii() {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
     const d2kb::Layout& L = d2kb::LAY_FULL;
@@ -69,7 +67,7 @@ static void t_couverture_ascii() {
                 if (f >= 33 && f <= 126) { if (vu[(int)f]) ++dup; vu[(int)f] = true; }
             }
     CHECK(dup == 0, "%d caracteres en double dans la disposition", dup);
-    // l'espace a sa propre touche
+    // space has its own key
     int ispace = -1;
     for (int i = 0; i < L.nfn; ++i) if (L.fnact[i] == d2kb::ACT_SPACE) ispace = i;
     CHECK(ispace >= 0, "aucune touche ESPACE");
@@ -78,7 +76,7 @@ static void t_couverture_ascii() {
     for (int ch = 32; ch <= 126; ++ch)
         if (!vu[ch]) { ++manquants; std::printf("  manquant: 0x%02x '%c'\n", ch, ch); }
     CHECK(manquants == 0, "%d caracteres imprimables inatteignables", manquants);
-    // et chacun a un glyphe NON VIDE dans la police (sinon touche muette)
+    // and each has a NON-EMPTY glyph in the font (otherwise a mute key)
     int vides = 0;
     for (int ch = 33; ch <= 126; ++ch) {
         const unsigned char* g = d2kb::glyph((char)ch);
@@ -89,7 +87,7 @@ static void t_couverture_ascii() {
     CHECK(vides == 0, "%d glyphes vides", vides);
 }
 
-// L'emission : chaque cellule rend bien l'action et le caractere attendus.
+// Emission: each cell yields the expected action and character.
 static void t_activation() {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
     const d2kb::Layout& L = d2kb::LAY_FULL;
@@ -102,7 +100,7 @@ static void t_activation() {
             a = d2kb::activate(s, r, c, &out);
             CHECK(a == d2kb::ACT_CHAR && out == d2kb::face(L, r, c, 1), "(%d,%d) majuscule", r, c);
         }
-    // hors table : jamais d'action, jamais d'ecriture
+    // out of table: never an action, never a write
     char out = 1;
     CHECK(d2kb::activate(s, -1, 0, &out) == d2kb::ACT_NONE && out == 0, "activate(-1,0)");
     CHECK(d2kb::activate(s, 9, 0, &out) == d2kb::ACT_NONE, "activate(9,0)");
@@ -128,7 +126,7 @@ static void t_navigation() {
         d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, simple);
         const d2kb::Layout& L = d2kb::layout(s);
         const int nr = d2kb::nrows_total(L);
-        // exhaustif : depuis chaque cellule, les 4 directions restent valides
+        // exhaustive: from every cell, all 4 directions stay valid
         for (int r = 0; r < nr; ++r)
             for (int c = 0; c < d2kb::cols(L, r); ++c) {
                 const int d[4][2] = { {-1,0},{1,0},{0,-1},{0,1} };
@@ -140,17 +138,17 @@ static void t_navigation() {
                           "nav: colonne %d hors [0,%d[ (rangee %d)", s.c, d2kb::cols(L, s.r), s.r);
                 }
             }
-        // bouclage horizontal
+        // horizontal wraparound
         s.r = 1; s.c = 0; d2kb::nav(s, 0, -1);
         CHECK(s.c == d2kb::cols(L, 1) - 1, "pas de bouclage a gauche");
         d2kb::nav(s, 0, 1); CHECK(s.c == 0, "pas de bouclage a droite");
-        // bouclage vertical
+        // vertical wraparound
         s.r = 0; s.c = 0; d2kb::nav(s, -1, 0); CHECK(s.r == nr - 1, "pas de bouclage en haut");
         d2kb::nav(s, 1, 0); CHECK(s.r == 0, "pas de bouclage en bas");
     }
 }
 
-// Les touches dessinees et les touches touchables sont LES MEMES cellules.
+// The keys drawn and the keys touchable are the SAME cells.
 static void t_tactile() {
     for (int simple = 0; simple <= 1; ++simple) {
         d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, simple);
@@ -164,13 +162,13 @@ static void t_tactile() {
                 CHECK(d2kb::hit(L, W, H, x + w / 2, y + h / 2, &rr, &cc) && rr == r && cc == c,
                       "centre de (%d,%d) touche (%d,%d)", r, c, rr, cc);
             }
-        // au-dessus du panneau : aucune touche
+        // above the panel: no key
         int rr, cc;
         CHECK(!d2kb::hit(L, W, H, W / 2, d2kb::panel_y0(L, H) - 4, &rr, &cc), "touche au-dessus du panneau");
     }
 }
 
-// MASQUE : le rendu ne doit dependre QUE de la longueur, jamais des lettres.
+// MASKED: rendering must depend only on length, never on the letters.
 static void t_masque() {
     auto rendu = [](const char* txt, int mask) {
         d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
@@ -186,7 +184,7 @@ static void t_masque() {
     CHECK(!(a == c), "mode masque : identique au mode clair");
     auto d = rendu("motdepassX", 1);
     CHECK(a == d, "mode masque : la derniere lettre transparait");
-    // longueur differente => image differente (le nombre de points se voit)
+    // different length => different image (the dot count is visible)
     auto e = rendu("motdepass", 1);
     CHECK(!(a == e), "mode masque : la longueur ne se voit pas");
 }
@@ -198,11 +196,11 @@ static void t_echo_bornes() {
     CHECK(s.echo[d2kb::ECHO_MAX] == 0, "echo non termine par 0");
     for (int i = 0; i < 500; ++i) d2kb::echo_pop(s);
     CHECK(s.echo_n == 0, "echo_n=%d apres vidage", (int)s.echo_n);
-    // etat corrompu (course d'affichage) : aucune ecriture hors du tampon
+    // corrupted state (display race): no write outside the buffer
     for (int i = 0; i < 60; ++i) d2kb::echo_push(s, 'x');
     s.echo_n = 12345; d2kb::echo_push(s, 'y'); CHECK(s.echo_n >= 0 && s.echo_n <= d2kb::ECHO_MAX, "echo_n non borne apres corruption");
     s.echo_n = -7;    d2kb::echo_pop(s);       CHECK(s.echo_n == 0, "echo_n negatif non ramene a 0");
-    // fermeture = effacement complet (le mot de passe ne reste pas en memoire)
+    // closing = full erase (the password doesn't stay in memory)
     for (int i = 0; i < 20; ++i) d2kb::echo_push(s, 's');
     d2kb::close_kb(s);
     char zero[sizeof s.echo]; std::memset(zero, 0, sizeof zero);
@@ -210,15 +208,16 @@ static void t_echo_bornes() {
     CHECK(s.mask == 0 && s.shift == 0, "modificateurs non remis a zero");
 }
 
-// Le dessin ne doit jamais lire hors du tampon quel que soit l'etat, meme
-// incoherent (le fil de presentation lit un etat ecrit par le fil de jeu).
+// Drawing must never read outside the buffer regardless of state, even an
+// inconsistent one (the presentation thread reads state written by the game
+// thread).
 static void t_etat_incoherent() {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
     auto fb = fb_new();
     const int rs[] = { -5, 0, 3, 4, 99 }, cs[] = { -3, 0, 11, 50 };
     for (int i = 0; i < 5; ++i) for (int j = 0; j < 4; ++j) {
         s.r = rs[i]; s.c = cs[j]; s.echo_n = (i * 7 + j) * 13 - 20; s.shift = i % 3; s.mask = j % 2;
-        d2kb::draw(s, fb.data(), W, H);       // ne doit ni planter ni deborder (ASAN)
+        d2kb::draw(s, fb.data(), W, H);       // must neither crash nor overflow (ASAN)
     }
     ++g_checks;
 }
@@ -227,12 +226,12 @@ static void t_disposition_simple() {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 1);
     CHECK(std::strcmp(d2kb::layout(s).name, "simple") == 0, "la disposition SIMPLE demandee n'est pas rendue");
     const d2kb::Layout& L = d2kb::layout(s);
-    // la disposition historique : 4x10 + 4 touches larges, majuscules seules
+    // the legacy layout: 4x10 + 4 wide keys, uppercase only
     CHECK(d2kb::cols(L, 0) == 10 && d2kb::cols(L, 4) == 4, "geometrie historique changee");
     char out = 0; d2kb::activate(s, 1, 0, &out); CHECK(out == 'A', "simple: (1,0) != A");
 }
 
-// --ppm <fichier> : rend une image du clavier (apercu visuel, pas un test).
+// --ppm <file>: renders an image of the keyboard (visual preview, not a test).
 static int dump_ppm(const char* path, int simple, int mask) {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, simple);
     s.mask = mask; s.shift = 1; s.r = 2; s.c = 3;
