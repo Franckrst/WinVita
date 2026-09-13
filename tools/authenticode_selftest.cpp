@@ -142,6 +142,16 @@ int main() {
             std::printf("  [AC_REFS] %s : 0x%08x (%s) horodate=%d\n", f, (unsigned)hr, r.detail.c_str(), (int)r.timestamped);
             for (auto& s : r.chain) std::printf("      signataire : %s\n", s.c_str());
             for (auto& s : r.ts_chain) std::printf("      horodateur : %s\n", s.c_str());
+            // MESURE WINDOWS du 2026-09-13 : Get-AuthenticodeSignature = Valid pour les
+            // deux fichiers. Game.exe en est la preuve qui coupe : son horodateur
+            // remonte a Thawte Timestamping CA, desactivee par Microsoft en 2023.
+            check_hr(hr, AC_OK, (std::string(f) + " : Valid comme sous Windows").c_str());
+            if (std::string(f) == "Game.exe") {
+                VerifyOptions l; l.lifetime_signing = true; VerifyReport lr;   // chaines jugees a la date courante
+                check(verify_pe(b, l, lr) != AC_OK, "Game.exe juge a la date courante -> refuse (racine desactivee, certificats expires)");
+                std::vector<uint8_t> t = b; t[0x1000] ^= 1;
+                check_hr(verify_pe(t, o, lr), TRUST_E_BAD_DIGEST, "Game.exe 1 bit modifie -> TRUST_E_BAD_DIGEST");
+            }
         }
     }
 

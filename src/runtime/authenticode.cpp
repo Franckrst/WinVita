@@ -679,15 +679,20 @@ bool pe_image_digest(const std::vector<uint8_t>& f, HashAlg alg, std::vector<uin
 // =============================================================================
 namespace {
 std::mutex g_rootsMu;
+std::vector<roots::RootProps>& root_props_locked();   // parallele a roots_locked(), meme indice
 std::vector<Certificate>& roots_locked() {
     static std::vector<Certificate> r;
     static bool init = false;
     if (!init) {
         init = true;
-        for (const auto& e : roots::kEmbedded) { Certificate c; if (c.parse(e.der, e.len)) r.push_back(std::move(c)); }
+        for (const auto& e : roots::kEmbedded) {
+            Certificate c;
+            if (c.parse(e.der, e.len)) { r.push_back(std::move(c)); root_props_locked().push_back(e.props); }
+        }
     }
     return r;
 }
+std::vector<roots::RootProps>& root_props_locked() { static std::vector<roots::RootProps> p; return p; }
 } // namespace
 
 bool add_trusted_root(const uint8_t* der, size_t n) {
@@ -696,6 +701,7 @@ bool add_trusted_root(const uint8_t* der, size_t n) {
     auto& r = roots_locked();
     for (auto& x : r) if (x.der == c.der) return true;
     r.push_back(std::move(c));
+    root_props_locked().push_back(roots::RootProps{ nullptr, 0, 0 });   // racine ajoutee : sans restriction
     return true;
 }
 size_t trusted_root_count() { std::lock_guard<std::mutex> lk(g_rootsMu); return roots_locked().size(); }
@@ -788,7 +794,14 @@ uint32_t chain_status(const Certificate& leaf, const std::vector<Certificate>& p
         if (T < cur->notBefore || T > cur->notAfter) st |= T_NOT_TIME_VALID;
         if (!eku_ok(*cur, usage)) st |= T_NOT_VALID_FOR_USAGE;
         if (depth > 0 && cur->version >= 2 && !(cur->hasBasicConstraints && cur->isCA)) st |= T_INVALID_BASIC_CONSTRAINTS;
-        if (is_anchor(*cur)) return st;                          // ancre atteinte (racine du magasin)
+        if (const Certificate* anc = is_anchor(*cur)) {          // ancre atteinte (racine du magasin)
+            // Proprietes du programme de racines (authroot.stl), cf. authenticode_roots.h.
+            const roots::RootProps& pr = root_props_locked()[(size_t)(anc - &anchors[0])];
+            if (pr.eku_only && std::strcmp(pr.eku_only, usage) != 0) st |= T_NOT_VALID_FOR_USAGE;
+            if (pr.not_before && leaf.notBefore > pr.not_before) st |= T_UNTRUSTED_ROOT;
+            if (pr.disabled_at && T >= pr.disabled_at) st |= T_UNTRUSTED_ROOT;
+            return st;
+        }
         bool selfSigned = cur->issuer.len == cur->subject.len &&
                           std::memcmp(cur->p(cur->issuer), cur->p(cur->subject), cur->issuer.len) == 0;
         if (selfSigned) {
