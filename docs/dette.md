@@ -28,18 +28,6 @@ C'est un problème de **nom**, pas de couplage : leur comportement est
 entièrement générique. Mais ça induit en erreur quelqu'un qui chercherait un
 lien avec le jeu d'origine là où il n'y en a pas.
 
-## `select` : coupure serveur pas encore vue sur console
-
-`select` et `__WSAFDIsSet` sont servis par le moteur, comme le reste de la couche
-socket ([liste générée](shims.md)). Leur contrat Winsock est couvert sur sockets
-locales par l'auto-test du portage d2vita (`D2_SELECTTEST`), qui échoue si l'on
-réintroduit un retour d'erreur immédiat ou un reset signalé dans `exceptfds`.
-
-Sous charge réseau réelle, une session en ligne du portage sur un serveur public
-tourne sans gel sur console. Reste le chemin d'erreur : une connexion coupée par
-le serveur en pleine partie doit finir en déconnexion propre, pas en gel. Cette
-entrée disparaît une fois ce cas vu sur console.
-
 ## La présentation écran — jamais auditée
 
 `vita_present.cpp` (présentation à l'écran) n'a jamais été relu pour en extraire
