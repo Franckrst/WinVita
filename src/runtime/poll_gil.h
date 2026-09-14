@@ -20,4 +20,8 @@ int wx86_poll_gilfree_n(pollfd* pf, nfds_t nfds, int total_ms);
 // Single-fd convenience form (connect-completion, blocking recv).
 int wx86_poll_gilfree(pollfd* pf, int total_ms);
 
+// True once the native scheduler is tearing down. A wait built from several
+// wx86_poll_gilfree_n calls must stop when this turns true.
+bool wx86_poll_shutdown_requested();
+
 } // namespace d2rt

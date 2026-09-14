@@ -6,34 +6,29 @@
 // gate, accept/bind/closesocket/getpeername/getsockname/getsockopt/
 // ioctlsocket (both DLLs)/listen/setsockopt/shutdown/socket, connect/recv/
 // send (generic bodies: wx86_connect_wait/wx86_recv_blocking/
-// wx86_send_simple), the address helpers (inet_addr/inet_ntoa/
-// gethostbyname, which write through the guest scratch allocator,
+// wx86_send_simple), select/__WSAFDIsSet, the address helpers (inet_addr/
+// inet_ntoa/gethostbyname, which write through the guest scratch allocator,
 // guest_scratch.h) and the socket-layer half of the exit lock (net_guard.h)
 // — see win32_shims_wsock32.h for the observer/redirect/exit-lock contract
 // these all sit behind. sendto/recvfrom are real registered ordinals (not
 // left to the default shim) partly so the exit lock can gate them too.
-//
-// select (WSOCK32.dll!#18) is left registered on the embedder side: its
-// fd_set<->pollfd translation is generic, but it is also the exact site of
-// a network-starvation edge case that only reproduces under real network
-// load, so it is left alone deliberately.
 //
 // inet_ntoa and gethostbyname were fixed, not just relocated, when they
 // moved here: inet_ntoa was returning a hardcoded "127.0.0.1" regardless of
 // its argument, and gethostbyname made five permanent allocations per call,
 // exhausting guest memory in long sessions. Both are now cached by key.
 //
-// Trace-log note: ordinals registered directly through this file's own
-// REGORD bypass any per-call trace wrapper an embedder registers its own
-// ordinals through, so such a trace loses coverage for exactly those
-// ordinals. Functional behavior is unchanged; connect/recv/send/select stay
-// embedder-registered and keep full tracing.
+// Trace-log note: ordinals registered here through REGORD bypass any per-call
+// trace wrapper an embedder applies to its own registrations; the observer
+// is the way to follow them.
 #include "win32_shims_wsock32.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
 #include "runtime/poll_gil.h"
+#include "runtime/host_clock.h"
 #include "runtime/net_nonblock.h"
 #include "runtime/guest_scratch.h"
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -213,6 +208,171 @@ int wx86_send_simple(int fd, const void* buf, uint32_t len, uint32_t* outWsaErr)
     if (n >= 0) return (int)n;
     { uint32_t e = wx86_wsa_from_errno(errno); wx86_net_set_last_error(e); if (outWsaErr) *outWsaErr = e; }
     return -1;
+}
+
+// --- select / __WSAFDIsSet -------------------------------------------------
+// Winsock fd_set: { u32 fd_count; SOCKET fd_array[fd_count]; }. FD_SETSIZE is
+// the caller's choice (64 by default), so fd_count is honored up to a bound
+// that only rejects garbage.
+static constexpr uint32_t kFdSetMaxEntries = 1024;
+
+// Winsock reports select errors at once. A caller that retries on error would
+// then never block, and under a run-to-block kernel a thread that never
+// blocks starves every other guest thread. Errors are returned only once the
+// requested timeout has elapsed (capped): Windows values, later.
+static constexpr uint64_t kSelectErrorDelayCapMs = 1000;
+
+// exceptfds reports urgent (OOB) data here; a failed non-blocking connect
+// never shows up because connect() completes synchronously. Libcs that alias
+// POLLPRI to POLLIN cannot tell urgent data apart, so exceptfds stays empty
+// there instead of reporting ordinary data.
+static constexpr bool kPollPriDistinct = POLLPRI != POLLIN;
+
+static void wx86_net_notify_select(Cpu* c, int result, uint32_t wsaErr,
+                                   int timeoutMs, uint32_t waitedMs) {
+    if (!g_observer) return;
+    WsockEvent e{WX86_NET_SELECT, c, 0, -1, 0, 0, 0, result, wsaErr, nullptr, 0, timeoutMs, waitedMs};
+    g_observer(e);
+}
+
+namespace {
+struct SelectEntry {
+    uint32_t handle;
+    int      fd;
+    uint8_t  want;    // bit k: listed in set k (0 read, 1 write, 2 except)
+    uint8_t  ready;   // bit k: reportable in set k
+};
+}
+
+// select(nfds, readfds, writefds, exceptfds, timeout). nfds is ignored, as on
+// Windows. The wait releases the GIL and stops on readiness, timeout,
+// teardown, or networking being switched off.
+static uint32_t wx86_select(Cpu& c) {
+    const uint32_t setp[3] = { c.arg(1), c.arg(2), c.arg(3) };
+    const uint32_t tvp = c.arg(4);
+    const uint64_t t0 = wx86_now_ms();
+
+    int64_t wait_ms = -1;   // NULL timeval: no limit
+    bool tv_valid = true;
+    if (tvp) {
+        const int32_t sec = (int32_t)c.read_u32(tvp), usec = (int32_t)c.read_u32(tvp + 4);
+        if (sec < 0 || usec < 0) tv_valid = false;
+        else wait_ms = (int64_t)sec * 1000 + ((int64_t)usec + 999) / 1000;   // round up
+    }
+    const int ev_timeout = !tv_valid ? -2 : wait_ms < 0 ? -1 : (int)std::min<int64_t>(wait_ms, INT32_MAX);
+    const uint64_t err_at = t0 + (tv_valid && wait_ms >= 0
+                                  ? std::min<uint64_t>((uint64_t)wait_ms, kSelectErrorDelayCapMs)
+                                  : kSelectErrorDelayCapMs);
+    auto elapsed = [t0]() { return wx86_now_ms() - t0; };
+    auto fail = [&](uint32_t code) -> uint32_t {
+        const uint64_t now = wx86_now_ms();
+        if (now < err_at && !wx86_poll_shutdown_requested())
+            wx86_poll_gilfree_n(nullptr, 0, (int)(err_at - now));
+        wx86_net_set_last_error(code);
+        wx86_net_notify_select(&c, -1, code, ev_timeout, (uint32_t)elapsed());
+        return 0xFFFFFFFFu;
+    };
+
+    if (!wx86_net_enabled()) return fail(10050);   // WSAENETDOWN
+    if (!tv_valid) return fail(10022);             // WSAEINVAL
+
+    // Snapshot the sets before any wait: guest memory can change while the
+    // GIL is released.
+    std::vector<uint32_t> lists[3];
+    std::vector<SelectEntry> ents;
+    std::map<uint32_t, size_t> index;
+    for (int k = 0; k < 3; k++) {
+        if (!setp[k]) continue;
+        const uint32_t n = c.read_u32(setp[k]);
+        if (n > kFdSetMaxEntries) return fail(10014);   // WSAEFAULT
+        for (uint32_t i = 0; i < n; i++) {
+            const uint32_t h = c.read_u32(setp[k] + 4 + i * 4);
+            lists[k].push_back(h);
+            auto it = index.find(h);
+            if (it == index.end()) {
+                const int fd = wx86_sock_fd(h);
+                if (fd < 0) return fail(10038);         // WSAENOTSOCK
+                it = index.emplace(h, ents.size()).first;
+                ents.push_back({h, fd, 0, 0});
+            }
+            ents[it->second].want |= (uint8_t)(1u << k);
+        }
+    }
+    if (ents.empty()) return fail(10022);   // WSAEINVAL: no socket in any set
+
+    std::vector<pollfd> pf(ents.size());
+    for (size_t i = 0; i < ents.size(); i++) {
+        short ev = 0;
+        if (ents[i].want & 1) ev |= POLLIN;
+        if (ents[i].want & 2) ev |= POLLOUT;
+        if ((ents[i].want & 4) && kPollPriDistinct) ev |= POLLPRI;
+        pf[i].fd = ev ? ents[i].fd : -1;   // poll ignores negative fds
+        pf[i].events = ev;
+    }
+
+    for (;;) {
+        int64_t chunk = 1000;
+        if (wait_ms >= 0) chunk = std::min<int64_t>(chunk, std::max<int64_t>(0, wait_ms - (int64_t)elapsed()));
+        bool live = false;
+        for (auto& p : pf) { p.revents = 0; live |= p.fd >= 0; }
+        int r = 0;
+        if (!live) {
+            if (chunk > 0) wx86_poll_gilfree_n(nullptr, 0, (int)chunk);
+        } else if (chunk > 0) {
+            r = wx86_poll_gilfree_n(pf.data(), (nfds_t)pf.size(), (int)chunk);
+        } else {
+            r = ::poll(pf.data(), (nfds_t)pf.size(), 0);
+            if (r < 0 && errno == EINTR) r = 0;
+        }
+        if (r < 0) return fail(10050);   // host poll failed: treat the network as down
+
+        // Another guest thread may have closed a socket during the wait.
+        for (const auto& e : ents)
+            if (wx86_sock_fd(e.handle) != e.fd) return fail(10038);
+
+        bool any = false;
+        if (r > 0) {
+            for (size_t i = 0; i < ents.size(); i++) {
+                const short rv = pf[i].revents;
+                uint8_t ready = 0;
+                // Windows marks a closed or reset connection readable only.
+                if ((ents[i].want & 1) && (rv & (POLLIN | POLLHUP | POLLERR))) ready |= 1;
+                if ((ents[i].want & 2) && (rv & POLLOUT)) ready |= 2;
+                if ((ents[i].want & 4) && kPollPriDistinct && (rv & POLLPRI)) ready |= 4;
+                ents[i].ready = ready;
+                any |= ready != 0;
+                // Woke on a condition none of this socket's sets can report:
+                // stop watching it for this call rather than wake on it again.
+                if (!ready && rv) pf[i].fd = -1;
+            }
+        }
+        if (any) break;
+        if (wait_ms >= 0 && (int64_t)elapsed() >= wait_ms) break;
+        if (wx86_poll_shutdown_requested()) break;
+        if (!wx86_net_enabled()) return fail(10050);
+    }
+
+    uint32_t total = 0;
+    for (int k = 0; k < 3; k++) {
+        if (!setp[k]) continue;
+        uint32_t w = 0;
+        for (uint32_t h : lists[k])
+            if ((ents[index.find(h)->second].ready >> k) & 1) c.write_u32(setp[k] + 4 + 4 * w++, h);
+        c.write_u32(setp[k], w);
+        total += w;
+    }
+    wx86_net_notify_select(&c, (int)total, 0, ev_timeout, (uint32_t)elapsed());
+    return total;
+}
+
+// __WSAFDIsSet(s, set): the function behind FD_ISSET.
+static uint32_t wx86_fd_isset(Cpu& c) {
+    const uint32_t s = c.arg(0), set = c.arg(1);
+    if (!set) return 0u;
+    const uint32_t n = std::min(c.read_u32(set), kFdSetMaxEntries);
+    for (uint32_t i = 0; i < n; i++)
+        if (c.read_u32(set + 4 + i * 4) == s) return 1u;
+    return 0u;
 }
 
 void win32_shims_wsock32_install(Bridge& br) {
@@ -588,6 +748,11 @@ void win32_shims_wsock32_install(Bridge& br) {
     };
     REGORD("WSOCK32.dll", 19, 4, send_fn);
     REGORD("WS2_32.dll", 19, 4, send_fn);
+
+    REGORD("WSOCK32.dll", 18, 5, wx86_select);
+    REGORD("WS2_32.dll", 18, 5, wx86_select);
+    REGORD("WSOCK32.dll", 151, 2, wx86_fd_isset);
+    REGORD("WS2_32.dll", 151, 2, wx86_fd_isset);
 
     // ---- sendto (#20) / recvfrom (#17): real bodies, not the default shim -
     // argc is what matters here: a wrong stdcall argc shifts the stack on

@@ -1,11 +1,9 @@
 // src/runtime/win32_shims_wsock32.h — Winsock 1.1/2 ordinal shims
 // (WSOCK32.dll / WS2_32.dll) and the generic socket-handle table backing
-// them. See win32_shims_wsock32.cpp for the ordinal-by-ordinal split between
-// what lives here and what stays embedder-side. connect/recv/send are fully
-// generic: application policy reaches them through the observer and the
-// connect route declared below. The address helpers (inet_addr/inet_ntoa/
-// gethostbyname) write through the guest scratch allocator (guest_scratch.h).
-// select is the only ordinal the embedder still registers itself.
+// them. connect/recv/send/select are fully generic: application policy
+// reaches them through the observer and the connect route declared below.
+// The address helpers (inet_addr/inet_ntoa/gethostbyname) write through the
+// guest scratch allocator (guest_scratch.h).
 #pragma once
 #include <cstdint>
 #include "runtime/net_guard.h"   // the exit lock, a leaf unit
@@ -40,8 +38,8 @@ uint32_t wx86_wsa_from_errno(int e);   // POSIX errno -> Winsock error code
 // Single canonical "last Winsock error" store (what WSAGetLastError, itself
 // registered here, returns). Every socket shim sets it on failure through
 // this one setter — one store, not two that could read stale after a call
-// that only updates one of them. Shims the embedder still registers itself
-// (select, the address helpers) use the same setter.
+// that only updates one of them. Embedder-registered socket shims must use
+// the same setter.
 uint32_t wx86_net_last_error();
 void wx86_net_set_last_error(uint32_t code);
 
@@ -132,6 +130,10 @@ enum {
                              // 10013. NO host socket was touched. The engine
                              // is otherwise silent, so this is the only way
                              // the embedder learns a packet was withheld.
+    WX86_NET_SELECT,         // after a select: result = its return value
+                             // (ready count, 0 = timed out, -1 = error with
+                             // wsa_err), timeout_ms = requested wait,
+                             // waited_ms = time spent in the call
 };
 struct WsockEvent {
     int         kind;
@@ -145,6 +147,8 @@ struct WsockEvent {
     uint32_t    wsa_err;   // Winsock error code when result < 0
     const uint8_t* data;   // SEND/RECV payload, else null
     int         len;       // SEND/RECV payload length, else 0
+    int         timeout_ms;  // SELECT: requested wait; -1 = NULL timeval (infinite), -2 = invalid
+    uint32_t    waited_ms;   // SELECT: wall time spent inside the call
 };
 typedef void (*WsockObserverFn)(const WsockEvent&);
 // Exactly ONE observer, deliberately: silently accepting a second

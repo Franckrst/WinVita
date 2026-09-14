@@ -10,10 +10,10 @@ Cette page est **générée depuis les sources** par `tools/gen_shim_list.py`, e
 
 | | |
 |---|---|
-| Inscriptions | 362 |
-| Clés distinctes | 362 |
+| Inscriptions | 366 |
+| Clés distinctes | 366 |
 | DLL couvertes | 14 |
-| Unités d'installation | 14 |
+| Unités d'installation | 15 |
 
 ## ADVAPI32.dll
 
@@ -232,7 +232,7 @@ Ressources de version d'un fichier (`VS_FIXEDFILEINFO`).
 
 Les mêmes fonctions que WSOCK32.dll, sous des ordinaux différents — les deux DLL ne s'accordent pas sur la numérotation, d'où deux entrées par fonction.
 
-29 inscriptions, 29 clés distinctes — `src/runtime/win32_shims_wsock32.cpp`
+31 inscriptions, 31 clés distinctes — `src/runtime/win32_shims_wsock32.cpp`
 
 | | | |
 |---|---|---|
@@ -241,17 +241,18 @@ Les mêmes fonctions que WSOCK32.dll, sous des ordinaux différents — les deux
 | `#7` getsockopt | `#8` htonl | `#9` htons |
 | `#10` ioctlsocket | `#11` inet_addr | `#12` inet_ntoa |
 | `#13` listen | `#14` ntohl | `#15` ntohs |
-| `#16` recv | `#17` recvfrom | `#19` send |
-| `#20` sendto | `#21` setsockopt | `#22` shutdown |
-| `#23` socket | `#52` gethostbyname | `#57` gethostname |
-| `#101` wsaasyncselect | `#111` wsagetlasterror | `#112` wsaisblocking |
-| `#115` wsastartup | `#116` wsacleanup |  |
+| `#16` recv | `#17` recvfrom | `#18` |
+| `#19` send | `#20` sendto | `#21` setsockopt |
+| `#22` shutdown | `#23` socket | `#52` gethostbyname |
+| `#57` gethostname | `#101` wsaasyncselect | `#111` wsagetlasterror |
+| `#112` wsaisblocking | `#115` wsastartup | `#116` wsacleanup |
+| `#151` |  |  |
 
 ## WSOCK32.dll
 
 Couche socket complète, traduite vers POSIX : table de poignées, primitives BSD, résolution de noms, ordre des octets. Aucune logique propre à un jeu — ce qu'un portage veut observer ou dévier passe par l'observateur et la route (`wx86_net_set_observer`, `wx86_net_set_redirect`).
 
-29 inscriptions, 29 clés distinctes — `src/runtime/win32_shims_wsock32.cpp`
+31 inscriptions, 31 clés distinctes — `src/runtime/win32_shims_wsock32.cpp`
 
 | | | |
 |---|---|---|
@@ -260,11 +261,12 @@ Couche socket complète, traduite vers POSIX : table de poignées, primitives BS
 | `#7` getsockopt | `#8` htonl | `#9` htons |
 | `#10` inet_addr | `#11` inet_ntoa | `#12` ioctlsocket |
 | `#13` listen | `#14` ntohl | `#15` ntohs |
-| `#16` recv | `#17` recvfrom | `#19` send |
-| `#20` sendto | `#21` setsockopt | `#22` shutdown |
-| `#23` socket | `#52` gethostbyname | `#57` gethostname |
-| `#101` wsaasyncselect | `#111` wsagetlasterror | `#112` wsaisblocking |
-| `#115` wsastartup | `#116` wsacleanup |  |
+| `#16` recv | `#17` recvfrom | `#18` |
+| `#19` send | `#20` sendto | `#21` setsockopt |
+| `#22` shutdown | `#23` socket | `#52` gethostbyname |
+| `#57` gethostname | `#101` wsaasyncselect | `#111` wsagetlasterror |
+| `#112` wsaisblocking | `#115` wsastartup | `#116` wsacleanup |
+| `#151` |  |  |
 
 ## Unités d'installation
 
@@ -285,5 +287,6 @@ Chaque groupe expose une fonction `install` que le portage appelle depuis son pr
 | `win32_shims_version_install` | `src/runtime/win32_shims_version.cpp` | 4 |
 | `win32_shims_wait_install` | `src/runtime/win32_shims_wait.cpp` | 7 |
 | `win32_shims_window_install` | `src/runtime/win32_shims_window.cpp` | 33 |
-| `win32_shims_wsock32_install` | `src/runtime/win32_shims_wsock32.cpp` | 58 |
+| `win32_shims_wintrust_install` | `src/runtime/win32_shims_wintrust.cpp` | 0 |
+| `win32_shims_wsock32_install` | `src/runtime/win32_shims_wsock32.cpp` | 62 |
 

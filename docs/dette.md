@@ -28,17 +28,17 @@ C'est un problème de **nom**, pas de couplage : leur comportement est
 entièrement générique. Mais ça induit en erreur quelqu'un qui chercherait un
 lien avec le jeu d'origine là où il n'y en a pas.
 
-## `select` reste inscrit par le portage
+## `select` : validation sous charge réseau réelle en attente
 
-Toute la couche socket est passée côté moteur ([liste générée](shims.md)) — sauf
-`select` (`WSOCK32.dll!#18`) et le `__WSAFDIsSet` qui l'accompagne.
+`select` et `__WSAFDIsSet` sont servis par le moteur, comme le reste de la couche
+socket ([liste générée](shims.md)). Leur contrat Winsock est couvert sur sockets
+locales par l'auto-test du portage d2vita (`D2_SELECTTEST`), qui échoue si l'on
+réintroduit un retour d'erreur immédiat ou un reset signalé dans `exceptfds`.
 
-Son cœur — la traduction `fd_set` ↔ `pollfd` — est pourtant générique. Ce qui le
-retient est précis : c'est le site exact d'une famine réseau déjà corrigée, dont
-la signature de régression ne se voit **que sous charge réseau réelle**. La
-validation en ligne faite lors du découplage n'a pas couvert ce cas-là. C'est
-donc un report assumé, avec un critère de levée écrit : un test de charge réel,
-pas une relecture.
+Reste le critère qui retenait `select` côté portage : c'est le site exact d'une
+famine réseau, dont la signature ne se voit **que sous charge réseau réelle**.
+Cette entrée disparaît après une session en ligne sur console sans gel, plus une
+coupure du serveur en pleine partie qui se termine en déconnexion propre.
 
 ## La présentation écran — jamais auditée
 

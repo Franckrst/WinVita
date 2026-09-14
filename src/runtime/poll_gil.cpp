@@ -32,4 +32,8 @@ int wx86_poll_gilfree(pollfd* pf, int total_ms) {
     return wx86_poll_gilfree_n(pf, 1, total_ms);
 }
 
+bool wx86_poll_shutdown_requested() {
+    return g_native_sched && g_native_sched->shutdown_requested();
+}
+
 } // namespace d2rt
