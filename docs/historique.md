@@ -15,7 +15,7 @@ d'extraction/resynchronisation.
 ## Extraction depuis d2vita (2026-09-09)
 
 winx86 a été extrait le 2026-09-09 du projet
-[d2vita](https://gitlab.com/claude5564407/d2-vita), un portage privé de
+[d2vita](https://gitlab.com/claude5564407/d2-vita), un portage de
 Diablo II: Lord of Destruction sur PS Vita, en isolant le sous-ensemble du
 moteur qui n'avait aucune connaissance du jeu (chargeur PE32, dynarec, `Cpu`/
 `Bridge`, ordonnanceurs, outillage générique). Le reste — les ~600 shims
