@@ -279,6 +279,11 @@ private:
     // a 64-bit load can tear) — heartbeat semantics, torn reads tolerated.
     uint64_t wakes_total_ = 0;
     const char* stop_reason_ = "";
+    // Set once a thread has faulted. Teardown must not overwrite the fault
+    // reason with "main exited": a fault reported as a normal exit is a
+    // diagnostic that lies, and it costs hours the next time someone reads
+    // the log of a crash that "did not happen".
+    bool faulted_ = false;
     bool no_preempt_warned_ = false;
     bool stack_overrun_warned_ = false;     // one-shot TIB-overrun warning
     uint32_t stacks_reused_ = 0;            // stacks/TIBs of finished threads, reused

@@ -92,9 +92,8 @@ there (not just in the opaque value) is a real gap to investigate.
 
 `TORTURE_FAULT=1` adds a raw fs:[0] SEH probe (a hand-built EXCEPTION_REGISTRATION
 plus an `idiv`-by-zero — mingw GCC does not emit working MSVC `__try/__except` on
-i686). Wine runs the handler off the chain; the engine classifies the fault precisely
-as `0xC0000094` (INTEGER_DIVIDE_BY_ZERO) and its SEH dispatcher is **fail-safe**:
-by default it does NOT walk a possibly-mis-resolved fs:[0] chain — it logs
-`SEH_UNSUPPORTED_CHAIN` and keeps the historical fault/termination. Real SEH on the
-box86 backend (matching `%fs:0` to the guest TEB, chain walk, resume, RtlUnwind) is
-fidelity TODO P0; set `D2_SEH_EXPERIMENTAL=1` to opt into the incomplete walk.
+i686). Wine runs the handler off the chain. This engine does not: it classifies the
+fault as `0xC0000094` (INTEGER_DIVIDE_BY_ZERO), hands that code to whatever fault
+dispatcher the consumer registered, and terminates the thread with it. **No guest
+handler is ever called** — the engine dispatches no exception to guest code, and a
+consumer that wants SEH has to implement it above this interface.

@@ -77,11 +77,12 @@ public:
     // Optional per-instruction probe (breakpoints in scheduler mode), chained
     // inside the preemption hook. Runs on EVERY instruction — keep it cheap.
     void set_probe(std::function<void(uint32_t)> p) { probe_ = std::move(p); }
-    // SEH dispatcher: called in the fault branch BEFORE terminating a
-    // faulting thread, with (thread, windows_exception_code, fault_addr). It walks
-    // fs:[0] and runs guest handlers. Returns 0 = terminate (search exhausted /
-    // resume not supported yet), 1 = resume (reserved). Only fires on a real fault,
-    // so it never touches the fault-free boot/online-load paths.
+    // Fault dispatcher: called in the fault branch BEFORE terminating a
+    // faulting thread, with (thread, windows_exception_code, fault_addr).
+    // What it does with that is the consumer's business — this engine does not
+    // dispatch exceptions to guest code itself. Returns 0 = terminate, 1 =
+    // resume. Only fires on a real fault, so it never touches the fault-free
+    // boot/online-load paths.
     void set_fault_dispatcher(FaultFn f) override { fault_disp_ = std::move(f); }
     // Honest Toolhelp/OpenThread/GetThreadContext support: expose the REAL guest
     // thread set (never a fabricated view). live_thread_ids/count skip Finished.

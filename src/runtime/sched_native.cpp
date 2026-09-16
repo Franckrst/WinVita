@@ -583,11 +583,16 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
     if (!ok) {
         uint32_t code = cpu_->fault_code();
         int act = (code && fault_disp_) ? fault_disp_(t, code, cpu_->fault_addr()) : 0;
-        if (act == 1) {                  // resume (reserved) — dead path for now
-            std::printf("  [sched-native] SEH resume (act=1): experimental, NOT supported under native — thread leaks\n");
+        if (act == 1) {                  // consumer asked to resume
+            std::printf("  [sched-native] fault dispatcher asked to resume (act=1): not supported under this backend — thread leaks\n");
             return;
         }
-        t->exit_code = 0xC0000005; stop_reason_ = fault ? fault : "fault";
+        // Exit code: the precise one when the emulator could name the fault
+        // (divide-by-zero, illegal instruction), the access-violation fallback
+        // when it could not. Reporting every fault as 0xC0000005 discarded a
+        // value the emulator had already computed.
+        t->exit_code = code ? code : 0xC0000005u;
+        faulted_ = true; stop_reason_ = fault ? fault : "fault";
         std::printf("  [sched-native] thread %u FAULT: %s EIP=0x%08x faultAddr=0x%08x ESP=0x%08x EAX=0x%08x\n",
                     t->id, stop_reason_, cpu_->reg(R_EIP), cpu_->fault_addr(),
                     cpu_->reg(R_ESP), cpu_->reg(R_EAX));
@@ -614,7 +619,15 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
                             (cpu_->reg(R_EIP) - mods[k].first < mods[k].second) ? "  <- EIP ICI" : "");
               progress(l); }
           int shown = 0;
-          for (uint32_t off = 0; off < 0x100; off += 4) {
+          // Bounded by the thread's own stack: scanning a fixed 0x100 past ESP
+          // read off the end of the region whenever the fault happened near the
+          // stack top, and under an identity memory model that is a host fault
+          // — the diagnostic meant to explain a crash was killing the process
+          // before it could print the summary. Zero bounds (main, whose region
+          // the scheduler does not own) keep the old fixed window.
+          const uint32_t span = (t->stack_top && esp >= t->stack_base && esp < t->stack_top)
+                              ? (t->stack_top - esp) : 0x100u;
+          for (uint32_t off = 0; off < (span < 0x100u ? span : 0x100u); off += 4) {
               uint32_t v = cpu_->read_u32(esp + off);
               for (size_t k = 0; k < mods.size(); ++k)
                   if (v >= mods[k].first && v - mods[k].first < mods[k].second) {
@@ -1268,7 +1281,10 @@ void NativeScheduler::run() {
     // Main exited: process teardown (main-thread exit ends the process,
     // like on Windows). Stop the workers, join with a bounded wait, report
     // stragglers.
-    stop_reason_ = shutdown_ ? "shutdown requested" : "main exited";
+    // A recorded fault outranks both: overwriting it here reported a faulting
+    // run as a normal exit, and the one-line summary a reader sees first is
+    // built from this string.
+    if (!faulted_) stop_reason_ = shutdown_ ? "shutdown requested" : "main exited";
     request_shutdown();
     // Snapshot the GuestThread* set UNDER the GIL before unlocking — the
     // vector cannot grow past shutdown_ (create_thread refuses), but iterating
