@@ -442,6 +442,42 @@
 #define B_NEXT(cond)     \
     j32 = dyn->insts[ninst].epilog-(dyn->arm_size+8); \
     Bcond(cond, j32)
+// Emitted right after a CALL to a div/idiv helper: propagate an x86 #DE
+// (divide error) instead of running on with a stale result.
+//
+// The helper already does the detection, and for BOTH causes of #DE — a zero
+// divisor and a quotient too large for the destination. On either it raises
+// INTR_RAISE_DIV0 and returns WITHOUT writing R_EAX/R_EDX, so the LDM just
+// above reloads the PRE-division values, which is what x86 requires of a
+// faulting DIV. What was missing is leaving the block: `quit` only ends the
+// DynaRun loop, and translated blocks direct-link to one another without
+// passing through it.
+//
+// jump_to_epilog(..., ip, ...) sets EIP to the FAULTING instruction — x86
+// reports the address of the div itself, not of the next one. The epilogue
+// spills the eight general registers, the flags and EIP: exactly what reads
+// the fault path (the scheduler's register dump, the crash report).
+//
+// No fpu_purgecache here, deliberately. This exit is terminal for the thread
+// — the emulator returns with `error` set and the scheduler terminates it —
+// so nothing ever reads the x87/MMX/SSE cache a purge would flush, and adding
+// a float barrier would make every healthy division pay for it. The x86Int3
+// path above has the same shape and the same omission, for the same reason.
+//
+// Cost on the non-faulting path, i.e. every division but the last: LDR, CMPS,
+// Bcond — three ARM instructions, where the division already pays a call_c
+// sequence, an STM, an LDM and a C helper doing a 64/32 divide.
+//
+// CAVEAT for a target with hardware division: the `if(arm_div)` inline
+// UDIV/SDIV legs bypass the helpers entirely and raise nothing (ARM UDIV
+// yields 0 on a zero divisor). They are unreachable here — arm_div is a
+// compile-time 0, Cortex-A9 has no integer divide — and are left untouched
+// precisely because they cannot be exercised, therefore cannot be validated.
+#define CHECK_DIV0()  \
+    LDR_IMM9(x1, xEmu, offsetof(x86emu_t, quit)); \
+    CMPS_IMM8(x1, 0); \
+    B_NEXT(cEQ); \
+    jump_to_epilog(dyn, ip, 0, ninst)
 // Branch to MARKSEG if cond (use j32)
 #define B_MARKSEG(cond)    \
     j32 = GETMARKSEG-(dyn->arm_size+8);   \

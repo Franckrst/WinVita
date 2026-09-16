@@ -144,8 +144,16 @@ typedef struct x86emu_s {
 #define EMUTYPE_MAIN    1
 #define EMUTYPE_SIGNAL  2
 
-//#define INTR_RAISE_DIV0(emu) {emu->error |= ERR_DIVBY0; emu->quit=1;}
-#define INTR_RAISE_DIV0(emu) {emu->error |= ERR_DIVBY0;} // should rise a SIGFPE and not quit
+// x86 #DE is not resumable: the faulting instruction writes nothing and the
+// processor traps. Raising `error` alone left `quit` clear, and DynaRun loops
+// on !quit — so the guest carried on past the fault, with the pre-division
+// EAX/EDX still in place and the error only noticed at some later block
+// boundary (or erased entirely by a budget preemption). Upstream's comment,
+// "should rise a SIGFPE and not quit", describes a host-signal design this
+// port does not have: the Vita delivers no POSIX signals, so `quit` is how a
+// fault leaves the emulator here. Paired with CHECK_DIV0 in the dynarec, which
+// is what actually leaves the translated block.
+#define INTR_RAISE_DIV0(emu) {emu->error |= ERR_DIVBY0; emu->quit=1;}
 
 void applyFlushTo0(x86emu_t* emu);
 

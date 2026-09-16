@@ -2838,6 +2838,7 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                     STM(xEmu, (1<<xEAX));
                     CALL(div8, -1, 0);
                     LDM(xEmu, (1<<xEAX));
+                    CHECK_DIV0();
                     break;
                 case 7:
                     INST_NAME("IDIV Eb");
@@ -2847,6 +2848,7 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                     STM(xEmu, (1<<xEAX));
                     CALL(idiv8, -1, 0);
                     LDM(xEmu, (1<<xEAX));
+                    CHECK_DIV0();
                     break;
             }
             break;
@@ -2908,6 +2910,10 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                         MOV_REG(x1, xEIP);
                         MOV32(x2, 0);
                         CALL(emit_div0, -1, 0);
+                        // emit_div0 always raises: leave the block here too,
+                        // rather than falling through into the next
+                        // instruction of a block the fault has ended.
+                        CHECK_DIV0();
                     } else {
                         if(arm_div && ninst && dyn->insts 
                         && dyn->insts[ninst-1].x86.addr
@@ -2930,6 +2936,7 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                             STM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
                             CALL(div32, -1, 0);
                             LDM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
+                            CHECK_DIV0();
                             if(arm_div) {
                                 B_NEXT(c__);
                                 MARK;
@@ -2970,6 +2977,7 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                         STM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
                         CALL(idiv32, -1, 0);
                         LDM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
+                        CHECK_DIV0();
                         if(arm_div) {
                             B_NEXT(c__);
                             MARK;

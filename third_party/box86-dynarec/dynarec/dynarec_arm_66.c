@@ -1182,6 +1182,7 @@ uintptr_t dynarec66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                         STM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
                         CALL(div16, -1, 0);
                         LDM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
+                        CHECK_DIV0();
                     }
                     break;
                 case 7:
@@ -1192,6 +1193,7 @@ uintptr_t dynarec66(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                     STM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
                     CALL(idiv16, -1, 0);
                     LDM(xEmu, (1<<xEAX) | (1<<xECX) | (1<<xEDX));
+                    CHECK_DIV0();
                     break;
             }
             break;
