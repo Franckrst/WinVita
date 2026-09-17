@@ -6,11 +6,13 @@
 // directly, and it exposes the import/export tables the bridge needs to
 // wire x86↔ARM calls.
 //
-// Design goals for the runtime sprint:
-//   * No hardcoded 1.13c addresses — everything resolved via the PE's own
-//     export directory (name + ordinal) so 1.13d drops in later.
-//   * Position-independent: we pick the load base, apply .reloc, so several
-//     DLLs coexist in one emulated address space without collisions.
+// Design constraints:
+//   * No hardcoded addresses — every target is resolved via the PE's own
+//     export directory (name + ordinal), so a different game build works
+//     without changes here.
+//   * Position-independent: the load base is chosen per image and .reloc is
+//     applied, so several DLLs coexist in one emulated address space without
+//     collisions.
 //   * Zero dependency on host Win32 — pure byte parsing, builds for Vita.
 //
 // The loader does not resolve imports itself; it hands the caller a list of

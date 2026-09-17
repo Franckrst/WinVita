@@ -24,7 +24,7 @@
 
 // The path is provided by the port — the only thing it provides. It is a
 // constant definition rather than a setter: a log line can fire before any
-// initialization point we could pick, and lazy init would pull in
+// initialization point runs, and lazy init would pull in
 // __cxa_guard_acquire (the class of trap the build script's `nm` guard exists
 // to catch). A constant initializer has no ordering and no guard.
 //

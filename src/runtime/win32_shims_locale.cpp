@@ -114,7 +114,7 @@ void win32_shims_locale_install(Bridge& br){
         std::string a=rd(c.arg(2),(int)c.arg(3)), b2=rd(c.arg(4),(int)c.arg(5));
         if(ic){ for(auto&ch:a) ch=(char)std::tolower((unsigned char)ch); for(auto&ch:b2) ch=(char)std::tolower((unsigned char)ch); }
         int r=a.compare(b2); return r<0?1u:(r==0?2u:3u); });      // CSTR_LESS/EQUAL/GREATER
-    // lstrcmpA/lstrcpyA: not exercised by any guest observed so far, kept
+    // lstrcmpA/lstrcpyA: not required by any shipped guest, kept
     // Win32-faithful regardless.
     K("lstrlenA",1,[](Cpu&c){ uint32_t p=c.arg(0); if(!p) return 0u; uint32_t n=0; uint8_t b=0;
         while(n<0x100000){ c.read(p+n,&b,1); if(!b) break; ++n; } return n; });

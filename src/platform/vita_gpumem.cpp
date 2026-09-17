@@ -1,6 +1,6 @@
 // See vita_gpumem.h.
 //
-// These bodies are a direct transcription of proven allocation code: same
+// These bodies are a direct transcription of the existing allocation code: same
 // alignment granularities, same fallbacks, same failure messages. Moving the
 // ownership of code must never be mixed with changing its behavior, or
 // nobody can tell what broke.

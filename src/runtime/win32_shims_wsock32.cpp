@@ -842,11 +842,10 @@ void win32_shims_wsock32_install(Bridge& br) {
     REGORD("WS2_32.dll", 17, 6, recvfrom_fn);
 
     // accept/bind/listen: real POSIX passthrough. No D2 client ever
-    // exercises this path (D2 is a pure Winsock client), so these are
-    // implemented correctly but validated only in isolation (a standalone
+    // exercises this path (D2 is a pure Winsock client): implemented
+    // correctly, but validated only in isolation (a standalone
     // connect/accept round-trip against this build), never by real D2
-    // traffic — see the commit message for exactly what that isolation
-    // test covered.
+    // traffic.
     auto bind_fn = [](Cpu& c) -> uint32_t {
         if (!wx86_net_enabled()) return 0xFFFFFFFFu;
         int fd = wx86_sock_fd(c.arg(0));

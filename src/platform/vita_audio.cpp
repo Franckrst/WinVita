@@ -281,12 +281,12 @@ bool thread_start(void (*body)(void)) {
     if (g_exhausted) return false;          // the cascade already ran to completion
     g_body = body;
 
-    // Context first: free memory and host thread count are the two
-    // hypotheses that rc alone can't distinguish between.
+    // Context first: free memory and host-thread count are the two things
+    // an rc alone can't distinguish between.
     log_context("avant creation du fil");
 
-    // Two knobs for console A/B testing, layered behind the default: they
-    // only override the first rung; the fallbacks stay the proven baseline.
+    // These two env vars override only the first rung's priority/stack, for
+    // testing without a rebuild; the remaining rungs stay fixed fallbacks.
     int p0 = kRungs[0].prio, s0 = kRungs[0].stackKio;
     if (const char* e = getenv("WX86_SONPRIO")  ? getenv("WX86_SONPRIO")  : getenv("D2_SONPRIO"))
         { long v = strtol(e, nullptr, 0); if (v) p0 = (int)v; }

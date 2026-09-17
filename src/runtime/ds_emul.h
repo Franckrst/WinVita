@@ -1,7 +1,7 @@
 // COM/vtable-based DirectSound guest emulation.
 //
 // The guest binary only imports 2 DSOUND.dll symbols by ordinal — everything
-// else goes through COM vtables, which we synthesize: Bridge::shim_trap
+// else goes through COM vtables, synthesized here: Bridge::shim_trap
 // returns a guest VA for a shim, and a table of such VAs IS a vtable. x86 COM
 // methods are stdcall with `this` pushed first, so Shim{argc = 1 + nparams,
 // stdcall_cleanup = true} with cpu.arg(0) == this covers it — no Bridge

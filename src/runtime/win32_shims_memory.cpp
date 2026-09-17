@@ -73,14 +73,13 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     K("GlobalFree",1,[](Cpu&c){ g_plan.heap->free(c.arg(0)); return 0u; });
 
     // VirtualAlloc: MEM_COMMIT inside an already-reserved block must return
-    // that address (our blocks are fully backed at reserve time), not a fresh
+    // that address (blocks are fully backed at reserve time), not a fresh
     // one. Committed memory is ZEROED (Win32 guarantee — Storm relies on it).
     // Windows guarantees MEM_COMMIT hands back ZERO pages for any page that
     // was decommitted (or never committed); already-committed pages keep
-    // their content. Our old shim returned recommitted pages with their STALE
-    // bytes — code that decommit/recommit-cycles buffers (sprite caches) then
-    // reads history where Windows reads zeros. Track decommitted pages and
-    // zero exactly those on recommit.
+    // their content. Returning stale bytes on recommit would corrupt code
+    // that decommit/recommit-cycles buffers (sprite caches) and expects
+    // zeros, so decommitted pages are tracked and zeroed exactly on recommit.
     static std::set<uint32_t> g_decommitted;   // page VAs decommitted, backing kept
     K("VirtualAlloc",4,[](Cpu&c){ uint32_t hint=c.arg(0),sz=c.arg(1)?c.arg(1):0x1000,ty=c.arg(2);
         if(hint){ uint32_t blk=g_plan.va->block_of(hint); if(blk){

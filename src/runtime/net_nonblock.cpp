@@ -90,14 +90,13 @@ uint32_t wx86_net_resolve(const char* host) {
         return 0;
     }
 #ifdef __vita__
-    // On console we do NOT call gethostbyname — we do ourselves what it
-    // does. Disassembly of lib_a-gethostbyname.o: it IS
-    // sceNetResolverCreate + sceNetResolverStartNtoa, called with a delay
-    // of ZERO and zero retries. It is therefore the file's only unbounded
-    // call, and would run first: under the cooperative scheduler, a call
-    // that never returns freezes the whole game, with no diagnostic. There
-    // is no second path here that would catch the first — it's the same
-    // call, bounded.
+    // gethostbyname() itself is not called on console: per
+    // lib_a-gethostbyname.o, it wraps sceNetResolverCreate +
+    // sceNetResolverStartNtoa with a delay of ZERO and zero retries, making
+    // it the file's only unbounded call — under the cooperative scheduler, a
+    // call that never returns freezes the whole game, with no diagnostic.
+    // The resolver is therefore driven directly below, with an explicit
+    // bound.
     { int rid = sceNetResolverCreate("winx86", nullptr, 0);
         g_resolveRc = rid;   // < 0 here = creation failed, not the delay
         if (rid >= 0) {
@@ -105,9 +104,9 @@ uint32_t wx86_net_resolve(const char* host) {
             // writing anything must read as a failure, never as the
             // 0.0.0.0 address that would then reach connect().
             SceNetInAddr addr; addr.s_addr = 0;
-            // Timeout unit is undocumented by the header/SDK reference;
-            // confirmed to be MICROSECONDS, not seconds — hence
-            // 5 * 1000 * 1000 below for a 5s timeout.
+            // Timeout unit is undocumented by the header/SDK reference: it
+            // is MICROSECONDS, not seconds — hence 5 * 1000 * 1000 below
+            // for a 5s timeout.
             int r = sceNetResolverStartNtoa(rid, host, &addr, 5 * 1000 * 1000, 1, 0);
             g_resolveRc = r;   // >= 0 but addr null = resolved without an answer
             sceNetResolverDestroy(rid);

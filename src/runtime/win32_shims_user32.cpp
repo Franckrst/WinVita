@@ -92,9 +92,9 @@ void win32_shims_user32_install(Bridge& br){
     U("FindWindowA",2,[](Cpu&){ return 0u; });
     U("GetDesktopWindow",0,[](Cpu&){ return 0u; });
     U("DestroyWindow",1,[](Cpu&){ return 1u; });
-    // Generic Win32 coverage: not exercised by any guest observed so far,
-    // kept so another Win32 binary already finds it here — standard Win32
-    // arity, honest return, same caution as the rest of this file.
+    // Generic Win32 coverage: no known guest calls this, kept so another
+    // Win32 binary already finds it here — standard arity, honest return,
+    // same caution as the rest of this file.
     U("EnableWindow",2,[](Cpu&){ return 0u; });                 // previous state: the window was not disabled
     U("MessageBeep",1,[](Cpu&){ return 1u; });                  // no audio device
 }

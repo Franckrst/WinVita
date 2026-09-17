@@ -309,7 +309,7 @@ bool Bridge::commit(std::string& err) {
     }
     // Guest stack.
     if (!cpu_->map(stack_base_, stack_size_, nullptr, P_RW)) { err = "stack map failed"; return false; }
-    // Trap window stays UNMAPPED — fetches into it vector to our handler.
+    // Trap window stays UNMAPPED: any fetch into it vectors to the handler below.
     cpu_->set_trap(trap_base_, trap_hi_,
                    [this](Cpu& c, uint32_t va) { return trap_handler(c, va); });
     // Per-slot trap counter (runtime/trapcnt.h): the base is set HERE, at
@@ -431,7 +431,7 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
 #ifdef D2_TLSCOUNT
     ++d2_tls_traps;   // denominator for the emutls count (measurement build)
 #endif
-    // The final-return sentinel: the guest function we invoked has returned.
+    // The final-return sentinel: the invoked guest function has returned.
     if (trap_va == sentinel_) return false;   // stop run
 
     // Find the slot. Trap VAs are allocated 16 bytes apart from trap_base_

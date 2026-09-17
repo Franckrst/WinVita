@@ -50,7 +50,7 @@ void win32_shims_sync_install(Bridge& br){
 
     // PulseEvent: a DELIBERATE infidelity, kept as-is — wakes NO ONE, just
     // leaves the event unsignaled. Real Windows PulseEvent is itself
-    // documented as unreliable; no observed caller depends on it.
+    // documented as unreliable; no caller depends on it.
     K("PulseEvent",1,[](Cpu&c){ const uint32_t h=c.arg(0);
         Waitable* w=wx86_handle_find(h);
         if(w && wx86_is_kind(w,"event")){

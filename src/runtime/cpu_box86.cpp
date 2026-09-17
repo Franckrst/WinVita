@@ -8,7 +8,7 @@
 // Trap mechanism: set_trap() maps the [lo,hi) window and fills every 16-byte
 // slot (the Bridge allocates trap VAs 16 bytes apart, sentinel included) with
 // Box86's "exit" bridge stub: CC 'S' 'C' + 4 zero bytes. The dynarec compiles
-// that to emu->quit=1 + EIP=<slot>; our run() loop detects EIP inside the
+// that to emu->quit=1 + EIP=<slot>; this backend's run() loop detects EIP inside the
 // window, invokes the TrapFn (guest state is at a clean instruction boundary,
 // ESP still pointing at the pushed return address — same contract as the
 // Unicorn fetch-unmapped hook), then resumes at whatever EIP the handler set.
@@ -635,9 +635,9 @@ public:
             // from its cause. Record the span so shim-side derefs can be
             // range-checked (see g_arena_span / arena_check below).
             g_arena_span = (uint32_t)((base + sz > g_mb) ? (base + sz - g_mb) : 0);
-            // Make the alignment waste VISIBLE: this is what we're trying to
-            // eliminate, and without this readout there'd be no way to tell
-            // how much it cost on a given run.
+            // Logs the alignment waste directly: the probe above only
+            // reduces it, so this is the only way to see how much survives
+            // on a given run.
             { char m[152];
                 snprintf(m, sizeof m, "arene: base=%p membase=%p span=%u Mo reserve=%llu Mo perdu-alignement=%u Ko",
                          (void*)base, (void*)g_mb, (unsigned)(g_arena_span>>20),
@@ -685,9 +685,9 @@ public:
     // D2_TLSCOUNT: measurement-only build (never shipped, never the
     // default). Counts t_emu resolutions, i.e. EXACTLY what becomes a
     // __emutls_get_address call on Vita (vitasdk toolchain --disable-tls).
-    // Disassembly confirms a call to reg() or set_reg() counts as exactly
-    // ONE (its 3 static call sites are ALTERNATIVE paths: i<=7, i==8, i==9),
-    // so this counter is a count of emutls calls, not an estimate. It's a
+    // A call to reg() or set_reg() counts as exactly ONE (its 3 static call
+    // sites are ALTERNATIVE paths: i<=7, i==8, i==9), so this counter is a
+    // count of emutls calls, not an estimate. It's a
     // LOWER BOUND on the per-trap total: bridge.cpp's t_* (t_redirect_eip,
     // t_yield_pending) and sched_native's t_cur add to it and are not
     // counted here.

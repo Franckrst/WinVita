@@ -16,7 +16,7 @@
 
 namespace d2rt {
 
-// x86 register indices we care about (subset).
+// Subset of x86 register indices.
 enum Reg {
     R_EAX, R_ECX, R_EDX, R_EBX, R_ESP, R_EBP, R_ESI, R_EDI, R_EIP, R_EFLAGS,
     R_COUNT

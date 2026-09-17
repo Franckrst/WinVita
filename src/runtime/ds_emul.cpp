@@ -140,7 +140,7 @@ std::atomic<unsigned long long> c_created{0}, c_grains{0}, c_famine{0}, c_play{0
     c_resamp{0},     // grains mixed for a voice whose rate != kRate
     // --- actual amplitude sent to the sink ------------------------------------
     // The counters above stay perfect even with a fully-zero g_out: "the mixer
-    // produces silence" and "the port isn't playing" were indistinguishable on
+    // produces silence" and "the port isn't playing" are indistinguishable on
     // console. These four close that gap; published as crete= / rms= in the
     // counters line.
     c_peak{0}, c_peakall{0}, c_sqsum{0}, c_sqn{0},
@@ -360,8 +360,8 @@ void mix_grain(Cpu* c, int frames) {
     // valid for the rest of the function.
     audio::Sink* sk = g_sink.load(std::memory_order_acquire);
     // Third and strongest guard, because it sits at the write site itself.
-    // `c != nullptr` means we're on the guest thread (the audio thread has no
-    // Cpu& and always calls mix_grain(nullptr, …)). A realtime sink writes
+    // `c != nullptr` means this call is on the guest thread (the audio thread
+    // has no Cpu& and always calls mix_grain(nullptr, …)). A realtime sink writes
     // with a blocking call; the guest thread holds the GIL. That combination
     // must never happen, and this guard makes it structurally impossible here
     // rather than relying on callers upstream (frame_pump checking
@@ -660,8 +660,8 @@ uint32_t write_cursor(const Voice& v) {
 // Host-view retry, on the guest thread. The audio thread has no Cpu&, so if
 // `hostptr` failed at CreateSoundBuffer time (arena not yet committed), the
 // voice would stay permanently silent — the mixer has no way to retry since
-// it's always called with c == nullptr. We retry here instead, at the two
-// points the game always passes through before it can hear anything: Lock
+// it's always called with c == nullptr. The retry happens here instead, at the
+// two points the game always passes through before it can hear anything: Lock
 // (where it writes its bytes) and Play. If the retry still fails, the voice
 // is counted in `sansvue=` on the watchdog line, its cursor still advances
 // (so the game sees it finish and reclaims it), and it stays inaudible — a
@@ -712,7 +712,7 @@ uint32_t m_buf_getstatus(Cpu& c) {
     Voice* v = voice_of(c, c.arg(0));
     uint32_t st = 0;
     if (v && v->playing) { st |= 1u; if (v->looping) st |= 4u; }   // PLAYING | LOOPING
-    // Never DSBSTATUS_BUFFERLOST: our buffers never get lost. Reporting it
+    // Never DSBSTATUS_BUFFERLOST: these buffers never get lost. Reporting it
     // would send a game into a busy-poll-with-Sleep loop waiting to restore.
     if (uint32_t p = c.arg(1)) c.write_u32(p, st);
     return DS_OK;
@@ -839,8 +839,8 @@ uint32_t m_buf_restore(Cpu&) { return DS_OK; }
 // shim body, i.e. with the GIL held — chaining blocking sceAudioOutOutput
 // calls there (~23 ms each, up to 43 per frame) would stall the game for up
 // to a second per presented frame. If the thread meant to drive the sink
-// fails to start, we don't degrade — we close the sink and substitute the
-// null sink. The game stays playable and goes silent; that's the only
+// fails to start, there is no degraded mode: the sink is closed and replaced
+// by the null sink. The game stays playable and goes silent; that's the only
 // defensible fallback.
 void open_sink() {
     if (g_sink.load()) return;

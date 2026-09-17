@@ -2,7 +2,7 @@
 //
 // These loops are a direct transcription, not a rewrite: the 4:1 unroll, the
 // memcpy-based row duplication, and the exact operation order all come from
-// console-validated presentation code. Any change here must be verified
+// the existing presentation code. Any change here must be verified
 // against a pixel-identity oracle rather than reasoned about — a single byte
 // difference in this path is visible on screen.
 #include "present_scale.h"

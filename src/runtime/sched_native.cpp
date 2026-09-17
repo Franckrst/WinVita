@@ -400,7 +400,7 @@ uint32_t NativeScheduler::wait_common(Waitable* w, uint32_t timeout_ms, uint32_t
     gil::assert_held();
     GuestThread* t = t_cur;
     // TerminateThread landed while this thread was computing (its shim
-    // marked us Finished from OUTSIDE): never block again — post a redirect
+    // marked this thread Finished from OUTSIDE): never block again — post a redirect
     // so this shim's trap tail sends the thread to the sentinel;
     // finish_thread's already-Finished guard then preserves
     // TerminateThread's exit code.
@@ -447,8 +447,7 @@ uint32_t NativeScheduler::wait_common(Waitable* w, uint32_t timeout_ms, uint32_t
         // (sched_cooperative.cpp wait(): virt_ms_ + (timeout ? timeout : 1)).
         uint32_t ms = timeout_ms ? timeout_ms : 1;
         // CLOCK_REALTIME because pthread_cond_timedwait measures the absolute
-        // deadline against it — confirmed by disassembling the VitaSDK pte
-        // binary:
+        // deadline against it:
         //   glibc (qemu): REALTIME base by default, re-evaluated on every
         //     wakeup — a clock step shifts pending timeouts;
         //   pte (Vita): cond_timedwait -> sem_timedwait -> pte_relmillisecs
@@ -536,8 +535,8 @@ void NativeScheduler::wake_check_all() {
             t->wait_obj = nullptr;      // consumed; wait_common finishes state
             // Pure scheduling latency: from pthread_cond_signal() to the
             // woken thread's EFFECTIVE resumption (once it has reacquired
-            // the GIL). Isolates the half of "signal -> seen" latency that
-            // is ours, as opposed to the guest's own polling cadence.
+            // the GIL). Isolates the scheduler's half of "signal -> seen"
+            // latency, as opposed to the guest's own polling cadence.
             if (d2rt_wakeprof) { n->t_signal_us = wx86_now_us(); ++d2rt_wake_sig; }
             pthread_cond_signal(&n->cv);
         }
@@ -832,12 +831,12 @@ void NativeScheduler::run_guest(GuestThread* t) {
             if (cpu_->take_limit_hit()) {                // stop broadcast landed
                 if (shutdown_) break;                    // shutdown takes priority
                 // Starvation net: a poke from the heartbeat zeroed THIS
-                // thread's budget → one bounded nap per epoch. We are here
+                // thread's budget → one bounded nap per epoch. This runs
                 // INSIDE the gil::Release block above: the nap blocks
                 // outside the GIL by construction (the GIL stays acquirable
                 // by the starved thread). A SPONTANEOUS expiry of the
                 // 0x7FFFFFFF budget falls back to epoch==fam_ack → immediate
-                // resume, identical to today's baseline "spurious resume".
+                // resume, identical to the existing "spurious resume" behavior.
                 uint32_t e = fam_epoch_.load(std::memory_order_relaxed);
                 NT* n = nt(t);
                 if (fam_on_.load(std::memory_order_relaxed) && e != n->fam_ack) {
@@ -853,8 +852,8 @@ void NativeScheduler::run_guest(GuestThread* t) {
             // Clean stop: ONLY a Bridge-sentinel return is a real thread exit
             // (trap_handler returned false at the sentinel slot, EIP == sentinel).
             // An async quit=1 with no marker (another thread's shutdown-grade
-            // request_stop) must not "finish" a live thread: resume unless we
-            // are actually tearing down.
+            // request_stop) must not "finish" a live thread: it resumes
+            // unless shutdown is actually in progress.
             if (cpu_->reg(R_EIP) == br_->sentinel()) break;   // genuine finish
             if (shutdown_) break;
             eip = cpu_->reg(R_EIP); continue;

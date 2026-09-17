@@ -119,7 +119,8 @@ void dyn86_init(void)
     /* D2_JITPROFILE: read ONCE here, so the hot paths test a plain int and
      * never call getenv(). dyn86_init() runs after the Vita env.txt parse
      * (rt_boot main -> d2vita_platform_init -> ... -> CpuBox86 ctor) and
-     * before the first translation, which is exactly the origin we want. */
+     * before the first translation -- the correct origin point for the
+     * profile clock. */
     {
         /* D2_FRAMEPROF (per-frame attribution, rt_boot) reads the SAME counters,
          * so it must arm them too, or its deltas are all zero. */
@@ -186,10 +187,10 @@ void dyn86_request_stop(void)
 }
 
 /* D2_INLINETRAP (inline-translating the CC 'S' 'C' exit stub into a native
- * call, no epilog/prolog round trip) was tried and measured as no faster in
- * practice, with proof the mechanism was fully armed. Do not reintroduce it
- * without a NEW cost model: the one that motivated it -- "every block
- * transition pays a ~283-cycle cache miss" -- no longer holds. */
+ * call, skipping the epilog/prolog round trip) is not faster in practice,
+ * even fully armed. Do not reintroduce it without a new cost model: the
+ * assumption that motivated it -- "every block transition pays a ~283-cycle
+ * cache miss" -- no longer holds. */
 
 static int g_protectdb = 0;     /* see dyn86.h: OFF until a segv handler exists */
 void dyn86_set_protectdb(int on) { g_protectdb = on; }

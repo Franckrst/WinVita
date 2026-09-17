@@ -1,12 +1,13 @@
 // src/runtime/gil.cpp — see gil.h.
 //
-// PTHREAD_MUTEX_INITIALIZER static init is valid on BOTH pthreads we link:
-// glibc (host/qemu checks) and VitaSDK's pte, where pthread_mutex_t is a
-// pointer and the initializer is the sentinel ((pthread_mutex_t)-1) that
-// pthread_mutex_lock lazily materializes via pte_mutex_check_need_init
-// (verified in libpthread.a). custommem.c runs pthread_mutex_init at startup
-// only because it wants an ERRORCHECK attr — not because static init breaks.
-// pte's DEFAULT type is non-recursive, matching the never-nest contract.
+// PTHREAD_MUTEX_INITIALIZER static init is valid for both pthread
+// implementations linked here: glibc (host/qemu checks) and VitaSDK's pte,
+// where pthread_mutex_t is a pointer and the initializer is the sentinel
+// ((pthread_mutex_t)-1) that pthread_mutex_lock lazily materializes via
+// pte_mutex_check_need_init (verified in libpthread.a). custommem.c runs
+// pthread_mutex_init at startup only because it wants an ERRORCHECK attr —
+// not because static init breaks. pte's DEFAULT type is non-recursive,
+// matching the never-nest contract.
 #include "runtime/gil.h"
 #include <cassert>
 #include <atomic>

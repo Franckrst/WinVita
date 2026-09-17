@@ -48,7 +48,7 @@ typedef struct box86context_s {
 #define mutex_trylock(A)    pthread_mutex_trylock(A)
 #define mutex_unlock(A)     pthread_mutex_unlock(A)
 
-extern box86context_t *my_context; // global context
+extern box86context_t *my_context;
 
 static inline int GetTID(void) { return 0; }
 

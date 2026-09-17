@@ -11,8 +11,8 @@
 //
 // Calling-convention note: the shim declares how many dword args it consumes
 // and whether the callee cleans the stack (stdcall) or the caller (cdecl).
-// Most D2/Win32 exports are stdcall; C-runtime-ish ones are cdecl. We default
-// to stdcall for Win32 DLLs and let each shim override.
+// Most D2/Win32 exports are stdcall; C-runtime-ish ones are cdecl. Win32 DLLs
+// default to stdcall, and each shim can override.
 
 #pragma once
 #include "runtime/cpu.h"
@@ -97,7 +97,7 @@ public:
     bool commit(std::string& err);
 
     // Load an extra DLL at RUNTIME (after commit()/link()) — for a guest
-    // LoadLibraryA of a real file we can read from disk (the lockdown
+    // LoadLibraryA of a real file readable from disk (the lockdown
     // CheckRevision.dll that D2 extracts from CheckRevision.mpq during the
     // Battle.net login). Places it in the module region (relocated), maps it
     // into the CPU, and resolves its imports against the already-loaded modules

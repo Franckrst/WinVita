@@ -25,7 +25,7 @@ static int d2ep_pending_mem = 0;
  * followed by the conditional branch that reads them. ARM already has the
  * result in CPSR right after SUBS, yet the translator still spills it into
  * the x86-visible xFlags register, then RECONSTRUCTS it via EOR/ORR to test
- * the condition. We measure the WHOLE pair, since that's what a "SUBS +
+ * the condition. This measures the WHOLE pair, since that's what a "SUBS +
  * Bcond" fusion would replace. */
 static int d2ep_pending_jcc = 0;
 static int d2ep_prev_alu = 0;      /* did the previous instruction set flags */

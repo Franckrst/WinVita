@@ -90,7 +90,7 @@ void x86test_check(x86emu_t* ref, uintptr_t ip) { (void)ref; (void)ip; }
 
 int isRetX87Wrapper(wrapper_t fun) { (void)fun; return 0; }
 
-/* ---- cpuid: minimal 486-class answers ---- */
+/* ---- cpuid: minimal leaf 0/1 answers ---- */
 /* Leaf-1 feature bits, defined ONCE. IsProcessorFeaturePresent
    (win32_shims_kernel32.cpp) derives its answers from these instead of
    choosing its own -- two views of the same CPU that disagree (cpuid
