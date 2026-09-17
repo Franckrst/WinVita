@@ -1,53 +1,51 @@
-# Limites connues / dette technique
+# Known limitations / technical debt
 
-Cette page liste honnêtement ce qui n'est pas fait, plutôt que de le laisser
-découvrir en silence.
+This page honestly lists what isn't done, rather than leaving it to be
+discovered in silence.
 
-!!! note "Elle se vide aussi"
-    Une page de dette ne fait que grossir si personne n'en retire les entrées
-    payées. Chaque chantier terminé doit en supprimer une — une dette déjà réglée
-    qui traîne fait croire à un travail restant.
+!!! note "It shrinks too"
+    A debt page only grows if nobody removes the entries once paid off.
+    Every finished piece of work should remove one — a settled debt left
+    lingering makes it look like work still remains.
 
-## Variables d'environnement : deux noms `D2_*` sans équivalent
+## Environment variables: two `D2_*` names with no equivalent
 
-Le gros du renommage est fait (`1e003e2`, complété par `bc41daf` pour le plan
-mémoire invité) : les réglages génériques s'appellent `WX86_*`, les anciens
-noms `D2_*` (dont `D2ARENA`, `D2HI`, `D2LAYOUT`, `D2MEMBASE`, désormais
-`WX86_ARENA`/`WX86_HI`/`WX86_LAYOUT`/`WX86_MEMBASE`) restent acceptés en
-repli pour ne pas casser les scripts existants.
+Most of the renaming is done (`1e003e2`, completed by `bc41daf` for the
+guest memory layout): the generic settings are named `WX86_*`, and the old
+`D2_*` names (including `D2ARENA`, `D2HI`, `D2LAYOUT`, `D2MEMBASE`, now
+`WX86_ARENA`/`WX86_HI`/`WX86_LAYOUT`/`WX86_MEMBASE`) still work as a
+fallback so as not to break existing scripts.
 
-Deux variables lues par le moteur n'ont **pas** de jumeau `WX86_` :
-`D2_EIPTRAP_N`, `D2_XFERTRACE` — toutes deux dans
-`third_party/box86-dynarec/dynarec/dynarec.c`, du code Box86 vendored et
-patché mécaniquement (voir [Architecture](architecture.md)), volontairement
-laissé intact. Deux autres n'ont aucun préfixe du tout (`THREADLOG`,
-`TRAPTAG`), ce qui est un risque de collision avec l'environnement d'un
-consommateur.
+Two variables read by the engine have **no** `WX86_` twin: `D2_EIPTRAP_N`,
+`D2_XFERTRACE` — both in `third_party/box86-dynarec/dynarec/dynarec.c`,
+vendored, mechanically-patched Box86 code (see
+[Architecture](architecture.md)), deliberately left untouched. Two others
+have no prefix at all (`THREADLOG`, `TRAPTAG`), which is a collision risk
+with a consumer's own environment.
 
-C'est un problème de **nom**, pas de couplage : leur comportement est
-entièrement générique. Mais ça induit en erreur quelqu'un qui chercherait un
-lien avec le jeu d'origine là où il n'y en a pas.
+This is a **naming** problem, not a coupling one: their behavior is
+entirely generic. But it can mislead someone looking for a tie to the
+original game where none exists.
 
-## La présentation écran — jamais auditée
+## On-screen presentation — never audited
 
-`vita_present.cpp` (présentation à l'écran) n'a jamais été relu pour en extraire
-une éventuelle partie générique. C'est le dernier gros morceau où personne n'a
-regardé — l'inconnue n'est donc pas « combien est générique », c'est « on ne
-sait pas ».
+`vita_present.cpp` (on-screen presentation) has never been reviewed to
+extract a possibly-generic part. It's the last big chunk nobody has looked
+at — so the unknown isn't "how much is generic," it's "we don't know."
 
-## Chemin personnel en dur dans deux scripts
+## Hardcoded personal path in two scripts
 
-`tools/regen_box86_patch.sh` et `tools/extract_box86.sh` ont
-`/home/doudou/repos/box86` comme valeur par défaut du dépôt Box86 amont. C'est
-surchargeable en premier argument, donc sans conséquence fonctionnelle, mais
-c'est un chemin personnel dans un dépôt destiné à être lisible par d'autres.
+`tools/regen_box86_patch.sh` and `tools/extract_box86.sh` default to
+`/home/doudou/repos/box86` for the upstream Box86 repository. It's
+overridable as the first argument, so there's no functional consequence,
+but it's a personal path in a repository meant to be readable by others.
 
-## Une seule preuve d'usage
+## A single proof of use
 
-winx86 n'a qu'un consommateur réel à ce jour. Tout ce qui est déclaré
-« générique » l'est par audit du code, pas par la preuve d'un deuxième portage
-qui s'en sert — à une exception près, la technique de comparaison entre deux
-portages décrite dans [Outils IA](outils-ia.md).
+winx86 has only one real consumer so far. Everything declared "generic" is
+so by code audit, not by the proof of a second port actually using it —
+with one exception, the cross-port comparison technique described in [AI
+tooling](outils-ia.md).
 
-C'est la limite la plus honnête de ce dépôt : la frontière a été tracée avec
-soin, mais elle n'a pas encore été tirée par un second usage.
+This is the repository's most honest limit: the boundary was drawn with
+care, but it hasn't yet been pulled on by a second use.

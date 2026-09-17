@@ -1,55 +1,53 @@
-# Lexique
+# Lexicon
 
-Termes du moteur générique. Pour les termes spécifiques à un portage
-particulier (Diablo II, MPQ, Battle.net...), voir le lexique du portage
-concerné — celui de
-[d2vita](https://d2-vita-bb378b.gitlab.io/lexique/) par exemple.
+Generic-engine terms. For terms specific to a particular port (Diablo II,
+MPQ, Battle.net...), see that port's own lexicon — for instance
+[d2vita's](https://franckrst.github.io/D2Vita/lexique/).
 
-**PE32** — format binaire des exécutables et DLL Windows 32 bits
-(*Portable Executable*). Ce que `PeImage` charge.
+**PE32** — the binary format of 32-bit Windows executables and DLLs
+(*Portable Executable*). What `PeImage` loads.
 
-**RVA** — *Relative Virtual Address*, adresse relative à la base de
-chargement d'un module PE. La plupart des adresses citées dans un hook natif
-sont des RVA (`base_du_module + 0x...`), pas des adresses absolues.
+**RVA** — *Relative Virtual Address*, an address relative to a PE module's
+load base. Most addresses cited in a native hook are RVAs
+(`module_base + 0x...`), not absolute addresses.
 
-**Dynarec** — *dynamic recompiler/translator* : traduit du code machine x86
-vers du code ARM au moment de l'exécution, par blocs, avec mise en cache des
-blocs déjà traduits (contrairement à un interprète qui réinterprète chaque
-instruction à chaque passage, ou à une compilation statique complète en
-amont).
+**Dynarec** — *dynamic recompiler/translator*: translates x86 machine code
+to ARM code at execution time, block by block, caching already-translated
+blocks (unlike an interpreter, which reinterprets every instruction on
+every pass, or full ahead-of-time static compilation).
 
-**Shim** — implémentation native fournie en remplacement d'une fonction
-Windows importée (ex: `KERNEL32.dll!GetVersion`), enregistrée via
+**Shim** — a native implementation provided in place of an imported
+Windows function (e.g. `KERNEL32.dll!GetVersion`), registered via
 `Bridge::register_shim`.
 
-**Trap** — mécanisme par lequel le dynarec s'arrête et rend la main au code
-natif hôte à une adresse donnée, plutôt que de continuer à traduire/exécuter
-du code invité. `Bridge::shim_trap` obtient l'adresse de trap associée à un
-shim enregistré.
+**Trap** — the mechanism by which the dynarec stops and hands control back
+to native host code at a given address, instead of continuing to
+translate/execute guest code. `Bridge::shim_trap` gets the trap address
+associated with a registered shim.
 
-**`set_alternate`** — voir [Point d'extension](extension.md) :
-redirige l'exécution d'une adresse invité (toujours une entrée de fonction)
-vers une autre.
+**`set_alternate`** — see [Extension point](extension.md): redirects
+execution from a guest address (always a function entry point) to
+another.
 
-**Hook natif de point chaud** — un shim posé via `set_alternate` sur une
-fonction du jeu (pas une vraie API Windows) dans un but de performance ou de
-diagnostic, généralement avec un repli fidèle vers le code original.
+**Native hot-path hook** — a shim placed via `set_alternate` on a game
+function (not a real Windows API) for performance or diagnostic purposes,
+usually with a faithful fallback to the original code.
 
-**Repli fidèle** — dans un hook, rejouer manuellement l'effet du prologue
-original de la fonction interceptée (ex: `push ebp`) avant de reprendre
-l'exécution, pour que le hook soit transparent quand il n'a rien à changer
-au comportement.
+**Faithful fallback** — in a hook, manually replaying the effect of the
+intercepted function's original prologue (e.g. `push ebp`) before
+resuming execution, so the hook is transparent when it has nothing to
+change about the behavior.
 
-**GIL** — *Global Interpreter Lock*, verrou global sérialisant l'accès au
-dynarec entre plusieurs fils natifs (à la manière du GIL de CPython) —
-nécessaire car le dynarec n'est pas thread-safe par construction.
+**GIL** — *Global Interpreter Lock*, a global lock serializing access to
+the dynarec across multiple native threads (CPython-GIL style) —
+necessary because the dynarec isn't thread-safe by construction.
 
-**Code auto-modifiant (SMC)** — code qui écrit dans sa propre mémoire de
-code pendant l'exécution. Nécessite d'invalider ou de détruire les blocs
-déjà traduits pour cette plage d'adresses (`Cpu::invalidate_code`/
+**Self-modifying code (SMC)** — code that writes into its own code memory
+during execution. Requires invalidating or destroying the already-
+translated blocks for that address range (`Cpu::invalidate_code`/
 `discard_code`).
 
-**COM (vtable)** — modèle de composants Windows où un objet est exposé par
-une table de pointeurs de fonctions (*vtable*). `src/runtime/ds_emul.cpp`
-(au moteur) fabrique une vtable COM DirectSound entièrement à partir d'une
-table de shims, sans vraie classe C++ sous-jacente.
+**COM (vtable)** — the Windows component model where an object is exposed
+through a table of function pointers (*vtable*). `src/runtime/ds_emul.cpp`
+(in the engine) builds a COM DirectSound vtable entirely from a shim
+table, with no real underlying C++ class.

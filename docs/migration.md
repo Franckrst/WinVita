@@ -1,65 +1,64 @@
-# Migrer un portage existant vers le moteur
+# Migrating an existing port onto the engine
 
-[Point d'extension](extension.md) explique comment démarrer un portage **neuf**
-sur winx86. Ce document traite le cas inverse, et plus fréquent : un portage qui
-existe déjà, qui a son propre runtime Win32 complet, et qui doit **cesser de
-dupliquer** ce que le moteur possède désormais.
+[Extension point](extension.md) explains how to start a **new** port on
+winx86. This document covers the opposite, more frequent case: a port
+that already exists, that has its own complete Win32 runtime, and that
+needs to **stop duplicating** what the engine now owns.
 
-C'est le cas de tout portage né par copie d'un autre — la façon la plus rapide
-d'en démarrer un, et celle qui produit deux bases qui divergent ensuite.
+This is the case for any port born by copying another — the fastest way
+to start one, and the one that produces two codebases that then diverge.
 
-!!! abstract "Le principe directeur"
-    **Chaque endroit où un second portage bascule sur le code du moteur est une
-    preuve de généricité. Chaque endroit où il ne peut pas est un défaut de
-    conception trouvé gratuitement.**
+!!! abstract "The guiding principle"
+    **Every place where a second port switches over to the engine's code
+    is proof of genericity. Every place where it can't is a design flaw
+    found for free.**
 
-    Un moteur n'est pas prouvé générique parce qu'on l'a conçu générique. Il
-    l'est quand un deuxième consommateur s'en sert réellement. Tant que ce n'est
-    pas fait, le moteur contient une *copie* du code qui vit aussi dans les deux
-    portages : trois exemplaires au lieu de deux, ce qui est pire que le point
-    de départ.
+    An engine isn't proven generic because it was designed that way. It is
+    when a second consumer actually uses it. Until that happens, the
+    engine holds a *copy* of code that also lives in both ports: three
+    copies instead of two, which is worse than the starting point.
 
-## État des lieux, chiffré
+## State of play, with numbers
 
-Tous les chiffres ci-dessous sont relevés sur l'arbre, pas estimés.
+Every number below is measured on the tree, not estimated.
 
-### Ce que le moteur possède
+### What the engine owns
 
 | | |
 |---|---:|
-| Sources du moteur (`src/`) | 17 723 lignes |
-| Inscriptions de shims Win32 | 362 |
-| DLL couvertes (au moins partiellement) | 14 |
-| Unités d'installation (`win32_shims_*_install`) | 14 |
+| Engine sources (`src/`) | 17,723 lines |
+| Win32 shim registrations | 362 |
+| DLLs covered (at least partially) | 14 |
+| Install units (`win32_shims_*_install`) | 14 |
 
-Au-delà des shims, le moteur possède les briques transverses qu'un portage
-écrivait autrefois lui-même :
+Beyond the shims, the engine owns the cross-cutting building blocks a port
+used to write for itself:
 
-| brique | fichier | ce qu'elle remplace chez le portage |
+| block | file | what it replaces on the port side |
 |---|---|---|
-| allocateur de brouillon invité | `runtime/guest_scratch` | un `misc()` / `put_cstr` local |
-| allocateur de régions | `runtime/guest_region` | un `RegionAlloc` local |
-| contexte de thread courant | `runtime/guest_thread_ctx` | l'accès au TIB et à la dernière erreur |
-| atomiques invitées | `runtime/guest_atomics` | les `Interlocked*` et leur contrat SMC |
-| objets noyau + table de handles | `runtime/guest_sync` | `KEvent`/`KSemaphore`/`KThread`/`KCrit`, `g_handles` |
-| couche socket + observateur + route | `runtime/win32_shims_wsock32` | la pile réseau et son instrumentation |
-| couture graphique | `render/render.h`, `render/render_null.cpp` | le dos-d'âne vers le GPU et le backend de comptage |
-| mise à l'échelle de présentation | `platform/present_scale` | le `scale+flip` et le cadrage proportionnel |
-| puits audio | `runtime/audio_sink`, `platform/vita_audio` | le trio null / WAV / console |
+| guest scratch allocator | `runtime/guest_scratch` | a local `misc()` / `put_cstr` |
+| region allocator | `runtime/guest_region` | a local `RegionAlloc` |
+| current thread context | `runtime/guest_thread_ctx` | TIB access and last-error |
+| guest atomics | `runtime/guest_atomics` | the `Interlocked*` family and their SMC contract |
+| kernel objects + handle table | `runtime/guest_sync` | `KEvent`/`KSemaphore`/`KThread`/`KCrit`, `g_handles` |
+| socket layer + observer + route | `runtime/win32_shims_wsock32` | the network stack and its instrumentation |
+| graphics glue | `render/render.h`, `render/render_null.cpp` | the bridge to the GPU and the counting backend |
+| presentation scaling | `platform/present_scale` | the `scale+flip` and proportional framing |
+| audio sink | `runtime/audio_sink`, `platform/vita_audio` | the null / WAV / console trio |
 
-### Ce qu'un portage garde aujourd'hui
+### What a port keeps today
 
-Relevé sur le premier portage, dont la liste de shims est
-[générée depuis les sources](shims.md) des deux côtés :
+Measured on the first port, whose shim list is [generated from the
+sources](shims.md) on both sides:
 
-| | Clés | Part |
+| | Keys | Share |
 |---|---:|---:|
-| servies par le moteur | 362 | 55 % |
-| servies par le portage | 294 | 45 % |
+| served by the engine | 362 | 55% |
+| served by the port | 294 | 45% |
 
-La répartition par DLL dit où se trouve le travail restant :
+The breakdown by DLL shows where the remaining work sits:
 
-| DLL | total | moteur | portage |
+| DLL | total | engine | port |
 |---|---:|---:|---:|
 | `KERNEL32.dll` | 252 | 137 | 115 |
 | `USER32.dll` | 92 | 56 | 36 |
@@ -67,432 +66,432 @@ La répartition par DLL dit où se trouve le travail restant :
 | `GDI32.dll` | 41 | 36 | 5 |
 | `WSOCK32.dll` / `WS2_32.dll` | 62 | 58 | 4 |
 
-Les DLL absentes de cette table (`glide3x`, `native.hook`, `CRYPT32`, et les
-DLL propres au jeu) sont **entièrement** côté portage, et c'est normal : elles
-portent l'API du jeu, pas celle de Windows.
+DLLs absent from this table (`glide3x`, `native.hook`, `CRYPT32`, and
+game-specific DLLs) are **entirely** on the port side, and that's
+expected: they carry the game's own API, not Windows'.
 
-## Le cas concret : le second portage
+## The concrete case: the second port
 
-Le second portage de cette base — un jeu 3D, là où le premier rend en 2D
-palettisée — descend du même socle : son historique montre des commits qui
-*retirent* le premier jeu plutôt que d'écrire un runtime neuf. C'est ce qui rend
-la comparaison si informative : **quelqu'un a déjà fait le tri « qu'est-ce qui
-est propre au premier jeu ? » et l'a enlevé. Ce qui a survécu des deux côtés
-n'est pas du jeu.**
+This base's second port — a 3D game, where the first renders in paletted
+2D — descends from the same foundation: its history shows commits that
+*remove* the first game rather than write a new runtime. That's what makes
+the comparison so informative: **someone has already sorted "what's
+specific to the first game?" and removed it. What survived on both sides
+is not the game.**
 
-### Ce qu'il duplique
+### What it duplicates
 
-| fichier | lignes | inscriptions |
+| file | lines | registrations |
 |---|---:|---:|
-| `src/win32/shims_misc.cpp` | 1 471 | 252 |
-| `src/win32/shims_kernel32.cpp` | 1 549 | 176 |
+| `src/win32/shims_misc.cpp` | 1,471 | 252 |
+| `src/win32/shims_kernel32.cpp` | 1,549 | 176 |
 | `src/win32/shims_user32.cpp` | 730 | 94 |
 | `src/win32/shims_gdi32.cpp` | 468 | 37 |
 | `src/win32/shims_audio.cpp` | 384 | 10 |
 | `src/win32/shims_carnivores.cpp` | 146 | 7 |
 
-Soit environ **576 inscriptions**, face aux 362 que le moteur fournit.
+That's roughly **576 registrations**, against the 362 the engine
+provides.
 
-Plus, hors shims : son propre `RegionAlloc` (`src/win32/rt_internals.h`), son
-propre `misc()` et `put_cstr` (`tools/rt_boot.cpp`), ses propres objets noyau et
-sa propre table de handles, son propre `do_scale_and_flip`, son propre backend
-de comptage, sa propre couche de puits audio.
+Plus, outside shims: its own `RegionAlloc` (`src/win32/rt_internals.h`),
+its own `misc()` and `put_cstr` (`tools/rt_boot.cpp`), its own kernel
+objects and its own handle table, its own `do_scale_and_flip`, its own
+counting backend, its own audio sink layer.
 
-### À quel point c'est la même chose
+### How much of it is the same thing
 
-Mesuré, en normalisant espaces et commentaires :
+Measured, normalizing whitespace and comments:
 
-| objet | verdict |
+| object | verdict |
 |---|---|
-| `KEvent` ↔ `WxEvent` | **identique** (245 caractères de part et d'autre) |
-| `KSemaphore` ↔ `WxSemaphore` | **identique** (219 caractères) |
-| `KThread` ↔ `WxThread` | **identique** (259 caractères) |
-| `KCrit` ↔ `WxCrit` | identique **au style de déclaration près** (`uint32_t va=0; uint32_t owner=0;` contre `uint32_t va=0, owner=0;`) |
-| `KMultiWait` ↔ `WxMultiWait` | **identique à la ligne près** (28 lignes de part et d'autre) |
-| `KIocp` ↔ `WxIocp` | **identique à la ligne près** (16 lignes) |
+| `KEvent` ↔ `WxEvent` | **identical** (245 characters on both sides) |
+| `KSemaphore` ↔ `WxSemaphore` | **identical** (219 characters) |
+| `KThread` ↔ `WxThread` | **identical** (259 characters) |
+| `KCrit` ↔ `WxCrit` | identical **except for declaration style** (`uint32_t va=0; uint32_t owner=0;` vs. `uint32_t va=0, owner=0;`) |
+| `KMultiWait` ↔ `WxMultiWait` | **identical line for line** (28 lines on both sides) |
+| `KIocp` ↔ `WxIocp` | **identical line for line** (16 lines) |
 
-Six objets noyau, dont cinq rigoureusement identiques et le sixième séparé par
-un point-virgule. Ce n'est pas une convergence heureuse : c'est le même code,
-recopié puis laissé diverger cosmétiquement.
+Six kernel objects, five of them rigorously identical and the sixth
+separated by a semicolon. This isn't a happy convergence: it's the same
+code, copied and then left to drift cosmetically.
 
-!!! danger "Citer une preuve ne remplace pas livrer l'objet"
-    Le moteur n'a longtemps fourni que **4** de ces 6 types — alors que
-    l'en-tête de `guest_sync.h` citait déjà l'invariant d'atomicité de
-    `WxMultiWait` comme *preuve* que ces structures sont génériques. La preuve
-    était là, l'objet non, et les deux portages continuaient de l'écrire.
+!!! danger "Citing evidence doesn't replace shipping the object"
+    The engine long provided only **4** of these 6 types — while
+    `guest_sync.h`'s own header already cited `WxMultiWait`'s atomicity
+    invariant as *proof* that these structures are generic. The proof was
+    there, the object wasn't, and both ports kept writing it.
 
-    Défaut trouvé en migrant le second portage, corrigé depuis. C'est
-    exactement ce que le principe directeur annonce : **ce qu'un second
-    consommateur ne peut pas reprendre désigne un défaut du moteur.**
+    Found while migrating the second port, fixed since. This is exactly
+    what the guiding principle predicts: **what a second consumer can't
+    reuse names an engine flaw.**
 
-### Ce qui est déjà fait
+### What's already done
 
-La première vague a eu lieu, et elle valide la méthode.
+The first wave has already happened, and it validates the method.
 
-Le moteur avait dédoublonné KERNEL32 **contre** le second portage, sur un
-critère à deux conditions : corps identique hors commentaires et espaces, **et**
-aucune dépendance extérieure (pas d'état partagé, pas d'ordonnanceur, pas
-d'horloge). 46 shims satisfaisaient les deux. Le second portage a ensuite
-re-vérifié ces 46 un par un chez lui, puis les a retirés au profit de
+The engine had deduplicated KERNEL32 **against** the second port, on a
+two-condition criterion: identical body once comments and whitespace are
+stripped, **and** no external dependency (no shared state, no scheduler,
+no clock). 46 shims satisfied both. The second port then re-verified those
+46 one by one on its own side, then removed them in favor of
 `win32_shims_kernel32_install(br)`.
 
-Le détail d'ordonnancement mérite d'être copié :
+The ordering detail is worth copying:
 
 ```cpp
-win32_shims_kernel32_install(br);   // d'abord le moteur
-register_kernel32(br);              // puis les siens, qui gagnent
+win32_shims_kernel32_install(br);   // engine first
+register_kernel32(br);              // then its own, which win
 ```
 
-Les ~15 shims KERNEL32 que le moteur fournit **en plus** (les `Interlocked*`,
-`GetLastError`/`SetLastError`) dépendent d'un point d'extension — TIB courant et
-ordonnanceur — que ce portage ne branche pas encore. Ils restent donc chez lui,
-et comme sa propre inscription passe **après**, elle les écrase sans effet de
-bord. La règle « la dernière inscription gagne » n'est pas seulement un piège :
-utilisée délibérément, c'est le mécanisme qui rend une migration progressive
-sûre.
+The ~15 KERNEL32 shims the engine provides **on top** (the `Interlocked*`,
+`GetLastError`/`SetLastError`) depend on an extension point — current TIB
+and scheduler — that this port doesn't wire up yet. So they stay on its
+side, and since its own registration comes **after**, it overwrites them
+with no side effect. The "last registration wins" rule isn't just a trap:
+used deliberately, it's the mechanism that makes a gradual migration safe.
 
-## La règle de découpe : trois catégories, pas deux
+## The split rule: three categories, not two
 
-C'est le point où presque tout le monde se trompe, et l'erreur coûte cher parce
-qu'elle laisse du code générique du mauvais côté pour toujours.
+This is where almost everyone gets it wrong, and the mistake is expensive
+because it leaves generic code on the wrong side forever.
 
-| catégorie | critère | destination |
+| category | criterion | destination |
 |---|---|---|
-| **générique** | aucun littéral, branche ou dépendance d'état propre à un jeu | le **moteur** |
-| **propre au jeu** | un littéral en dur, une dépendance à l'état du jeu, un contournement, une adresse de son binaire | le **portage** |
-| **propre à la console** | dépend du matériel cible, pas du jeu | le **moteur** |
+| **generic** | no literal, branch, or state dependency specific to a game | the **engine** |
+| **game-specific** | a hardcoded literal, a dependency on game state, a workaround, an address from its own binary | the **port** |
+| **console-specific** | depends on the target hardware, not the game | the **engine** |
 
-!!! warning "La troisième catégorie est celle qu'on classe de travers"
-    Le moteur cible la PS Vita. Donc le GPU de la console, son audio, ses cœurs,
-    son horloge monotone, son journal de démarrage, la lecture de son pad :
-    **tout cela appartient au moteur**, même si ça ne ressemble pas à du Win32.
+!!! warning "The third category is the one that gets misfiled"
+    The engine targets PS Vita. So the console's GPU, its audio, its
+    cores, its monotonic clock, its boot log, reading its pad: **all of
+    that belongs to the engine**, even though it doesn't look like Win32.
 
-    Rangé dans « propre au jeu » parce que ça ne ressemble pas à de l'émulation,
-    ce code reste côté portage et chaque nouveau portage le réécrit.
+    Filed under "game-specific" because it doesn't look like emulation,
+    this code stays on the port side and every new port rewrites it.
 
-Le contre-exemple qui fixe la frontière, tiré des entrées :
+The counter-example that fixes the boundary, drawn from inputs:
 
-- la table qui associe *ce bouton* à *cette action du jeu* (une touche, un clic,
-  un raccourci d'inventaire) est **propre au jeu** — ces codes ne veulent rien
-  dire pour un autre titre, et les deux portages ont bien deux tables
-  différentes ;
-- la **lecture** du pad, le curseur virtuel, l'orbite, la sensibilité, la zone
-  morte, les seuils d'appui bref sont **propres à la console** : les deux
-  portages en ont besoin à l'identique.
+- the table mapping *this button* to *this game action* (a key, a click,
+  an inventory shortcut) is **game-specific** — those codes mean nothing
+  for another title, and both ports do have two different tables;
+- **reading** the pad, the virtual cursor, the orbit, the sensitivity, the
+  dead zone, the short-press thresholds are **console-specific**: both
+  ports need them identically.
 
-La bonne découpe est donc : le moteur lit le pad et gère le curseur, le portage
-fournit la table de correspondance.
+So the right split is: the engine reads the pad and manages the cursor,
+the port provides the mapping table.
 
-## L'ordre de migration, par vagues
+## The migration order, wave by wave
 
-Du plus sûr au plus risqué. Chaque vague dit ce qu'elle remplace, ce qu'elle
-**prouve**, et comment on la valide.
+Safest to riskiest. Each wave states what it replaces, what it **proves**,
+and how it's validated.
 
-### Vague 1 — les shims sans dépendance *(faite sur le second portage)*
+### Wave 1 — dependency-free shims *(done on the second port)*
 
-**Remplace** : les shims dont le corps est identique et qui ne dépendent
-d'aucun symbole extérieur.
-**Prouve** : que le critère à deux conditions est opérationnel, et que
-l'ordonnancement « moteur d'abord, portage ensuite » est sûr.
-**Valide** : recompte des inscriptions, build des deux cibles, un run réel du
-jeu sous émulation ARM.
+**Replaces**: shims whose body is identical and that depend on no external
+symbol.
+**Proves**: that the two-condition criterion is operational, and that
+"engine first, port second" ordering is safe.
+**Validates**: recount registrations, build both targets, a real game run
+under ARM emulation.
 
-Commencer ici n'est pas une précaution excessive : c'est la vague qui installe
-le mécanisme. Tout le reste en dépend.
+Starting here isn't excessive caution: it's the wave that installs the
+mechanism. Everything else depends on it.
 
-### Vague 2 — les allocateurs
+### Wave 2 — the allocators
 
-**Remplace** : `misc()` / `put_cstr` par `runtime/guest_scratch`, le
-`RegionAlloc` local par `runtime/guest_region`.
-**Prouve** : que le moteur sait posséder de l'**état** du portage, pas seulement
-des fonctions pures. C'est le premier vrai transfert de propriété.
-**Valide** : aucun jumeau ne doit rester (voir le piège n°1) ; l'épuisement doit
-être rapporté par le portage via le rappel que le moteur expose.
+**Replaces**: `misc()` / `put_cstr` with `runtime/guest_scratch`, the local
+`RegionAlloc` with `runtime/guest_region`.
+**Proves**: that the engine can own **state** from the port, not just pure
+functions. This is the first real transfer of ownership.
+**Validates**: no twin should remain (see pitfall #1); exhaustion must be
+reported by the port through the callback the engine exposes.
 
-Le moteur possède l'allocateur ; le portage lui concède une plage, parce que le
-plan mémoire, lui, n'a rien d'universel. Noter que le moteur a **généralisé**
-plutôt que recopié : la classe `GuestRegion` est l'algorithme du portage avec le
-rapport d'échec transformé en rappel. Ce n'est donc pas un `#include` à la place
-d'une définition, c'est une petite adaptation d'appelants.
+The engine owns the allocator; the port grants it a range, because the
+memory layout itself has nothing universal about it. Note that the engine
+**generalized** rather than copied: the `GuestRegion` class is the port's
+own algorithm with the failure report turned into a callback. So this
+isn't an `#include` in place of a definition, it's a small adaptation of
+callers.
 
-### Vague 3 — les objets noyau et la table de handles
+### Wave 3 — kernel objects and the handle table
 
-**Remplace** : `KEvent`/`KSemaphore`/`KThread`/`KCrit`, `g_handles`, le compteur
-d'identifiants, la carte des sections critiques, par `runtime/guest_sync`.
-**Prouve** : que la sémantique Win32 la plus subtile — celle qui a coûté un
-interblocage réel à mettre au point — est réellement partagée.
-**Valide** : **obligatoirement sous charge réelle**, pas au démarrage. Une
-régression de synchronisation est une famine ou un interblocage, et un
-démarrage vert ne prouve rien.
+**Replaces**: `KEvent`/`KSemaphore`/`KThread`/`KCrit`, `g_handles`, the ID
+counter, the critical-section map, with `runtime/guest_sync`.
+**Proves**: that the subtlest Win32 semantics — the kind that cost a real
+deadlock to debug — is genuinely shared.
+**Validates**: **mandatorily under real load**, not at startup. A
+synchronization regression is starvation or a deadlock, and a green
+startup proves nothing.
 
-Un bon témoin *positif* : en fin de passe, des fils doivent être **bloqués sur
-des objets noyau**. Un fil ne peut se bloquer que si la recherche de son handle
-a réussi — quand un handle est inconnu, le code rend la main immédiatement. Des
-fils bloqués prouvent donc que la table résout correctement, là où « aucune
-erreur » ne prouve rien.
+A good *positive* witness: by the end of the pass, some threads should be
+**blocked on kernel objects**. A thread can only block if its handle
+lookup succeeded — when a handle is unknown, the code returns immediately.
+Blocked threads therefore prove the table resolves correctly, where "no
+error" proves nothing.
 
-Le portage garde son instrumentation : il l'enregistre sur l'observateur
-(`wx86_sync_set_observer`), un seul point, et dispatche en interne. Le moteur
-raconte, il ne demande jamais d'avis.
+The port keeps its instrumentation: it registers it on the observer
+(`wx86_sync_set_observer`), a single point, and dispatches internally. The
+engine reports, it never asks for an opinion.
 
-!!! warning "Vérifier d'abord que le jeu utilise réellement ces objets"
-    Sur le second portage, cette vague a été faite et **l'oracle du dépôt ne
-    la voit pas** — non par défaut de l'oracle, mais parce que le jeu ne prend
-    jamais ce chemin : son renderer n'importe **aucune** fonction de
-    synchronisation, et son exécutable principal une seule
+!!! warning "Check first that the game actually uses these objects"
+    On the second port, this wave was done and **the repository's oracle
+    doesn't see it** — not because the oracle is flawed, but because the
+    game never takes this path: its renderer imports **no**
+    synchronization function, and its main executable only one
     (`WaitForSingleObject`).
 
-    Prouvé en trois temps, pas supposé : une faute injectée dans
-    `wx86_handle_find` ne change rien au verdict ; des sondes sur
-    `handle_add`/`handle_find`/`crit_for` ne tirent aucune fois ; et leur
-    présence dans le binaire est vérifiée par `strings`, donc ce silence n'est
-    pas celui d'une sonde absente.
+    Proven in three steps, not assumed: a fault injected into
+    `wx86_handle_find` changes nothing about the verdict; probes on
+    `handle_add`/`handle_find`/`crit_for` never fire; and their presence
+    in the binary is verified with `strings`, so this silence isn't that
+    of a missing probe.
 
-    Conséquence pratique : pour un tel portage, ces structures sont du **poids
-    mort hérité** et non un besoin vivant. La migration reste bonne (elle
-    supprime une duplication et aligne sur du code validé ailleurs), mais elle
-    doit être annoncée comme *non validée par ce portage* — et la charge
-    réelle demandée ci-dessus est à obtenir auprès d'un portage qui exerce
-    vraiment la synchronisation. Ne pas maquiller un chemin non exercé en
-    validation verte.
+    Practical consequence: for such a port, these structures are
+    **inherited dead weight**, not a live need. The migration is still
+    good (it removes a duplication and aligns with code validated
+    elsewhere), but it must be reported as *not validated by this port*
+    — and the real load requested above should come from a port that
+    genuinely exercises synchronization. Don't dress up an unexercised
+    path as a green validation.
 
-### Vague 4 — la présentation et la couture graphique
+### Wave 4 — presentation and graphics glue
 
-**Remplace** : le `scale+flip` local par `platform/present_scale`
-(`scale_blit` + `fit_rect`), le backend de comptage local par
-`render/render_null.cpp`, les types de sommet et de lot par ceux de
+**Replaces**: the local `scale+flip` with `platform/present_scale`
+(`scale_blit` + `fit_rect`), the local counting backend with
+`render/render_null.cpp`, its own vertex and batch types with those from
 `render/render.h`.
-**Prouve** : que la couche la plus sensible aux performances tient sans coût.
-**Valide** : identité d'image **sur matériel**, et coût mesuré.
+**Proves**: that the most performance-sensitive layer holds with no cost.
+**Validates**: pixel identity **on hardware**, and a measured cost.
 
-!!! danger "Le piège de cette vague"
-    Le fichier de présentation n'est souvent compilé **que sur la console** — ni
-    sur bureau, ni sous émulation. L'oracle d'identité d'image habituel ne peut
-    donc pas l'exercer, et c'est exactement pour ça que ce code n'est jamais
-    touché.
+!!! danger "This wave's trap"
+    The presentation file is often compiled **only on console** — neither
+    on desktop nor under emulation. The usual pixel-identity oracle can't
+    exercise it, and that's exactly why this code never gets touched.
 
-    La parade employée : un auto-contrôle qui embarque une transcription fidèle
-    de la boucle d'origine et compare les sorties **octet pour octet**,
-    exécutable sur bureau (`tools/present_scale_selftest.cpp`). Puis on prouve
-    que l'oracle **coupe**, en injectant une faute d'un seul bit.
+    The workaround used: a self-check that embeds a faithful transcript
+    of the original loop and compares outputs **byte for byte**, runnable
+    on desktop (`tools/present_scale_selftest.cpp`). Then prove the oracle
+    **cuts**, by injecting a single-bit fault.
 
-    Mesure de référence sur console : image identique sur 400 images, coût
-    **+0,12 %** — dans le bruit.
+    Reference measurement on console: identical image over 400 frames,
+    cost **+0.12%** — within the noise.
 
-Le second portage n'a **pas** un remplacement direct ici : son backend de
-comptage est un bouchon vide (35 lignes) dans son propre espace de noms, avec
-ses propres types, là où celui du moteur compte réellement (82 lignes). La
-migration est une adaptation de types, pas une suppression. Son redimensionneur,
-en revanche, est le **sur-ensemble** dont le moteur a tiré `fit_rect` : son
-cadrage proportionnel est déjà ce que la fonction générique implémente.
+The second port has **no** direct replacement here: its counting backend
+is an empty stub (35 lines) in its own namespace, with its own types,
+where the engine's actually counts (82 lines). The migration is a type
+adaptation, not a removal. Its resizer, on the other hand, is the
+**superset** the engine's `fit_rect` was drawn from: its proportional
+framing is already what the generic function implements.
 
-#### Ce que la vague 4 a réellement donné sur le second portage (2026-09-12)
+#### What wave 4 actually delivered on the second port (2026-09-12)
 
-La présentation a migré ; la couture graphique, non. Les deux moitiés sont
-également instructives.
+Presentation migrated; graphics glue did not. Both halves are equally
+instructive.
 
-**Trois défauts du moteur, tous corrigés en amont, aucun visible depuis le
-premier consommateur seul :**
+**Three engine flaws, all fixed upstream, none visible from the first
+consumer alone:**
 
-1. **`present_scale` ne connaissait que deux formats de pixel** — et son
-   en-tête affirmait que c'étaient « les deux seuls que les DIB Windows des
-   portages présentent aujourd'hui ». Le second portage présente du **16 bits
-   5-5-5**, sur son chemin par **défaut**. Une liste écrite depuis un seul
-   appelant décrit cet appelant, pas le domaine.
-2. **`platform/vita_audio.cpp` appelait trois symboles FAIBLES du premier
-   portage** (`d2vita_progress_c`, `d2vita_pin_self_c`,
-   `d2vita_core_register_c`) pour trois services que `platform/vita_host.h`
-   possède désormais. Un portage dont les symboles ne portent pas ce préfixe
-   obtenait un journal muet et un fil non épinglé, **sans erreur de lien**.
-   *La correction n'a traité que l'audio : **six autres unités** portaient le
-   même défaut — voir le piège 9.*
-3. **`VitaSink::open(freq, …)` recevait la fréquence et l'ignorait** au profit
-   d'une constante de 22050 Hz — le chiffre du premier jeu. Un flux à une autre
-   fréquence aurait joué à la mauvaise hauteur, en silence.
+1. **`present_scale` only knew two pixel formats** — and its header
+   claimed these were "the only two DIB formats ports present today." The
+   second port presents **16-bit 5-5-5**, on its **default** path. A list
+   written from a single caller describes that caller, not the domain.
+2. **`platform/vita_audio.cpp` called three WEAK symbols from the first
+   port** (`d2vita_progress_c`, `d2vita_pin_self_c`,
+   `d2vita_core_register_c`) for three services `platform/vita_host.h`
+   now owns. A port whose symbols don't carry that prefix got a mute log
+   and an unpinned thread, **with no link error**. *The fix only covered
+   audio: **six other units** carried the same flaw — see pitfall 9.*
+3. **`VitaSink::open(freq, …)` received the frequency and ignored it** in
+   favor of a hardcoded 22050 Hz — the first game's own number. A stream
+   at another frequency would have played at the wrong pitch, silently.
 
-**Et deux preuves qui manquaient à leur objet :**
+**And two proofs that had drifted from their subject:**
 
-4. **`vita_kb.h` citait `tools/tests/kb_test.cpp`** comme justification d'être
-   prouvable sur l'hôte, et ce fichier n'existait **que chez le premier
-   consommateur**. C'est exactement le défaut de la vague 3, répété : l'objet
-   déménage, la preuve reste. L'oracle vit maintenant ici (1 297 vérifications).
-5. **`present_scale_selftest.cpp` n'avait aucune ligne de commande écrite**, et
-   son sous-rectangle n'était vérifié que par des **invariants de bornes** —
-   jamais comparé à une sortie de référence, alors que c'est le cadrage par
-   défaut du second portage. `tools/selftest.sh` rejoue les deux, 320 cas.
+4. **`vita_kb.h` cited `tools/tests/kb_test.cpp`** as justification for
+   being provable on the host, and that file existed **only for the first
+   consumer**. This is exactly wave 3's flaw, repeated: the object moves,
+   the proof stays behind. The oracle now lives here (1,297 checks).
+5. **`present_scale_selftest.cpp` had no command line written for it**,
+   and its sub-rectangle case was only checked by **bound invariants** —
+   never compared against a reference output, even though it's the second
+   port's default framing. `tools/selftest.sh` replays both, 320 cases.
 
-!!! warning "Migrer un chemin MORT ne valide rien"
-    Le second portage présente **par la GPU** : `do_scale_and_flip` et son fil
-    de présentation n'ont, chez lui, **aucun appelant**. Y brancher
-    `scale_blit` supprime une duplication réelle et ne prouve strictement rien
-    — aucun run ne l'exerce.
+!!! warning "Migrating a DEAD path validates nothing"
+    The second port presents **through the GPU**: `do_scale_and_flip` and
+    its presentation thread have, on its side, **no caller**. Wiring
+    `scale_blit` there removes a real duplication and proves strictly
+    nothing — no run exercises it.
 
-    Vérifier QUI APPELLE avant de migrer change ce qu'on a le droit de
-    revendiquer, et parfois ce qu'on choisit de migrer : c'est la conversion
-    1:1 du chemin GPU (destination = source, cas dégénéré de `scale_blit`) qui
-    fait réellement entrer le moteur dans l'image de ce jeu.
+    Checking WHO CALLS before migrating changes what you're entitled to
+    claim, and sometimes what you choose to migrate: it's the 1:1
+    conversion of the GPU path (destination = source, a degenerate case
+    of `scale_blit`) that actually brings the engine into this game's
+    picture.
 
-!!! tip "Le sous-rectangle, c'est là que les deux portages divergent"
-    Le premier consommateur n'appelle `scale_blit` qu'en **plein écran**
-    (`DstRect{0,0,SCR_W,SCR_H}`). Le second l'appelle avec un
-    **sous-rectangle** (bandes noires) et en 1:1. Trois usages, un seul corps —
-    et c'est en écrivant la référence des deux autres qu'on découvre ce que le
-    premier n'exerçait pas.
+!!! tip "The sub-rectangle is where the two ports diverge"
+    The first consumer only calls `scale_blit` in **fullscreen**
+    (`DstRect{0,0,SCR_W,SCR_H}`). The second calls it with a
+    **sub-rectangle** (letterboxing) and at 1:1. Three uses, one body —
+    and it's by writing the reference for the other two that you discover
+    what the first never exercised.
 
-**La couture graphique, elle, reste au portage, et avec une preuve :** le
-moteur n'a **aucun vocabulaire pour la présentation 2D**, alors que le second
-portage a deux pipelines sur **un seul contexte GL** — les triangles, et un
-chemin qui présente une image hôte en quad plein écran avec ses runs de texte
-et ses incrustations. Brancher le moteur pour le seul chemin 3D partagerait la
-propriété du contexte entre deux interfaces. Danger concret, pas difficulté.
+**Graphics glue, on the other hand, stays with the port, and with a
+proof:** the engine has **no vocabulary for 2D presentation**, while the
+second port has two pipelines on **a single GL context** — triangles, and
+a path that presents a host image as a fullscreen quad with its text runs
+and overlays. Wiring the engine in for the 3D path alone would split
+ownership of the context between two interfaces. A concrete danger, not
+just difficulty.
 
-Et le constat qui remet la couture à sa place : **`render/render.h` n'a
-aujourd'hui AUCUN consommateur** — vérifié par `grep` dans les deux portages.
-Elle a été déduite de deux backends existants et adoptée par zéro. Selon le
-principe directeur de ce document, c'est de la généralité spéculative tant
-qu'un portage réel ne s'en sert pas ; la présentation 2D manquante est ce qui
-l'en sortirait.
+And the finding that puts the glue back in its place: **`render/render.h`
+currently has NO consumer** — verified by `grep` in both ports. It was
+inferred from two existing backends and adopted by zero. Under this
+document's guiding principle, that's speculative genericity until a real
+port uses it; the missing 2D presentation is what would pull it out of
+that state.
 
-### Vague 5 — les points d'extension à concevoir
+### Wave 5 — extension points to be designed
 
-Tout le reste. Et il faut le dire nettement : **le filon mécanique s'épuise.**
+Everything else. And it must be said plainly: **the mechanical vein is
+running out.**
 
-Sur le premier portage, après les vagues précédentes, en appliquant le critère à
-deux conditions il ne restait plus que **8 fonctions déplaçables en l'état** —
-et l'hypothèse prometteuse (« si on déplaçait aussi les deux aides évidentes,
-beaucoup se débloqueraient ») a été testée et **réfutée** : zéro de plus.
+On the first port, after the previous waves, applying the two-condition
+criterion left only **8** functions movable as-is — and the promising
+hypothesis ("if we also moved the two obvious helpers, a lot more would
+unblock") was tested and **refuted**: zero more.
 
-Les fonctions restantes ne sont pas des déplacements en attente. Ce sont :
+The remaining functions aren't pending moves. They are:
 
-- des **transferts de propriété d'états entiers** (table des fichiers, plan
-  mémoire, profilage d'attente), chacun étant une vague comme la vague 2 ;
-- des fonctions qui **divergent réellement** entre les deux portages, donc
-  chacune un point d'extension à concevoir — donnée ou rappel fourni par le
-  consommateur, jamais deux implémentations dans le moteur.
+- **transfers of ownership of entire states** (file table, memory layout,
+  wait profiling), each its own wave like wave 2;
+- functions that **genuinely diverge** between the two ports, so each is
+  an extension point to be designed — data or a callback supplied by the
+  consumer, never two implementations inside the engine.
 
-C'est une phase de conception, pas de déménagement, et elle se mène une
-fonction à la fois.
+This is a design phase, not a moving job, and it's done one function at a
+time.
 
-## Les pièges
+## The pitfalls
 
-Chacun vient d'un incident réel, et c'est pour ça qu'ils valent plus qu'une
-recommandation abstraite.
+Each comes from a real incident, which is why they're worth more than an
+abstract recommendation.
 
-### 1. Déplacer la propriété, jamais le type seul
+### 1. Move ownership, never just the type
 
-**Trois accidents en deux jours, tous le même.** Le *type* part au moteur, la
-*table* reste au portage, et le moteur en reçoit une seconde, vide : carte des
-sections critiques, table de handles, compteur d'identifiants. Le shim opère
-alors sur une table, le cœur partagé sur l'autre. **Invisible à la compilation,
-payable en interblocage.**
+**Three incidents in two days, all the same.** The *type* moves to the
+engine, the *table* stays with the port, and the engine gets a second one,
+empty: the critical-section map, the handle table, the ID counter. The
+shim then operates on one table, the shared core on the other.
+**Invisible at compile time, payable as a deadlock.**
 
-Un cas était encore plus discret : le compteur d'identifiants n'est pas utilisé
-que par les objets attendables — un instantané de processus n'est pas attendable
-mais consomme quand même un numéro. Sans compteur commun, les deux séries se
-recouvrent et deux objets distincts portent le même numéro.
+One case was even sneakier: the ID counter isn't only used by waitable
+objects — a process snapshot isn't waitable but still consumes a number.
+Without a shared counter, the two series overlap and two distinct objects
+carry the same number.
 
-**Le contrôle** : après chaque vague, vérifier explicitement qu'aucun jumeau ne
-subsiste côté portage — zéro définition locale du type, zéro table locale, zéro
-compteur local. C'est un `grep` qui se fait et qui s'écrit dans le rapport, pas
-une intention.
+**The check**: after every wave, explicitly verify no twin remains on the
+port side — zero local type definition, zero local table, zero local
+counter. That's a `grep` you run and write into the report, not an
+intention.
 
-### 2. Une clé, une inscription
+### 2. One key, one registration
 
-`register_shim` écrase en silence : la dernière gagne. C'est la fonctionnalité
-qui rend la migration progressive possible (§ vague 1), et c'est le piège
-classique quand on déplace des blocs. Un doublon de ce genre a déjà cassé la
-connexion réseau d'un portage sans que rien ne le signale.
+`register_shim` overwrites silently: the last one wins. That's the
+feature that makes a gradual migration possible (§ wave 1), and it's the
+classic trap when moving blocks around. A duplicate of this kind has
+already broken a port's network connection with nothing flagging it.
 
-**Et quand les deux corps d'un doublon diffèrent** : garder le **gagnant**,
-c'est-à-dire celui qui était déjà effectif — même s'il semble moins bon. C'est
-le seul que l'exécution et les essais aient jamais validé ; l'autre n'a jamais
-tourné. Sur un vrai retrait de doublons, deux clés sur cinq avaient des corps
-différents et le corps **mort** paraissait le meilleur (il portait une garde de
-pointeur nul absente du vivant). Substituer au passage transformerait un retrait
-à comportement nul en changement de comportement non validé, déguisé en
-nettoyage. Si le corps mort est réellement meilleur : noter le défaut sur place,
-et traiter l'amélioration dans un commit séparé qui s'annonce comme tel.
+**And when a duplicate's two bodies differ**: keep the **winner**, i.e.
+the one that was already effective — even if it looks worse. It's the
+only one execution and tests have ever validated; the other never ran.
+On one real duplicate-removal pass, two out of five keys had different
+bodies and the **dead** body looked better (it carried a null-pointer
+guard absent from the live one). Substituting it along the way would turn
+a behavior-neutral removal into an unvalidated behavior change disguised
+as cleanup. If the dead body really is better: note the flaw on the spot,
+and handle the improvement in a separate commit that announces itself as
+such.
 
-`tools/shim_seq.py` / `.sh` existent pour ça — et ils ont eux-mêmes un angle
-mort : une **unité non déclarée** disparaît du relevé en silence. Un décompte
-qui baisse exactement du volume de votre vague est plus probablement l'outil que
-votre code.
+`tools/shim_seq.py` / `.sh` exist for this — and they have their own blind
+spot: an **undeclared unit** silently disappears from the count. A count
+that drops by exactly the size of your wave is more likely the tool than
+your code.
 
-### 3. « Le jeu n'appelle jamais » n'est pas une preuve d'inutilité
+### 3. "The game never calls it" isn't proof of uselessness
 
-Ce motif est tombé **deux fois**. Des fonctions réseau laissées en bouchon au
-motif que le client n'écoute jamais se sont révélées parfaitement
-implémentables, et le sont désormais pour de vrai. Un bouchon justifié par les
-besoins du *premier* jeu devient un trou pour le second.
+This pattern has come up **twice**. Network functions left as stubs on
+the grounds that the client never listens turned out to be perfectly
+implementable, and now are for real. A stub justified by the *first*
+game's needs becomes a hole for the second.
 
-Avant de recopier un bouchon dans le moteur, se demander si une vraie
-implémentation générique coûte réellement plus cher.
+Before copying a stub into the engine, ask whether a real generic
+implementation actually costs more.
 
-### 4. Un oracle doit observer la SORTIE du code testé
+### 4. An oracle must observe the OUTPUT of the code under test
 
-L'oracle d'identité d'image d'un projet peut très bien empreindre l'**entrée** de
-la fonction qu'on réécrit — auquel cas il signera n'importe quel bug, écran noir
-compris. C'était le réflexe évident lors de la vague 4, et il a failli être
-suivi.
+A project's pixel-identity oracle can very well fingerprint the
+**input** of the function being rewritten — in which case it will sign
+off on any bug, black screen included. That was the obvious reflex during
+wave 4, and it was nearly followed.
 
-Trois contrôles avant de croire un verdict vert : situer le point
-d'échantillonnage par rapport au code testé ; **prouver que l'oracle coupe avec
-le même binaire** (injecter une faute, vérifier qu'il la voit, la retirer) ;
-publier le nombre de comparaisons effectuées.
+Three checks before trusting a green verdict: locate the sampling point
+relative to the code under test; **prove the oracle cuts with the same
+binary** (inject a fault, verify it's caught, remove it); publish the
+number of comparisons made.
 
-### 5. Un silence ne prouve rien
+### 5. Silence proves nothing
 
-**Trois conclusions négatives tirées d'un silence se sont révélées fausses en
-deux jours.** Un message absent d'un journal peut signifier « le code ne s'arme
-pas »… ou « le journal commence trop tard », ou « le banc redirige la sortie
-dans un autre fichier ».
+**Three negative conclusions drawn from silence turned out to be wrong in
+two days.** A message missing from a log can mean "the code doesn't arm"…
+or "the log starts too late," or "the bench redirects output to another
+file."
 
-Avant de conclure qu'une chose ne se produit pas : produire un **témoin
-positif** dans le fichier qu'on interroge. Si le témoin n'apparaît pas non plus,
-c'est l'observation qui est en défaut, pas le code.
+Before concluding something doesn't happen: produce a **positive witness**
+in the file you're querying. If the witness doesn't show up either, it's
+the observation that's at fault, not the code.
 
-### 6. Assez de passes de mesure
+### 6. Enough measurement passes
 
-Sur la vague 4, à **4 passes par jambe** la mesure donnait **−1,42 %** avec un
-écart apparemment significatif, et une régression allait être rapportée. Les
-deux passes suivantes ont **inversé le signe** : le résultat final est
-**+0,12 %**.
+On wave 4, at **4 passes per leg** the measurement gave **-1.42%** with an
+apparently significant gap, and a regression was about to be reported. The
+next two passes **flipped the sign**: the final result is **+0.12%**.
 
-S'arrêter à 4 aurait publié une régression inexistante **et** bloqué un
-changement gratuit. Grouper les passes, ou prendre une pente — jamais conclure
-sur un écart plus petit que sa propre dispersion.
+Stopping at 4 would have published a nonexistent regression **and**
+blocked a free improvement. Group the passes, or take a slope — never
+conclude on a gap smaller than its own dispersion.
 
-### 7. Prouver la référence AVANT de s'en servir
+### 7. Prove the reference BEFORE using it
 
-Une régression a été diagnostiquée puis bissectée sur quatre commits avant
-qu'un contrôle de reproductibilité ne montre que **la référence elle-même
-n'était pas reproductible** : le dossier d'écriture réutilisé contenait un
-fichier de profil de cinq jours plus tôt, absent des runs suivants.
+A regression was diagnosed and then bisected across four commits before a
+reproducibility check showed that **the reference itself wasn't
+reproducible**: the reused write directory held a five-day-old profile
+file, absent from later runs.
 
-Il n'y avait aucune régression. **Rejouer la référence deux fois et comparer
-les empreintes avant de comparer quoi que ce soit d'autre** — c'est le contrôle
-le moins cher du lot, et celui dont l'absence coûte le plus.
+There was no regression. **Replay the reference twice and compare
+fingerprints before comparing anything else** — it's the cheapest check
+in the set, and the one whose absence costs the most.
 
-### 8. Un contrôle négatif peut porter sur une faute que le jeu ne voit pas
+### 8. A negative control can target a fault the game never sees
 
-Pour prouver qu'un oracle coupe, une faute a été injectée dans un allocateur :
-décaler chaque bloc de 16 octets. **Verdict et compteurs inchangés.** L'oracle
-n'était pas aveugle — la faute était réellement bénigne à cette échelle (les
-libérations échouaient en silence, ce qui fuit sans rien casser).
+To prove an oracle cuts, a fault was injected into an allocator: shift
+every block by 16 bytes. **Verdict and counters unchanged.** The oracle
+wasn't blind — the fault was genuinely benign at that scale (the frees
+failed silently, which leaks without breaking anything).
 
-Un contrôle négatif posé là aurait « prouvé » que l'oracle marche alors qu'il
-ne démontrait rien. Si ta faute ne bouge rien, **cherche-en une autre** avant
-de conclure quoi que ce soit — dans un sens comme dans l'autre.
+A negative control placed there would have "proven" the oracle works
+while demonstrating nothing. If your fault doesn't move anything, **look
+for a different one** before concluding anything, either way.
 
-### 9. Un lien FAIBLE au nom d'un consommateur est un défaut SILENCIEUX
+### 9. A WEAK link named after one consumer is a SILENT flaw
 
-C'est le piège 1 dans sa forme la plus discrète, et il a survécu à sa propre
-correction.
+This is pitfall 1 in its most discreet form, and it survived its own
+fix.
 
-Corriger `platform/vita_audio.cpp` (§ vague 4, point 2) a réglé **une** unité.
-Le relevé `nm` sur les objets Vita du moteur en montrait **sept** :
+Fixing `platform/vita_audio.cpp` (§ wave 4, point 2) settled **one** unit.
+An `nm` sweep over the engine's Vita objects showed **seven**:
 
-| unité | symboles faibles au préfixe du premier portage |
+| unit | weak symbols prefixed for the first port |
 |---|---|
 | `runtime/bridge.cpp` | `d2vita_progress_c` |
 | `runtime/cpu_box86.cpp` | `d2vita_progress_c` |
@@ -500,94 +499,93 @@ Le relevé `nm` sur les objets Vita du moteur en montrait **sept** :
 | `runtime/sched_native.cpp` | `d2vita_progress_c`, `d2vita_core_mask_c`, `d2vita_pin_self_c`, `d2vita_core_register_c` |
 | `dynarec86/shim/vita/mman_vita.c` | `d2vita_progress_c` |
 | `third_party/box86-dynarec/dynarec/dynarec.c` | `d2vita_progress_c` |
-| ~~`platform/vita_audio.cpp`~~ | corrigée à la vague 4 |
+| ~~`platform/vita_audio.cpp`~~ | fixed in wave 4 |
 
-`sched_native.cpp` était le pire cas : c'est l'ordonnanceur **par défaut**, il
-épingle et recense les fils ouvriers, et un commentaire y nommait
-`vita_present.cpp` — un fichier qui appartient au premier consommateur.
+`sched_native.cpp` was the worst case: it's the **default** scheduler, it
+pins and registers worker threads, and a comment there named
+`vita_present.cpp` — a file belonging to the first consumer.
 
-!!! danger "Ce que « ça compile » ne prouve pas"
-    Un lien faible non résolu vaut `NULL`. Pas d'erreur, pas d'avertissement,
-    **rien**. Les quatre cibles restent vertes pendant que le journal est muet
-    et que les fils ne sont pas épinglés. La seule preuve possible est à la
-    **table des symboles** : un `w` dans la sortie de `nm` sur un objet du
-    moteur est un défaut, pas un détail.
+!!! danger "What 'it compiles' doesn't prove"
+    An unresolved weak link resolves to `NULL`. No error, no warning,
+    **nothing**. All four targets stay green while the log stays mute and
+    threads stay unpinned. The only possible proof is at the **symbol
+    table**: a `w` in `nm`'s output on an engine object is a flaw, not a
+    detail.
 
-**Le point dur : la portabilité hors console.** Trois de ces unités se
-compilent aussi pour le harnais qemu/bureau, où il n'y a pas de console. C'est
-ce qui avait fait choisir le lien faible à l'origine. La solution est plus
-ennuyeuse et strictement meilleure : hors `__vita__`, `platform/vita_host.cpp`
-définit le journal comme un **no-op**. Le corps générique appelle donc en lien
-**FORT** partout, sans test de nullité, et le comportement hors console est
-identique à ce que produisait la référence faible non résolue — le silence. Un
-portage n'a **rien** à fournir hors console : le no-op ne lit même pas
+**The hard part: portability off console.** Three of these units also
+compile for the qemu/desktop harness, where there is no console. That's
+what made the weak link the original choice. The solution is more
+tedious and strictly better: outside `__vita__`, `platform/vita_host.cpp`
+defines the log as a **no-op**. The generic body therefore links
+**STRONG** everywhere, with no null check, and off-console behavior is
+identical to what the unresolved weak reference produced — silence. A
+port has **nothing** to provide off console: the no-op doesn't even read
 `wx86_vita_progress_path`.
 
-Les services de cœurs (`wx86_vita_core_mask`, `wx86_vita_pin_self`,
-`wx86_vita_core_register`) restent **console-seulement** : tous leurs appels
-vivent déjà sous `#ifdef __vita__`. Ne rends portable que ce qui doit l'être.
+The core services (`wx86_vita_core_mask`, `wx86_vita_pin_self`,
+`wx86_vita_core_register`) stay **console-only**: all their call sites
+already live under `#ifdef __vita__`. Only make portable what needs to
+be.
 
-!!! tip "L'alternative écartée, et pourquoi"
-    Renommer le symbole faible en `wx86_vita_progress_c` en le gardant faible
-    aurait fait disparaître le préfixe fautif **sans** supprimer le mode de
-    panne : un portage qui ne fournit rien serait resté muet sans le savoir.
-    Un renommage n'est pas une correction.
+!!! tip "The alternative considered, and why it was dropped"
+    Renaming the weak symbol to `wx86_vita_progress_c` while keeping it
+    weak would have made the wrong prefix disappear **without** removing
+    the failure mode: a port providing nothing would have stayed mute
+    without knowing it. A rename isn't a fix.
 
-!!! warning "Le second portage ne prouvait pas le défaut, il le masquait"
-    Le second portage **définissait** les quatre enveloppes `d2vita_*_c` : il
-    descend du premier par copie et en a hérité les noms. Son journal n'était
-    donc **pas** muet, et ses fils **étaient** épinglés. Le défaut était réel
-    et à venir — il attendait le troisième portage, celui qui n'aurait pas
-    recopié le préfixe. Un défaut de généricité peut rester invisible avec
-    *deux* consommateurs quand le second est né du premier.
+!!! warning "The second port didn't prove the flaw, it masked it"
+    The second port **defined** all four `d2vita_*_c` wrappers: it
+    descends from the first by copy and inherited the names. So its log
+    was **not** mute, and its threads **were** pinned. The flaw was real
+    and yet to come — it was waiting for the third port, the one that
+    wouldn't have copied the prefix. A genericity flaw can stay invisible
+    with *two* consumers when the second was born from the first.
 
-## Ce qui n'est pas encore dans le moteur
+## What isn't in the engine yet
 
-Un guide honnête sur ses manques est utilisable ; un guide qui promet trop fait
-perdre une journée à celui qui le suit.
+An honest guide about its own gaps is usable; a guide that overpromises
+costs a day to whoever follows it.
 
-| manquant | où c'est aujourd'hui | pourquoi |
+| missing | where it lives today | why |
 |---|---|---|
-| ~~l'émulation DirectSound~~ | **au moteur** (`runtime/ds_emul`) | livrée depuis. Un portage dont le jeu passe par une autre bibliothèque audio ne la consommera pas, mais le **puits** (null / WAV / console) et l'horloge hôte, eux, sont communs. |
-| le backend GPU de la console | côté portage | volontairement borné aux états que le premier jeu émet. La couture générique existe (`render/render.h`), le backend qui la réalise, non. |
-| la lecture du pad et le curseur | côté portage | catégorie « propre à la console » identifiée mais pas encore déplacée. Les valeurs par défaut (orbite, sensibilité, zone morte) sont **identiques dans deux jeux sans rapport** : elles tiennent à l'ergonomie du stick, pas au jeu. Travail en cours. |
-| ~115 fonctions `KERNEL32` | côté portage | fichiers et chemins, plan mémoire, chronométrage d'attente, horloge — voir vague 5. |
-| l'ordonnancement | les **deux** existent | le moteur fournit coopératif **et** natif ; un portage choisit. Le premier portage ne cible plus que le natif, le second démarre encore en coopératif. Ce n'est pas une dette, c'est un choix par consommateur. |
+| ~~DirectSound emulation~~ | **in the engine** (`runtime/ds_emul`) | shipped since. A port whose game goes through a different audio library won't consume it, but the **sink** (null / WAV / console) and the host clock are shared. |
+| the console's GPU backend | port side | deliberately scoped to the states the first game emits. The generic glue exists (`render/render.h`), the backend that implements it doesn't. |
+| pad reading and the cursor | port side | identified as "console-specific" but not yet moved. The defaults (orbit, sensitivity, dead zone) are **identical across two unrelated games**: they're about stick ergonomics, not the game. Work in progress. |
+| ~115 `KERNEL32` functions | port side | files and paths, memory layout, wait timing, clock — see wave 5. |
+| scheduling | **both** exist | the engine provides cooperative **and** native; a port chooses. The first port now only targets native, the second still starts cooperative. This isn't debt, it's a per-consumer choice. |
 
-### Une asymétrie à connaître avant de se lancer
+### An asymmetry worth knowing before starting
 
-Le moteur fournit **2** inscriptions pour `DDRAW.dll` — de quoi répondre « pas
-de DirectDraw » proprement. Le second portage en inscrit **128** : une émulation
-COM complète, avec les vtables de `IDirectDraw` et de ses interfaces.
+The engine provides **2** registrations for `DDRAW.dll` — enough to
+answer "no DirectDraw" cleanly. The second port registers **128**: a full
+COM emulation, with the vtables for `IDirectDraw` and its interfaces.
 
-Ce n'est pas un simple manque de couverture. C'est le moteur **façonné par les
-besoins du premier consommateur** : le premier jeu ne dessine pas via
-DirectDraw, donc deux fonctions suffisaient, donc la question ne s'est jamais
-posée. Personne ne l'avait vu, parce que la mesure de la frontière compte ce que
-le moteur *possède*, jamais ce qu'un second consommateur *aurait besoin* qu'il
-possède.
+This isn't a simple coverage gap. It's the engine **shaped by the first
+consumer's needs**: the first game doesn't draw through DirectDraw, so two
+functions were enough, so the question never came up. Nobody had seen it,
+because measuring the boundary counts what the engine *owns*, never what
+a second consumer *would need* it to own.
 
-C'est précisément le défaut qu'un moteur générique doit éviter, et c'est
-exactement le genre de chose que seule une migration réelle révèle. À prendre
-comme une bonne nouvelle : trouvé maintenant, il coûte une vague ; trouvé au
-troisième portage, il coûte une refonte.
+This is precisely the flaw a generic engine has to avoid, and exactly the
+kind of thing only a real migration reveals. Take it as good news: found
+now, it costs one wave; found at the third port, it costs a redesign.
 
-De même, la couche audio du second portage est écrite en **C** là où celle du
-moteur est en C++, avec la même forme pourtant (le trio null / WAV / console,
-les mêmes `write` et `close`). Reprendre l'une pour l'autre est une adaptation,
-pas une inclusion.
+Likewise, the second port's audio layer is written in **C** where the
+engine's is C++, yet with the same shape (the null / WAV / console trio,
+the same `write` and `close`). Reusing one for the other is an
+adaptation, not an inclusion.
 
-## Résumé opérationnel
+## Operational summary
 
-1. Comparer les deux bases fonction par fonction, sur le **corps** normalisé —
-   pas sur le nom.
-2. Ne déplacer d'abord que ce qui satisfait **les deux** conditions : corps
-   identique **et** aucune dépendance extérieure.
-3. Enregistrer le moteur **avant** ses propres shims, pour que les siens
-   gagnent, et migrer par domaines.
-4. Pour tout ce qui possède de l'état : transférer la **propriété**, vérifier
-   qu'aucun jumeau ne reste.
-5. Valider chaque vague à la hauteur de sa classe de risque — et pour la
-   synchronisation, **sous charge réelle**, jamais au démarrage.
-6. Traiter ce qui diverge comme un **point d'extension à concevoir**, pas comme
-   un déplacement en retard.
+1. Compare the two codebases function by function, on the normalized
+   **body** — never the name.
+2. Only move first what satisfies **both** conditions: identical body
+   **and** no external dependency.
+3. Register the engine **before** its own shims, so its own win, and
+   migrate domain by domain.
+4. For anything holding state: transfer **ownership**, verify no twin
+   remains.
+5. Validate each wave to the height of its risk class — and for
+   synchronization, **under real load**, never at startup.
+6. Treat what diverges as an **extension point to be designed**, not as a
+   move running late.

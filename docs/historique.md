@@ -1,82 +1,80 @@
-# Historique et provenance
+# History and provenance
 
 ## Box86
 
-winx86 doit son cœur de traduction x86 → ARMv7 à
-[Box86](https://github.com/ptitSeb/box86) (Sébastien Chevalier, dit
-« ptitSeb », licence MIT). `third_party/box86-dynarec/` en est une
-extraction verbatim, plus un jeu de patches locaux mécaniquement régénérés
-(fastmmu, memintrin, emitprof, signtag, un point d'accroche de préemption
-d'ordonnanceur, un interrupteur de protection en écriture pour le code
-auto-modifiant). Ces patches sont pensés pour être proposables en amont à
-Box86 lui-même. Voir [Architecture](architecture.md) pour la mécanique
-d'extraction/resynchronisation.
+winx86 owes its x86 → ARMv7 translation core to
+[Box86](https://github.com/ptitSeb/box86) (Sébastien Chevalier, aka
+"ptitSeb", MIT license). `third_party/box86-dynarec/` is a verbatim
+extraction of it, plus a set of local patches mechanically regenerated
+(fastmmu, memintrin, emitprof, signtag, a scheduler-preemption hook, a
+write-protection switch for self-modifying code). These patches are
+designed to be upstreamable to Box86 itself. See
+[Architecture](architecture.md) for the extraction/resync machinery.
 
-## Extraction depuis d2vita (2026-09-09)
+## Extraction from d2vita (2026-09-09)
 
-winx86 a été extrait le 2026-09-09 du projet
-[d2vita](https://gitlab.com/claude5564407/d2-vita), un portage de
-Diablo II: Lord of Destruction sur PS Vita, en isolant le sous-ensemble du
-moteur qui n'avait aucune connaissance du jeu (chargeur PE32, dynarec, `Cpu`/
-`Bridge`, ordonnanceurs, outillage générique). Le reste — les ~600 shims
-Win32 du jeu, ses hooks de performance sur des adresses précises de son
-binaire, son rendu Glide — est resté dans d2vita.
+winx86 was extracted on 2026-09-09 from the
+[d2vita](https://gitlab.com/claude5564407/d2-vita) project, a port of
+Diablo II: Lord of Destruction to PS Vita, by isolating the subset of the
+engine that had no knowledge of the game (PE32 loader, dynarec, `Cpu`/
+`Bridge`, schedulers, generic tooling). The rest — the game's ~600 Win32
+shims, its performance hooks on precise addresses of its own binary, its
+Glide rendering — stayed in d2vita.
 
-## La frontière a bougé (2026-09-10 / 09-11)
+## The boundary moved (2026-09-10 / 09-11)
 
-La coupure initiale était prudente : **aucun** shim Win32 n'avait suivi, un
-audit ayant trouvé du contenu propre au jeu caché derrière des noms d'API
-parfaitement génériques. Cette prudence était justifiée sur le constat, mais la
-conclusion « aucun shim n'est générique par nature » s'est révélée trop forte.
+The initial cut was cautious: **no** Win32 shim had followed, an audit
+having found game-specific content hidden behind perfectly generic API
+names. That caution was justified on the evidence, but the conclusion "no
+shim is generic by nature" turned out to be too strong.
 
-En reprenant groupe de DLL par groupe de DLL, et en classant chaque fonction par
-son **corps** plutôt que par son nom, plus de deux cents inscriptions ont rejoint
-le moteur : SHELL32, ADVAPI32, USER32, DirectDraw/Bink/Smacker/ijl11, IMM32,
-GDI32, fenêtre et curseur, VERSION et PSAPI, puis toute la couche socket.
+By going back through it DLL group by DLL group, and classifying each
+function by its **body** rather than its name, more than two hundred
+registrations joined the engine: SHELL32, ADVAPI32, USER32,
+DirectDraw/Bink/Smacker/ijl11, IMM32, GDI32, window and cursor, VERSION and
+PSAPI, then the whole socket layer.
 
-Trois points d'extension neutres sont nés de ce travail, chacun d'une politique
-qu'il fallait sortir d'un shim sans la perdre : l'allocateur de brouillon invité,
-l'observateur passif de la couche socket, et la route de connexion. Le détail est
-dans [Point d'extension](extension.md), la liste exacte dans [Shims
-fournis](shims.md).
+Three neutral extension points were born from this work, each carrying a
+policy that had to be pulled out of a shim without losing it: the guest
+scratch allocator, the passive socket-layer observer, and the connection
+route. The detail is in [Extension point](extension.md), the exact list in
+[Shims provided](shims.md).
 
-## Pourquoi un historique git neuf, pas hérité de d2vita
+## Why a fresh git history, not inherited from d2vita
 
-winx86 démarre avec un historique git **volontairement neuf**, pas extrait
-par réécriture de l'historique de d2vita (`git filter-repo` ou équivalent).
-d2vita est un travail dérivé de binaires Windows propriétaires
-décompilés — un contexte légalement sensible détaillé dans la documentation
-de d2vita elle-même. Réécrire son historique dans un nouveau dépôt risquerait
-de faire resurgir, via `git log`/`git show` sur d'anciens commits, du
-contenu que des commits plus récents ont retiré de l'état courant mais pas
-de l'historique. Repartir d'un historique neuf pour winx86 évite la question
-plutôt que de la gérer au cas par cas.
+winx86 starts with a **deliberately fresh** git history, not extracted by
+rewriting d2vita's history (`git filter-repo` or equivalent). d2vita is
+derivative work from decompiled proprietary Windows binaries — a legally
+sensitive context detailed in d2vita's own documentation. Rewriting its
+history into a new repository would risk resurfacing, via `git log`/`git
+show` on old commits, content that later commits removed from the current
+state but not from the history. Starting winx86 from a fresh history
+avoids the question rather than managing it case by case.
 
-## La piscine JIT plafonnée par le noyau, pas par choix (2026-09-13)
+## The JIT pool capped by the kernel, not by choice (2026-09-13)
 
-Une tentative de réserver la piscine JIT *avant* l'arène invitée (pour
-absorber le gâchis d'alignement, 16+13=29 Mio en un seul bloc) a révélé que
-le noyau Vita refuse tout bloc `sceKernelAllocMemBlockForVM` au-delà de
-16 Mio (`SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW`) — jamais testé avant sur ce
-projet. La tentative a été abandonnée (code revenu à l'état d'avant), et la
-piscine réécrite pour grandir par segments de 16 Mio plutôt qu'un bloc
-unique. Détail technique dans [Architecture](architecture.md).
+An attempt to reserve the JIT pool *before* the guest arena (to absorb the
+alignment waste, 16+13=29 MiB in a single block) revealed that the Vita
+kernel refuses any `sceKernelAllocMemBlockForVM` block beyond 16 MiB
+(`SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW`) — never tested before on this
+project. The attempt was abandoned (code reverted to its prior state), and
+the pool rewritten to grow by 16 MiB segments rather than a single block.
+Technical detail in [Architecture](architecture.md).
 
-Au passage, un bug latent préexistant a été corrigé : l'ancien code posait
-son drapeau « essai déjà tenté » **avant** de connaître le résultat de
-l'allocation — un unique échec (pression mémoire, fragmentation) désarmait
-la piscine pour le reste de la session, sans retentative ni second signal
-que la ligne de log « REFUSÉE ». Le nouveau code pose ce drapeau seulement
-**après** un refus réel du noyau, jamais par anticipation — et comme les
-segments vivent dans un tableau séparé, un segment déjà ouvert avant l'échec
-reste pleinement utilisable : seule la croissance future est bloquée, pas ce
-qui a déjà été alloué.
+Along the way, a preexisting latent bug was fixed: the old code set its
+"already tried" flag **before** knowing the allocation's result — a single
+failure (memory pressure, fragmentation) disarmed the pool for the rest of
+the session, with no retry and no second signal beyond the "REFUSED" log
+line. The new code sets this flag only **after** a real kernel refusal,
+never preemptively — and since segments live in a separate array, a
+segment already open before the failure stays fully usable: only future
+growth is blocked, not what was already allocated.
 
-## Évolution
+## Evolution
 
-Voir `git log` pour le détail commit par commit. Les grandes étapes
-initiales : extraction du moteur générique (2026-09-09), câblage de d2vita
-comme premier consommateur via sous-module git, mécanisme de « saveur »
-LIBTAG/EXTRA pour builds A/B, correctif d'un bug de contamination de build
-(un en-tête spécifique à la vraie console Vita polluait la cible de test
-qemu-arm/Linux).
+See `git log` for the commit-by-commit detail. The main initial
+milestones: extraction of the generic engine (2026-09-09), wiring d2vita
+as the first consumer via a git submodule, a LIBTAG/EXTRA "flavor"
+mechanism for A/B builds, a fix for a build-contamination bug (a header
+specific to the real Vita console was polluting the qemu-arm/Linux test
+target).

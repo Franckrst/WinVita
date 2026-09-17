@@ -1,52 +1,51 @@
-# Point d'extension — comment porter votre jeu
+# Extension point — how to port your game
 
-winx86 ne contient **aucun hook de jeu** et **aucune connaissance d'un binaire
-particulier**. Il fournit deux primitives d'accrochage, une bibliothèque de
-shims Win32 dont il a été **prouvé** qu'ils ne portent aucun comportement propre
-à un jeu, et quelques points d'extension neutres par lesquels un portage injecte
-sa politique à lui.
+winx86 contains **no game hook** and **no knowledge of any particular
+binary**. It provides two hook primitives, a library of Win32 shims
+**proven** to carry no game-specific behavior, and a handful of neutral
+extension points through which a port injects its own policy.
 
-## Les deux primitives
+## The two primitives
 
 ### `Cpu::set_alternate(from_va, to_va)`
 
-`src/runtime/cpu.h`. Redirige l'exécution d'une adresse invité vers une autre.
-C'est le mécanisme de « crochet à l'entrée d'une fonction ».
+`src/runtime/cpu.h`. Redirects execution from one guest address to
+another. This is the "hook at a function's entry" mechanism.
 
-!!! warning "Toujours une adresse d'ENTRÉE de fonction"
-    Jamais une cible de saut interne. Le dynarec fusionne des blocs de code x86
-    contigus en un seul bloc traduit ; un crochet posé sur une cible de saut
-    interne à un bloc déjà fusionné ne sera jamais revisité — le crochet devient
-    **muet sans erreur visible**. Documentez cette adresse comme un vrai point
-    d'entrée (généralement un prologue `push ebp` / `push ebx` reconnaissable au
-    désassemblage).
+!!! warning "Always a function ENTRY address"
+    Never an internal jump target. The dynarec merges contiguous x86 code
+    blocks into a single translated block; a hook placed on a jump target
+    internal to an already-merged block will never be revisited — the
+    hook becomes **silently mute**. Document this address as a real entry
+    point (usually a `push ebp` / `push ebx` prologue recognizable in the
+    disassembly).
 
 ### `Bridge::register_shim(dll, name, shim)` / `Bridge::shim_trap(dll, name)`
 
-`src/runtime/bridge.h`. `register_shim` enregistre une implémentation native
-sous une clé `"DLL.dll"` + `"NomDeFonction"` ; `shim_trap` obtient l'adresse de
-trap correspondante, à passer à `set_alternate`.
+`src/runtime/bridge.h`. `register_shim` registers a native implementation
+under a `"DLL.dll"` + `"FunctionName"` key; `shim_trap` gets the
+corresponding trap address, to pass to `set_alternate`.
 
-!!! danger "`register_shim` écrase la clé"
-    Enregistrer deux fois la même clé ne produit aucune erreur : **la dernière
-    inscription gagne**, silencieusement. C'est une fonctionnalité — elle permet
-    à un portage de substituer sa version à un défaut du moteur sans que winx86
-    le sache — mais c'est aussi le piège classique quand on réorganise du code
-    qui enregistre beaucoup de shims. Un doublon de ce genre a déjà cassé la
-    connexion réseau d'un portage, et rien ne l'avait signalé.
+!!! danger "`register_shim` overwrites the key"
+    Registering the same key twice produces no error: **the last
+    registration wins**, silently. This is a feature — it lets a port
+    substitute its own version for an engine default without winx86
+    knowing — but it's also the classic trap when reorganizing code that
+    registers a lot of shims. A duplicate of this kind has already broken
+    a port's network connection, with nothing flagging it.
 
-    `tools/shim_seq.py` / `.sh` existent exactement pour ça — voir
-    [Outils IA](outils-ia.md).
+    `tools/shim_seq.py` / `.sh` exist exactly for this — see [AI
+    tooling](outils-ia.md).
 
-## Les shims que le moteur fournit
+## The shims the engine provides
 
-La liste exacte est [générée depuis les sources](shims.md) et vérifiée par la
-CI. En résumé : registre et sécurité (ADVAPI32), objets GDI factices, géométrie
-et sémantique de fenêtre, énumération de modules, ressources de version, lecteurs
-vidéo et IME rapportés absents, et une couche socket complète.
+The exact list is [generated from the sources](shims.md) and checked by
+CI. In short: registry and security (ADVAPI32), fake GDI objects, window
+geometry and semantics, module enumeration, version resources, video
+players and IME reported as absent, and a complete socket layer.
 
-**Aucune de ces fonctions d'installation n'est appelée automatiquement.** Le
-portage appelle celles qu'il veut, depuis son propre binaire de boot :
+**None of these install functions is called automatically.** The port
+calls whichever it wants, from its own boot binary:
 
 ```cpp
 #include "runtime/win32_shims_advapi32.h"
@@ -54,125 +53,126 @@ portage appelle celles qu'il veut, depuis son propre binaire de boot :
 
 win32_shims_advapi32_install(br);
 win32_shims_wsock32_install(br);
-// ... puis vos propres shims, qui peuvent écraser n'importe laquelle des clés
-//     ci-dessus si votre jeu a besoin d'un comportement différent.
+// ... then your own shims, which can overwrite any of the keys above if
+//     your game needs different behavior.
 ```
 
-Un moteur qui inscrirait des shims d'autorité déciderait à la place de son
-consommateur. L'ordre est le vôtre, et la dernière inscription gagne.
+An engine that registered shims with authority would decide for its
+consumer instead. The order is yours, and the last registration wins.
 
-## Les points d'extension neutres
+## The neutral extension points
 
-Quand une fonctionnalité est générique mais que la **politique** ne l'est pas, le
-moteur expose un point d'extension plutôt que de deviner. Trois exemples, tous
-issus de cas réels :
+When a feature is generic but the **policy** isn't, the engine exposes an
+extension point rather than guessing. Three examples, all from real cases.
 
-### L'allocateur de brouillon invité
+### The guest scratch allocator
 
-`src/runtime/guest_scratch.h`. Beaucoup d'API Win32 ne rendent pas une valeur
-mais un **pointeur** vers de la mémoire que l'appelant lira — `gethostbyname`
-rend un `hostent*`, `inet_ntoa` un `char*`, `GetCommandLineA` une chaîne. Ce
-pointeur doit être une adresse **invitée**, donc il faut écrire le résultat dans
-l'espace mémoire de l'invité.
+`src/runtime/guest_scratch.h`. Many Win32 APIs don't return a value but a
+**pointer** to memory the caller will read — `gethostbyname` returns a
+`hostent*`, `inet_ntoa` a `char*`, `GetCommandLineA` a string. That
+pointer must be a **guest** address, so the result has to be written into
+guest memory space.
 
-Le moteur possède l'allocateur ; le portage lui concède une plage, parce que le
-plan mémoire, lui, n'a rien d'universel :
+The engine owns the allocator; the port grants it a range, because the
+memory layout itself has nothing universal about it:
 
 ```cpp
-wx86_scratch_init(base, size);        // le portage déclare la plage
-wx86_scratch_set_oom_handler(&mon_journal);
+wx86_scratch_init(base, size);        // the port declares the range
+wx86_scratch_set_oom_handler(&my_logger);
 ```
 
-C'est un allocateur à pointeur croissant qui **ne libère jamais** : il est réservé
-aux valeurs de retour à durée de vie processus. Un site qui y alloue à **chaque
-appel** sur un chemin répété finira par l'épuiser — c'est arrivé, et le correctif
-est de mettre le résultat en cache, pas d'agrandir la plage.
+This is a bump allocator that **never frees**: it's reserved for
+process-lifetime return values. A call site that allocates on **every
+call** on a hot path will eventually exhaust it — that has happened, and
+the fix is to cache the result, not enlarge the range.
 
-### L'observateur réseau
+### The network observer
 
-`src/runtime/win32_shims_wsock32.h`. **Un seul** point d'observation passif sur
-toute la couche socket : `connect`, `connect-done`, `send`, `recv`, `close`,
-`resolve`. Le moteur **raconte** ce qui se passe ; il ne demande jamais d'avis et
-ne change jamais de comportement selon la réponse.
+`src/runtime/win32_shims_wsock32.h`. **A single** passive observation
+point over the whole socket layer: `connect`, `connect-done`, `send`,
+`recv`, `close`, `resolve`. The engine **reports** what happens; it never
+asks for an opinion and never changes behavior based on the answer.
 
-Tout ce qui est protocole, cadrage de paquets, journalisation ou instrumentation
-appartient au portage, qui enregistre **un** observateur et dispatche en interne.
-Rien dans cette interface ne nomme un protocole, un port ou un produit.
+Everything about protocol, packet framing, logging, or instrumentation
+belongs to the port, which registers **one** observer and dispatches
+internally. Nothing in this interface names a protocol, a port, or a
+product.
 
 ```cpp
-wx86_net_set_observer(&mon_observateur);   // exactement un, le second remplace
+wx86_net_set_observer(&my_observer);   // exactly one, the second replaces it
 ```
 
-### La route de connexion
+### The connection route
 
-`wx86_net_set_redirect(ip)` réécrit toute connexion non-locale vers une adresse
-donnée, en gardant le port — l'équivalent moral d'une entrée de fichier hosts.
+`wx86_net_set_redirect(ip)` rewrites every non-local connection to a given
+address, keeping the port — the moral equivalent of a hosts-file entry.
 
-!!! note "C'est un filet, pas la méthode normale"
-    Pour pointer un client vers un serveur privé, la façon fidèle est celle d'un
-    vrai PC : configurer la **liste de serveurs du client lui-même** (ses clés de
-    registre, son `.ini`) pour qu'il demande votre hôte dès le départ. Mesuré sur
-    un portage : une fois la liste réduite à l'adresse locale, la redirection
-    devenait entièrement inutile pour tout le trajet applicatif. Elle ne reste
-    utile que pour une sonde partant sur une adresse littérale, sans passer par
-    un nom.
+!!! note "A safety net, not the normal method"
+    To point a client at a private server, the faithful way is the same
+    as a real PC: configure the **client's own server list** (its
+    registry keys, its `.ini`) so it asks for your host from the start.
+    Measured on one port: once the list was trimmed down to the local
+    address, the redirect became entirely unnecessary for the whole
+    application path. It stays useful only for a probe going out to a
+    literal address, without going through a name.
 
-## Le schéma général d'un portage
+## The general shape of a port
 
-1. Construire son `Cpu` (`CpuBox86`) et son `Bridge`.
-2. Charger son PE32 via `PeImage`.
-3. Déclarer la plage de brouillon invité (`wx86_scratch_init`).
-4. Appeler les `win32_shims_*_install()` voulues, **puis** enregistrer ses
-   propres shims — les siens gagnent, puisque la dernière inscription gagne.
-5. Brancher ses politiques sur les points d'extension neutres (observateur
-   réseau, route, etc.).
-6. Enregistrer ses hooks de performance natifs sur les adresses chaudes de *son*
-   binaire via `set_alternate` + `shim_trap`.
-7. Démarrer l'ordonnanceur (coopératif ou natif).
+1. Build your `Cpu` (`CpuBox86`) and your `Bridge`.
+2. Load your PE32 via `PeImage`.
+3. Declare the guest scratch range (`wx86_scratch_init`).
+4. Call the `win32_shims_*_install()` you want, **then** register your own
+   shims — yours win, since the last registration wins.
+5. Wire your policies onto the neutral extension points (network observer,
+   route, etc.).
+6. Register your native performance hooks on *your* binary's hot addresses
+   via `set_alternate` + `shim_trap`.
+7. Start the scheduler (cooperative or native).
 
-### Ce que le portage doit fournir pour une cible console
+### What a port must provide for a console target
 
-Une seule chose, et elle est **obligatoire** dans un build `__vita__` :
+Exactly one thing, and it's **mandatory** in a `__vita__` build:
 
 ```cpp
-// à portée de fichier, initialiseur CONSTANT — pas un setter
-extern "C" const char* const wx86_vita_progress_path = "ux0:data/<votre-jeu>/boot.txt";
+// file scope, CONSTANT initializer — not a setter
+extern "C" const char* const wx86_vita_progress_path = "ux0:data/<your-game>/boot.txt";
 ```
 
-C'est le **chemin** du journal de progression durable, la seule fenêtre sur un
-démarrage sans écran. Tout le reste — le journal lui-même, le verrou qui le
-rend sûr entre fils, la répartition des fils sur les cœurs user, l'auto-épinglage
-et l'inventaire publié dans la ligne `coeurs:` — appartient au moteur
-(`platform/vita_host.h`).
+This is the **path** of the durable progress log, the only window into a
+boot with no screen. Everything else — the log itself, the lock that makes
+it thread-safe, the distribution of threads across user cores,
+auto-pinning, and the inventory published in the `cores:` line — belongs
+to the engine (`platform/vita_host.h`).
 
-!!! danger "Ne le déclarez pas faible, et n'inventez pas de valeur par défaut"
-    Sans cette définition, le lien **échoue** sur cible — et c'est voulu. Le
-    moteur a longtemps appelé son journal par une référence **faible** vers un
-    symbole au préfixe de son premier consommateur : un portage qui ne
-    fournissait rien obtenait un journal **muet** et des fils **non épinglés**,
-    sans la moindre erreur de lien (`docs/migration.md`, piège 9). Un lien qui
-    casse tôt vaut mille fois mieux qu'un service qui se tait.
+!!! danger "Don't declare it weak, and don't invent a default value"
+    Without this definition, the link **fails** on target — and that's
+    intentional. The engine long called its log through a **weak**
+    reference to a symbol prefixed for its first consumer: a port that
+    provided nothing got a **mute** log and **unpinned** threads, with not
+    a single link error (`docs/migration.md`, pitfall 9). A link that
+    breaks early is worth a thousand times more than a service that stays
+    silent.
 
-    Hors console, il n'y a **rien** à fournir : le journal y est un no-op qui ne
-    lit même pas ce chemin.
+    Off console, there's **nothing** to provide: the log there is a no-op
+    that doesn't even read this path.
 
-## Exemple complet : un crochet d'observation à repli fidèle
+## Full example: an observation hook with a faithful fallback
 
-Ce hook intercepte l'entrée d'une fonction du jeu à une adresse précise, compte
-des événements, puis **rejoue fidèlement** le prologue original avant de laisser
-le dynarec continuer — un repli qui ne change rien au comportement, seulement
-instrumenté :
+This hook intercepts a game function's entry at a precise address, counts
+events, then **faithfully replays** the original prologue before letting
+the dynarec continue — a fallback that changes nothing about behavior,
+only instrumented:
 
 ```cpp
 void install_watch(Cpu* cpu, Bridge& br){
-    static uint32_t s_entry = MOD_BASE + 0x2092d0;   // adresse d'ENTRÉE
+    static uint32_t s_entry = MOD_BASE + 0x2092d0;   // ENTRY address
 
     Shim s; s.argc = 0; s.stdcall_cleanup = false; s.tag = "native!watch";
     s.fn = [&br](Cpu& c) -> uint32_t {
         const uint32_t E = c.reg(R_ESP);
         ++g_count;
-        // Repli fidèle : rejoue le prologue original (`push ebx`) puis
-        // reprend juste après, comme si le hook n'avait jamais existé.
+        // Faithful fallback: replay the original prologue (`push ebx`)
+        // then resume right after, as if the hook had never existed.
         c.write_u32(E - 4, c.reg(R_EBX));
         c.set_reg(R_ESP, E - 8);
         br.redirect_next(s_entry + 1);
@@ -184,44 +184,45 @@ void install_watch(Cpu* cpu, Bridge& br){
 }
 ```
 
-À retenir :
+Worth remembering:
 
-- La clé DLL `"native.hook"` est une **convention du portage** pour les crochets
-  qui ne correspondent à aucune vraie DLL Windows, pas une exigence de winx86.
-- Un hook peut être conditionnel (armé par une variable d'environnement) pour du
-  diagnostic optionnel ou de l'A/B de performance.
-- Le « repli fidèle » est le patron le plus sûr pour un hook qui ne fait
-  qu'observer : aucun risque de divergence, seulement un trap par appel.
+- The `"native.hook"` DLL key is a **port convention** for hooks that
+  don't correspond to any real Windows DLL, not a winx86 requirement.
+- A hook can be conditional (armed by an environment variable) for
+  optional diagnostics or performance A/B testing.
+- The "faithful fallback" is the safest pattern for a hook that only
+  observes: no risk of divergence, just one trap per call.
 
-## Pourquoi certains shims restent chez le portage {#frontiere}
+## Why some shims stay with the port {#frontiere}
 
-Un audit mené en tentant d'extraire les shims Win32 d'un portage a trouvé du
-contenu spécifique au jeu caché derrière des noms parfaitement génériques : un
-chemin d'installation codé en dur dans un `SHGetFolderPathA`, une émulation
-d'authentification propre au protocole du jeu dans un shim `CryptoAPI`. Rien
-dans la signature ne le laissait deviner.
+An audit run while trying to extract a port's Win32 shims found
+game-specific content hidden behind perfectly generic names: an install
+path hardcoded into an `SHGetFolderPathA`, an authentication emulation
+specific to the game's own protocol inside a `CryptoAPI` shim. Nothing in
+the signature gave it away.
 
-La conclusion d'alors — « aucun shim Win32 n'est générique par nature » — était
-juste sur le constat et **trop pessimiste sur la suite**. Ce qui a marché
-ensuite, et qui a produit la bibliothèque listée dans [Shims fournis](shims.md) :
+The conclusion at the time — "no Win32 shim is generic by nature" — was
+right about the evidence and **too pessimistic about what followed**.
+What worked afterward, and produced the library listed in [Shims
+provided](shims.md):
 
-**classer chaque fonction par son CORPS, jamais par son nom d'API.**
+**classify every function by its BODY, never by its API name.**
 
-| classe | critère | destination |
+| class | criterion | destination |
 |---|---|---|
-| générique | aucun littéral, branche ou dépendance d'état propre à un jeu ; aucune dépendance à un helper du portage | le moteur |
-| spécifique | un littéral en dur, une dépendance à l'état du jeu, un contournement | le portage |
-| à risque | dépendance non résolue, risque d'inscription en double | reste en place, **avec la raison écrite dans le code** |
+| generic | no literal, branch, or state dependency specific to a game; no dependency on a port helper | the engine |
+| specific | a hardcoded literal, a dependency on game state, a workaround | the port |
+| at risk | an unresolved dependency, risk of duplicate registration | stays in place, **with the reason written in the code** |
 
-Deux critères de tranchage, appris à la dure :
+Two cutting criteria, learned the hard way:
 
-- **Le jeu inspecte-t-il le *contenu* de la valeur rendue, ou seulement son
-  succès ?** Un shim dont seul le succès compte est générique ; un shim dont le
-  contenu est examiné porte une connaissance du jeu. Ça se tranche au
-  désassemblage, pas à la signature.
-- **« Trop enchevêtré » n'est une conclusion acceptable que sur preuve concrète
-  d'un danger** — pas sur la difficulté. Deux chantiers conclus « pas rentable »
-  ont été renversés en refaisant le travail de conception pour de bon, et les
-  deux fois le découplage a tenu.
+- **Does the game inspect the *content* of the returned value, or only
+  its success?** A shim where only success matters is generic; a shim
+  whose content is examined carries game knowledge. That's decided by
+  disassembly, not by signature.
+- **"Too entangled" is only an acceptable conclusion on concrete evidence
+  of a danger** — not on difficulty. Two efforts concluded "not worth it"
+  were reversed by redoing the design work properly, and both times the
+  decoupling held.
 
-La procédure complète est dans `.claude/agents/shim-split.md`.
+The full procedure is in `.claude/agents/shim-split.md`.

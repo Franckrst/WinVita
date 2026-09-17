@@ -1,153 +1,149 @@
-# Outils IA / agents réutilisables
+# AI tooling / reusable agents
 
-Cette page recense l'outillage de développement pensé pour être réutilisable par
-n'importe quel portage basé sur winx86 — pas seulement d2vita — et propose
-quelques pistes pour la suite.
+This page lists the development tooling designed to be reusable by any
+port built on winx86 — not just d2vita — and suggests a few directions for
+later.
 
-## `.claude/skills/` et `.claude/agents/`
+## `.claude/skills/` and `.claude/agents/`
 
-Le savoir-faire du moteur est versionné avec lui, et chargé automatiquement par
-Claude Code quand on travaille dans ce dépôt.
+The engine's know-how is versioned with it, and loaded automatically by
+Claude Code when working in this repository.
 
-Les **skills** décrivent un domaine : les internes du dynarec et de
-l'ordonnanceur, les crochets sur code invité, la méthode d'élimination face à une
-corruption intermittente, la vérification d'un instrument avant d'y croire, le
-protocole de mesure sur vrai matériel, et les bases de la plateforme Vita.
+**Skills** describe a domain: the dynarec and scheduler internals, hooks
+on guest code, the elimination method for an intermittent corruption, how
+to verify an instrument before trusting it, the measurement protocol on
+real hardware, and the Vita platform basics.
 
-Les **agents** décrivent une procédure complète et rejouable :
+**Agents** describe a complete, replayable procedure:
 
-- `shim-split` — déplacer des shims entre le moteur et un portage : classer par
-  le **corps** et non par le nom d'API, le filet `shim_seq`, la règle « une seule
-  inscription par clé », et le seuil à partir duquel « trop enchevêtré » est une
-  conclusion acceptable.
-- `doc-update` — remettre la doc en accord avec le code, en vérifiant dans le
-  code plutôt que dans un résumé.
+- `shim-split` — moving shims between the engine and a port: classify by
+  **body**, not API name, the `shim_seq` safety net, the "one registration
+  per key" rule, and the threshold past which "too entangled" is an
+  acceptable conclusion.
+- `doc-update` — bring the docs back in line with the code, by checking
+  the code rather than a summary.
 
-La frontière est la même que pour le code : ce qui ne sert qu'à un seul
-consommateur (lire *ses* archives, piloter *sa* boucle de jeu) reste chez lui.
+The boundary is the same as for code: whatever only serves a single
+consumer (reading *its* archives, driving *its* game loop) stays with it.
 
-## `tools/gen_shim_list.py` — la page des shims est générée
+## `tools/gen_shim_list.py` — the shims page is generated
 
-[La liste des shims fournis par le moteur](shims.md) n'est pas écrite à la main :
-elle est produite depuis `src/runtime/win32_shims_*.cpp`, en réutilisant le
-parseur déjà éprouvé de `shim_seq.py` plutôt qu'un second analyseur à maintenir
-en parallèle. La CI la régénère et **échoue si elle a divergé**
+[The list of shims provided by the engine](shims.md) isn't hand-written:
+it's produced from `src/runtime/win32_shims_*.cpp`, reusing the
+already-proven parser from `shim_seq.py` rather than maintaining a second
+parallel analyzer. CI regenerates it and **fails if it has drifted**
 (`gen_shim_list.py --check`).
 
-Une liste écrite à la main serait fausse au deuxième commit, et une liste fausse
-est pire qu'une absence de liste : on croit alors savoir ce que le moteur couvre.
+A hand-written list would be wrong by the second commit, and a wrong list
+is worse than no list: it makes you believe you know what the engine
+covers.
 
-Deux choix de fond :
+Two deliberate choices:
 
-- les **doublons d'inscription sont signalés**, pas dédoublonnés en silence — une
-  page qui les masquerait cacherait précisément ce qu'on veut voir ;
-- les ordinaux Winsock sont **nommés d'après la source** (la lambda `connect_fn`
-  donne `connect`), jamais d'après une table recopiée à la main. C'est ce qui
-  rend visible la divergence réelle entre `WSOCK32.dll` et `WS2_32.dll` sur les
-  ordinaux 10/11/12.
+- **duplicate registrations are flagged**, not silently deduplicated — a
+  page that hid them would hide exactly what you want to see;
+- Winsock ordinals are **named from the source** (the `connect_fn` lambda
+  yields `connect`), never from a hand-copied table. That's what makes the
+  real divergence between `WSOCK32.dll` and `WS2_32.dll` on ordinals
+  10/11/12 visible.
 
 ## `tools/shim_seq.py` / `.sh`
 
-Reconstruit la **séquence ordonnée** des shims Win32 (et hooks natifs)
-inscrits dans un binaire de boot, avec l'empreinte du corps de chaque
-inscription, et compare deux états (arbre courant vs une révision git).
-Trois verdicts, du plus grave au moins grave :
+Reconstructs the **ordered sequence** of Win32 shims (and native hooks)
+registered in a boot binary, with a body fingerprint for each
+registration, and compares two states (current tree vs. a git revision).
+Three verdicts, worst to least severe:
 
-- **ENSEMBLE** — une clé apparaît/disparaît, ou change de nombre
-  d'inscriptions. Toujours fatal.
-- **EFFECTIF** — même jeu de clés, mais un autre corps gagne pour au moins
-  une clé (rappel : `register_shim` écrase, la dernière inscription gagne).
-  Toujours fatal — c'est exactement le bug qu'un déplacement de bloc mal
-  fait produit.
-- **ORDRE** — même table effective, mais la séquence diffère (permutation de
-  blocs). Fatal par défaut ; `ALLOW_REORDER=1` l'accepte pour un refactor
-  qui déplace des blocs entiers sans changer la table effective.
+- **SET** — a key appears/disappears, or its registration count changes.
+  Always fatal.
+- **EFFECTIVE** — same key set, but a different body wins for at least one
+  key (reminder: `register_shim` overwrites, the last registration wins).
+  Always fatal — this is exactly the bug a botched block move produces.
+- **ORDER** — same effective table, but the sequence differs (block
+  permutation). Fatal by default; `ALLOW_REORDER=1` accepts it for a
+  refactor that moves whole blocks without changing the effective table.
 
-**Quand s'en servir** : avant tout refactor qui déplace du code
-d'enregistrement de shims — typiquement en sortant un morceau d'un fichier
-monolithique vers son propre fichier, exactement le genre d'opération que ce
-dépôt a effectuée sur lui-même plusieurs fois en se séparant de d2vita.
-Lancer `tools/shim_seq.sh` avant et après ; `OK` = rien n'a changé côté
-table effective.
+**When to use it**: before any refactor that moves shim-registration code
+around — typically when pulling a piece out of a monolithic file into its
+own, exactly the kind of operation this repository has performed on
+itself multiple times while splitting off from d2vita. Run
+`tools/shim_seq.sh` before and after; `OK` = nothing changed on the
+effective-table side.
 
-Un fichier passé via `ALLOW_BODY=<fichier>` documente les transitions de
-corps *explicitement* attendues (clé, empreinte avant, empreinte après)
-quand un changement de comportement est volontaire — jamais un
-blanc-seing, une dérive ultérieure de la même clé redevient fatale. Rien
-n'impose son nom ni son emplacement : ce n'est pas un fichier `.allow` fixe
-versionné dans le dépôt.
+A file passed via `ALLOW_BODY=<file>` documents *explicitly* expected body
+transitions (key, fingerprint before, fingerprint after) when a behavior
+change is intentional — never a blank check, a later drift of the same key
+becomes fatal again. Nothing mandates its name or location: it isn't a
+fixed `.allow` file versioned in the repository.
 
 ## `tools/extract_box86.sh` / `tools/regen_box86_patch.sh`
 
-Permettent de re-synchroniser `third_party/box86-dynarec/` contre une
-version plus récente de Box86 en amont sans perdre les patches locaux :
-`regen_box86_patch.sh` capture le delta local actuel dans un fichier de
-patch mécaniquement validé (auto-vérifié en le réappliquant et en comparant
-le résultat bit à bit) ; `extract_box86.sh` réextrait un Box86 propre,
-réapplique le patch, et **refuse de toucher à l'arbre existant** si le
-résultat diverge — plutôt que d'écraser silencieusement du travail non
-capturé.
+Let you resync `third_party/box86-dynarec/` against a newer upstream Box86
+without losing the local patches: `regen_box86_patch.sh` captures the
+current local delta into a mechanically-validated patch file
+(self-checked by reapplying it and comparing the result bit for bit);
+`extract_box86.sh` re-extracts a clean Box86, reapplies the patch, and
+**refuses to touch the existing tree** if the result diverges — rather
+than silently overwriting uncaptured work.
 
 ## `tools/pe_analyze.cpp`
 
-Inspecte la table d'imports d'un binaire PE32 — utile pour vérifier
-empiriquement quelles fonctions Win32 un binaire importe réellement avant
-d'écrire un shim pour une fonction qui ne sera jamais appelée.
+Inspects a PE32 binary's import table — useful for empirically checking
+which Win32 functions a binary actually imports before writing a shim for
+a function that will never be called.
 
-## La méthodologie d'extraction sûre (démontrée, pas juste documentée)
+## The safe extraction methodology (demonstrated, not just documented)
 
-winx86 lui-même a été extrait de code entangled dans un fichier de boot
-monolithique de 12 000+ lignes, en plusieurs passes. La méthode qui a
-fonctionné, à chaque fois :
+winx86 itself was extracted from code entangled in a 12,000+ line
+monolithic boot file, over several passes. The method that worked, every
+time:
 
-1. **Cartographier en lecture seule d'abord** — identifier les limites
-   exactes (souvent non contiguës : du code apparenté peut être entrelacé
-   avec du code totalement différent) et l'inventaire complet des symboles
-   qui traversent la frontière, avant de toucher à un seul fichier.
-2. **Ne jamais faire confiance à une estimation de limites** — revérifier
-   avec l'outillage (`grep -n`, `sed -n`) au moment de l'extraction, pas
-   seulement au moment de la cartographie ; le code bouge.
-3. **Externaliser mécaniquement, sans changer la logique** — chaque symbole
-   qui traverse la frontière devient un `extern`, rien d'autre ne change.
-4. **Valider avec un diff de séquence/empreinte** (`shim_seq.sh` ici) **et
-   un oracle déterministe rejoué deux fois** (voir la documentation de
-   d2vita pour l'oracle qemu-arm) — ne commiter que si les deux sont
-   authentiquement au vert, jamais sur la seule preuve de compilation.
-5. **S'arrêter et rapporter honnêtement si ce n'est pas un mouvement propre**
-   — plusieurs tentatives pendant l'extraction de winx86 ont été
-   volontairement interrompues en cours de route (un mouvement de shims Win32
-   entiers a été abandonné en découvrant du contenu spécifique au jeu caché
-   dans des noms de fonction génériques). Une extraction bâclée qui « a l'air
-   de marcher » est pire qu'aucune extraction.
+1. **Map read-only first** — identify the exact boundaries (often
+   non-contiguous: related code can be interleaved with completely
+   unrelated code) and the full inventory of symbols crossing the
+   boundary, before touching a single file.
+2. **Never trust an estimated boundary** — re-verify with tooling
+   (`grep -n`, `sed -n`) at extraction time, not just at mapping time; the
+   code moves.
+3. **Externalize mechanically, without changing the logic** — every
+   symbol crossing the boundary becomes an `extern`, nothing else changes.
+4. **Validate with a sequence/fingerprint diff** (`shim_seq.sh` here)
+   **and a deterministic oracle replayed twice** (see d2vita's own
+   documentation for the qemu-arm oracle) — commit only if both are
+   genuinely green, never on compile success alone.
+5. **Stop and report honestly if it isn't a clean move** — several
+   attempts during winx86's extraction were deliberately aborted midway
+   (a move of whole Win32 shims was abandoned upon discovering
+   game-specific content hidden in generic-looking function names). A
+   sloppy extraction that "looks like it works" is worse than no
+   extraction at all.
 
-## Une technique nommée : la généricité par comparaison
+## A named technique: genericity by comparison
 
-Quand deux portages existent (ici : d2vita et son projet frère carn-vita,
-tous deux dérivés du même moteur), on peut *prouver* qu'un bout de code est
-générique plutôt que de le supposer : si les deux portages ont le même corps
-pour une même fonction, c'est une preuve forte de généricité ; s'ils ont
-divergé, c'est la preuve qu'une personnalisation était nécessaire — même si
-le nom de la fonction (`GetVersion`, `CreateProcessA`...) ne le laisse pas
-deviner. Cette technique a permis de retrouver, remonter et croiser
-plusieurs correctifs génériques entre les deux projets avant que winx86
-n'existe comme dépôt séparé.
+When two ports exist (here: d2vita and its sibling project carn-vita,
+both derived from the same engine), you can *prove* a piece of code is
+generic rather than assume it: if both ports have the same body for the
+same function, that's strong proof of genericity; if they've diverged,
+that's proof that customization was needed — even when the function's
+name (`GetVersion`, `CreateProcessA`...) gives no hint of it. This
+technique made it possible to find, upstream, and cross-check several
+generic fixes between the two projects before winx86 existed as a
+separate repository.
 
-## Propositions (pas encore construites)
+## Proposals (not yet built)
 
-- **Un `CLAUDE.md` gabarit** pour tout nouveau portage basé sur winx86,
-  capturant les règles qui ont rendu ce travail fiable : ne jamais affirmer
-  qu'un test/build a réussi sans l'avoir réellement exécuté ; dépôt privé
-  par défaut tant que la légalité d'un portage depuis des binaires
-  propriétaires n'a pas été tranchée ; jamais de comportement factice marqué
-  comme complet.
-- **Un gabarit de CI à trois niveaux** (qemu-arm rapide → Vita3K → matériel
-  réel) packagé en `.gitlab-ci.yml` réutilisable, pour qu'un nouveau portage
-  n'ait pas à redécouvrir la distinction entre « ça compile », « ça boote
-  sous émulation » et « c'est réellement plus rapide sur la vraie console ».
-  La CI actuelle ne fait que publier le site et vérifier la fraîcheur de la
-  page générée.
-- **Un `shim_seq` généralisé au-delà des shims** — le même patron
-  (séquence + empreinte + diff entre deux révisions) s'appliquerait à
-  n'importe quelle table d'enregistrement « dernière inscription gagne »,
-  pas seulement `register_shim`. Pas encore extrait en bibliothèque
-  générique faute d'un deuxième cas d'usage concret pour le justifier.
+- **A `CLAUDE.md` template** for any new port built on winx86, capturing
+  the rules that made this work reliable: never claim a test/build
+  succeeded without actually running it; private repository by default
+  until a port's legality from decompiled proprietary binaries has been
+  settled; never fake behavior marked as complete.
+- **A three-tier CI template** (fast qemu-arm → Vita3K → real hardware)
+  packaged as a reusable `.gitlab-ci.yml`, so a new port doesn't have to
+  rediscover the distinction between "it compiles," "it boots under
+  emulation," and "it's actually faster on real console." The current CI
+  only publishes the site and checks the generated page is fresh.
+- **A `shim_seq` generalized beyond shims** — the same pattern
+  (sequence + fingerprint + diff between two revisions) would apply to
+  any "last registration wins" registration table, not just
+  `register_shim`. Not yet extracted into a generic library for lack of a
+  second concrete use case to justify it.

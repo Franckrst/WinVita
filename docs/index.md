@@ -1,74 +1,73 @@
 # winx86
 
-**Moteur générique d'exécution x86 → ARMv7 pour jeux Windows (PE32) sur PS Vita.**
+**Generic x86 → ARMv7 execution engine for porting Windows games (PE32) to PS Vita.**
 
-winx86 charge un exécutable ou une DLL Windows x86 (32 bits), traduit son code
-au vol vers ARMv7 (dynarec dérivé de [Box86](https://github.com/ptitSeb/box86)),
-fournit une bibliothèque de [shims Win32 prouvés génériques](shims.md), et
-offre les points d'accroche pour qu'un portage y branche les siens et ses
-propres optimisations natives — **sans que winx86 ait besoin de connaître le
-jeu**.
+winx86 loads a Windows x86 (32-bit) executable or DLL, translates its code
+on the fly to ARMv7 (dynarec derived from
+[Box86](https://github.com/ptitSeb/box86)), provides a library of
+[Win32 shims proven to be generic](shims.md), and offers the hook points
+for a port to plug in its own and its own native optimizations — **without
+winx86 ever needing to know the game**.
 
-Ce dépôt est **privé** pour l'instant.
+This repository is **private** for now.
 
-## À qui ça s'adresse
+## Who this is for
 
-À quiconque veut porter un jeu Windows x86 (PE32) sur PS Vita sans repartir
-de zéro sur la partie « faire tourner du code x86 sur ARM ». winx86 charge,
-traduit, ordonnance, sert les appels Win32 dont il a été prouvé qu'ils ne
-dépendent d'aucun jeu, et offre des points d'extension pour le reste. Ce qui
-relève du portage lui-même : les shims que *son* binaire attend et que le
-moteur ne fournit pas, les fonctions à porter en natif pour la performance, et
-l'installation/configuration du jeu.
+Anyone porting a Windows x86 (PE32) game to PS Vita who doesn't want to
+start from zero on "run x86 code on ARM." winx86 loads, translates,
+schedules, serves the Win32 calls proven to depend on no game, and offers
+extension points for the rest. What belongs to the port itself: the shims
+*its* binary expects that the engine doesn't provide, the functions worth
+porting natively for performance, and the game's own install/configuration.
 
-## Preuve par l'exemple : d2vita
+## Proof by example: d2vita
 
-[d2vita](https://gitlab.com/claude5564407/d2-vita) est le portage qui a fait
-naître winx86 : un portage privé et personnel de *Diablo II: Lord of
-Destruction*. winx86 en a été extrait le 2026-09-09 en isolant ce qui n'avait
-**aucune** connaissance du jeu.
+[d2vita](https://gitlab.com/claude5564407/d2-vita) is the port that gave
+birth to winx86: a private, personal port of *Diablo II: Lord of
+Destruction*. winx86 was extracted from it on 2026-09-09 by isolating
+whatever had **zero** knowledge of the game.
 
-La frontière a bougé depuis, dans le bon sens : ce qui était au départ « zéro
-shim dans le moteur » est devenu une bibliothèque de plus de deux cents
-inscriptions, groupe de DLL par groupe de DLL, chacune extraite après lecture
-de son **corps** et non de son nom d'API. Ce qui reste chez d2vita y reste avec
-une raison technique écrite — pas par prudence. d2vita consomme winx86 comme un
-sous-module git.
+The boundary has moved since, in the right direction: what started as "zero
+shims in the engine" became a library of more than two hundred
+registrations, DLL group by DLL group, each extracted after reading its
+**body**, never its API name. What stays in d2vita stays there with a
+written technical reason — not out of caution. d2vita consumes winx86 as a
+git submodule.
 
-## L'architecture en un coup d'œil
+## Architecture at a glance
 
 ```
-Exécutable Windows (.exe/.dll)
+Windows executable (.exe/.dll)
         │
-   Chargeur PE32 (src/runtime/pe_image.*)
+   PE32 loader (src/runtime/pe_image.*)
         │
-   Interface Cpu (src/runtime/cpu.h) ──── backend CpuBox86 (ARMv7, dynarec)
+   Cpu interface (src/runtime/cpu.h) ──── CpuBox86 backend (ARMv7, dynarec)
         │
-   Bridge (src/runtime/bridge.*) ─── point d'extension : shims Win32 + hooks natifs
+   Bridge (src/runtime/bridge.*) ─── extension point: Win32 shims + native hooks
         │
-   Ordonnanceur de fils invités (coopératif ou natif + GIL)
+   Guest thread scheduler (cooperative or native + GIL)
 ```
 
-## Architecture « hybride »
+## "Hybrid" architecture
 
-winx86 est une **bibliothèque statique autonome et compilable seule**
-(`libwinx86.a`), pas un fork à copier-coller. Un portage l'ajoute comme
-sous-module git et lie son propre exécutable de boot contre cette
-bibliothèque. Ça veut dire concrètement :
+winx86 is a **self-contained, independently buildable static library**
+(`libwinx86.a`), not a fork to copy-paste. A port adds it as a git
+submodule and links its own boot executable against this library.
+Concretely, that means:
 
-- winx86 évolue dans son propre historique git, sa propre CI, sa propre
-  suite de vérifications (`tools/shim_seq.py`, l'oracle qemu-arm).
-- Un portage peut épingler une version précise de winx86 (le commit du
-  sous-module) et la faire évoluer à son rythme.
-- Un correctif générique découvert par un portage (ex: un bug de dynarec) se
-  remonte dans winx86 et profite à tous les portages qui le consomment — la
-  méthode a déjà servi une fois entre d2vita et son projet frère privé
-  *carn-vita* (portage de Carnivores 2, même moteur sous-jacent, forké de
-  d2vita avant l'existence de ce dépôt) : trois correctifs génériques
-  trouvés côté carn-vita ont été remontés dans d2vita début septembre 2026,
-  avant même que winx86 existe comme dépôt séparé.
+- winx86 evolves in its own git history, its own CI, its own verification
+  suite (`tools/shim_seq.py`, the qemu-arm oracle).
+- A port can pin an exact winx86 version (the submodule commit) and
+  advance it at its own pace.
+- A generic fix found by one port (e.g. a dynarec bug) gets upstreamed
+  into winx86 and benefits every port that consumes it — the method has
+  already paid off once between d2vita and its private sibling project
+  *carn-vita* (a port of Carnivores 2, same underlying engine, forked from
+  d2vita before this repository existed): three generic fixes found on the
+  carn-vita side were upstreamed into d2vita in early September 2026,
+  before winx86 even existed as a separate repository.
 
-## Pour démarrer
+## Getting started
 
-Voir [Démarrage rapide](demarrage.md) pour compiler winx86 seul, et
-[Point d'extension](extension.md) pour brancher votre propre jeu dessus.
+See [Quick start](demarrage.md) to build winx86 on its own, and
+[Extension point](extension.md) to plug in your own game.
