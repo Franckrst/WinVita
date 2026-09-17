@@ -3,7 +3,7 @@
 ## Cloner
 
 ```bash
-git clone git@gitlab.com:claude5564407/winx86.git
+git clone git@github.com:Franckrst/WinVita.git winx86
 cd winx86
 ```
 

@@ -141,7 +141,7 @@ n'existe comme dépôt séparé.
   propriétaires n'a pas été tranchée ; jamais de comportement factice marqué
   comme complet.
 - **Un gabarit de CI à trois niveaux** (qemu-arm rapide → Vita3K → matériel
-  réel) packagé en `.gitlab-ci.yml` réutilisable, pour qu'un nouveau portage
+  réel) packagé en workflow GitHub Actions réutilisable, pour qu'un nouveau portage
   n'ait pas à redécouvrir la distinction entre « ça compile », « ça boote
   sous émulation » et « c'est réellement plus rapide sur la vraie console ».
   La CI actuelle ne fait que publier le site et vérifier la fraîcheur de la

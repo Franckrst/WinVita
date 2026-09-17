@@ -22,8 +22,8 @@ porting natively for performance, and the game's own install/configuration.
 
 ## Proof by example: d2vita
 
-[d2vita](https://gitlab.com/claude5564407/d2-vita) is the port that gave
-birth to winx86: a private, personal port of *Diablo II: Lord of
+[d2vita](https://github.com/Franckrst/D2Vita) is the port that gave
+birth to winx86: a personal port of *Diablo II: Lord of
 Destruction*. winx86 was extracted from it on 2026-09-09 by isolating
 whatever had **zero** knowledge of the game.
 

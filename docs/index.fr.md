@@ -23,8 +23,8 @@ l'installation/configuration du jeu.
 
 ## Preuve par l'exemple : d2vita
 
-[d2vita](https://gitlab.com/claude5564407/d2-vita) est le portage qui a fait
-naître winx86 : un portage privé et personnel de *Diablo II: Lord of
+[d2vita](https://github.com/Franckrst/D2Vita) est le portage qui a fait
+naître winx86 : un portage personnel de *Diablo II: Lord of
 Destruction*. winx86 en a été extrait le 2026-09-09 en isolant ce qui n'avait
 **aucune** connaissance du jeu.
 

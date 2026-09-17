@@ -1,7 +1,7 @@
 site_name: winx86
 site_description: Generic x86 → ARMv7 engine for porting Windows games (PE32) to PS Vita
-site_url: https://winx86-136891.gitlab.io/
-repo_url: https://gitlab.com/claude5564407/winx86
+site_url: https://franckrst.github.io/WinVita/
+repo_url: https://github.com/Franckrst/WinVita
 theme:
   name: material
   palette:

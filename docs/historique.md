@@ -14,7 +14,7 @@ designed to be upstreamable to Box86 itself. See
 ## Extraction from d2vita (2026-09-09)
 
 winx86 was extracted on 2026-09-09 from the
-[d2vita](https://gitlab.com/claude5564407/d2-vita) project, a port of
+[d2vita](https://github.com/Franckrst/D2Vita) project, a port of
 Diablo II: Lord of Destruction to PS Vita, by isolating the subset of the
 engine that had no knowledge of the game (PE32 loader, dynarec, `Cpu`/
 `Bridge`, schedulers, generic tooling). The rest — the game's ~600 Win32

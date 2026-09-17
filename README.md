@@ -1,12 +1,10 @@
 # winx86
 
 Moteur générique d'exécution x86 → ARMv7 pour des jeux Windows (PE32) sur PS
-Vita. Extrait du projet [d2vita](https://gitlab.com/claude5564407/d2-vita)
+Vita. Extrait du projet [d2vita](https://github.com/Franckrst/D2Vita)
 (un portage de Diablo II: Lord of Destruction) le 2026-09-09, dans le but
 d'être réutilisable pour porter n'importe quel autre jeu Windows x86 sur PS
 Vita sans rien connaître de ce jeu en particulier.
-
-Dépôt privé pour l'instant.
 
 ## Ce que c'est
 

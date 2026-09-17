@@ -138,7 +138,7 @@ separate repository.
   until a port's legality from decompiled proprietary binaries has been
   settled; never fake behavior marked as complete.
 - **A three-tier CI template** (fast qemu-arm → Vita3K → real hardware)
-  packaged as a reusable `.gitlab-ci.yml`, so a new port doesn't have to
+  packaged as a reusable GitHub Actions workflow, so a new port doesn't have to
   rediscover the distinction between "it compiles," "it boots under
   emulation," and "it's actually faster on real console." The current CI
   only publishes the site and checks the generated page is fresh.
