@@ -7,8 +7,9 @@
 // stdcall_cleanup = true} with cpu.arg(0) == this covers it — no Bridge
 // changes, no hand-written assembly.
 //
-// Without D2_SON, DirectSoundCreate returns DSERR_NODRIVER (0x88780078) — no
-// thread, no library, no vtable touches guest memory. The 32 trap slots are
+// D2_SON is armed by default; with D2_SON=0, DirectSoundCreate returns
+// DSERR_NODRIVER (0x88780078) instead — no thread, no library, no vtable
+// touches guest memory. The 32 trap slots are
 // still allocated unconditionally: alloc_trap advances the allocator by a
 // fixed 16 bytes per slot, so conditional registration would shift guest
 // memory layout between the enabled/disabled paths for reasons unrelated to

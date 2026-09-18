@@ -10,8 +10,8 @@
 //            audio before any DSP work exists.
 //   * vita — sceAudioOut (src/platform/vita_audio.cpp), console only.
 //
-// No sink is OPENED until D2_SON is armed: without the knob, this file does
-// nothing at all.
+// No sink is OPENED unless D2_SON is armed — on by default; D2_SON=0 keeps
+// this file inert.
 #pragma once
 #include <cstdint>
 

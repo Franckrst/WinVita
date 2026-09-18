@@ -926,10 +926,11 @@ void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
     // warning needed.
     const char* k     = env2("WX86_SON",      "D2_SON");
     const char* dump0 = env2("WX86_SONDUMP",  "D2_SONDUMP");
-    // SONDUMP alone implies SON=wav. SON=0 is always authoritative: it
-    // disables everything regardless of SONDUMP.
+    // On by default (unset == on, routed to the real sink below). SON=0 is
+    // always authoritative: it's the explicit opt-out benches rely on
+    // (D2_SONDUMP alone still selects the wav sink either way, see below).
     g_on  = (k && *k) ? (std::strcmp(k, "0") != 0)
-                      : (dump0 && *dump0);
+                      : true;
     // A sink armed without a frequency can only play at the wrong pitch. The
     // engine doesn't guess: it refuses to arm, and says so.
     if (g_on && kRate <= 0) {
