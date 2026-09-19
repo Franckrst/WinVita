@@ -57,6 +57,10 @@ add_library(winx86_core STATIC
   # le journal de progression, qui a ici sa version no-op : le corps generique
   # de la bibliotheque (bridge.cpp) l'appelle en lien FORT sur les deux cibles.
   src/platform/vita_host.cpp
+  # Arene paresseuse (WX86_ARENA_LAZY) : primitive generique, C. Hors console
+  # elle emule le modele Vita avec mmap(PROT_NONE)+mprotect, ce qui la rend
+  # testable sous qemu-arm ; sans la variable d'environnement, elle est inerte.
+  src/platform/vita_lazymem.c
   src/render/render_null.cpp)
 target_include_directories(winx86_core PUBLIC src)
 # src/dynarec86/shim en PRIVE, pour la seule DECLARATION de my_cpuid.h.

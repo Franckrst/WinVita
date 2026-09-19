@@ -1,0 +1,21 @@
+# NID database for the kubridge calls used by platform/vita_lazymem.c.
+# Input of vita-libs-gen (build.sh, TARGET=vita), which emits WEAK import
+# stubs (GEN_WEAK_EXPORTS=1): the eboot must still start without kubridge.
+#
+# Function NIDs: the bythos14 fork's exports.yml (v0.3.1_hotfix). The library
+# and module NIDs are derived from the name "kubridge" by vita-elf-export
+# (same name in FloW's original and in the fork, hence the same values).
+modules:
+  kubridge:
+    nid: 0x6563fab4
+    libraries:
+      kubridge:
+        nid: 0x6db9389b
+        kernel: false
+        version: 0x1
+        functions:
+          kuKernelMemReserve: 0xced3608c
+          kuKernelMemCommit: 0x9c0cd758
+          kuKernelMemDecommit: 0x9bdf5881
+          kuKernelRegisterExceptionHandler: 0xf9025d19
+          kuKernelReleaseExceptionHandler: 0xdf9f3bed

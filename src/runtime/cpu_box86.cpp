@@ -37,6 +37,7 @@
 #include <cstdint>
 #include "runtime/guest_thread.h"   // X86Context (per-thread FPU blob)
 #include "runtime/prof_map.h" // address-family map for the profiler (provided by the port)
+#include "platform/vita_lazymem.h"   // lazy arena (WX86_ARENA_LAZY): inert (one NULL test) without the knob
 #include "runtime/cpu.h"    // MUST be included before the Box86 headers:
                             // Box86's regs.h #defines R_EAX & friends.
 #include "runtime/gil.h"    // GIL guard at the trap dispatch (inert under the cooperative backend)
@@ -233,6 +234,12 @@ extern "C" int dyn86_crash_fd = -1;
 static uintptr_t g_mb;   // guest->host membase (defined once; H(va)=va+g_mb). Fwd for diag_segv.
 #ifndef __vita__
 static void diag_segv(int sig, siginfo_t* si, void* uctx) {
+    // Lazy arena (WX86_ARENA_LAZY): a reserved-but-unbacked chunk faults
+    // exactly as it would on the Vita's MMU. Back it and re-execute the
+    // faulting instruction — the same safety net kubridge's data-abort
+    // handler provides on hardware, which is what makes the mechanism
+    // testable under qemu-arm. Inert (one NULL test) without the knob.
+    if (sig == SIGSEGV && si && wx86_lazymem_fault((uintptr_t)si->si_addr)) return;
     x86emu_t* e = dyn86_diag_emu;
     uintptr_t pc = 0, lr = 0, sp = 0, r0 = 0, r1 = 0, r2 = 0;
     uintptr_t live[8] = {0}; bool live_ok = false;
@@ -593,6 +600,27 @@ public:
             // (the old fixed calculation) remains the last resort.
             const uint64_t need = (sz > 0x1000000ull) ? sz - 0x1000000ull : sz;
             void* blk = MAP_FAILED;
+            // WX86_ARENA_LAZY: reserve address space with no physical pages
+            // and attach them per 64 KiB chunk on commit (platform/
+            // vita_lazymem.c). The 16 MiB of membase-alignment slack costs
+            // nothing here, since only committed chunks are real memory.
+            // Everything below this block is the unchanged eager path, which
+            // stays the fallback: a refused reservation (no kubridge, kernel
+            // refusal) must never mean "no arena".
+            if (uint64_t resv = 0; void* lb = wx86_lazymem_reserve(need, 0x1000000ull, &resv)) {
+                g_mb = (uintptr_t)lb;
+                g_arena = true;
+                g_arena_span = (uint32_t)need;
+                { char m[176];
+                    snprintf(m, sizeof m, "arene: PARESSEUSE membase=%p span=%u Mo reserve=%llu Mo (espace d'adresses) "
+                                          "engage=0 perdu-alignement=0 Ko",
+                             (void*)g_mb, (unsigned)(g_arena_span >> 20), (unsigned long long)(resv >> 20));
+                    wx86_vita_progress_c(m); }
+                dyn86_set_membase(g_mb);
+                dyn86_mi_set_span(g_arena_span);
+                fprintf(stderr, "[cpu_box86] arena: LAZY membase=0x%lx span=0x%x reserved=0x%llx\n",
+                        (unsigned long)g_mb, (unsigned)g_arena_span, (unsigned long long)resv);
+            } else {
             {
                 uint64_t slack = 0x1000000ull;          // default = old fixed calculation
                 void* probe = mmap(nullptr, 0x100000, PROT_READ|PROT_WRITE,
@@ -651,6 +679,7 @@ public:
             dyn86_mi_set_span(g_arena_span);
             fprintf(stderr, "[cpu_box86] arena: block=%p size=0x%llx membase=0x%lx (Vita single-block model)\n",
                     blk, (unsigned long long)sz, (unsigned long)g_mb);
+            }   // end of the eager path
         } else if (const char* mbs = getenv("WX86_MEMBASE") ? getenv("WX86_MEMBASE")
                                                             : getenv("D2MEMBASE")) {
             g_mb = strtoul(mbs, nullptr, 16);
@@ -735,6 +764,11 @@ public:
         // Arena mode: the single block already backs [0, arena) — no per-region
         // mmap (exactly how a Vita VM memblock works: one allocation, addressed
         // by offset). Otherwise host-mmap this region RWX at H(a).
+        // Lazy arena: map() is the engine declaring "this region exists", so
+        // it is exactly where its backing is paid — except over the range the
+        // consumer manages itself (wx86_arena_set_lazy_range), which is
+        // reserved on purpose. No-op without the knob.
+        wx86_arena_commit_fixed(a, end - a);
         if (!g_arena) {
             void* p = mmap(H(a), end - a, PROT_READ|PROT_WRITE|PROT_EXEC,
                            MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0);
@@ -769,6 +803,12 @@ public:
             return false;
         }
         if (!arena_check(va, n, "read")) { std::memset(dst, 0, n); return false; }
+        // Lazy arena: back the range before touching it. Doing it HERE and in
+        // hostptr(), rather than leaving it to the fault net, is what keeps a
+        // kernel copy into guest memory (ReadFile -> sceIoRead/read(2)) from
+        // failing as a silent short read — a kernel-side fault never reaches
+        // a user handler. One NULL test when the knob is absent.
+        if (wx86_lazymem_state && !wx86_arena_ensure(va, n)) { std::memset(dst, 0, n); return false; }
         std::memcpy(dst, (const void*)H(va), n);
         return true;
     }
@@ -776,6 +816,7 @@ public:
         // A translated page is host-write-protected (protectDB); lift it and
         // mark the affected dynablocks dirty before the host-side write.
         if (!arena_check(va, n, "write")) return false;
+        if (wx86_lazymem_state && !wx86_arena_ensure(va, n)) return false;
         if (isprotectedDB(va, n)) unprotectDB(va, n, 1);
         std::memcpy(H(va), src, n);
         return true;
@@ -799,6 +840,7 @@ public:
     // caller fall back to read()/write(), which are themselves range-checked.
     void* hostptr(uint32_t va, uint32_t n = 1) override {
         if (!arena_check(va, n, "hostptr")) return nullptr;
+        if (wx86_lazymem_state && !wx86_arena_ensure(va, n)) return nullptr;
         return H(va); }
     // custommem tracks every map()ed region via setProtection — zero means no
     // guest region covers this address (a raw garbage pointer from the guest).
@@ -1005,6 +1047,7 @@ public:
     void set_trap(uint32_t lo, uint32_t hi, TrapFn fn) override {
         trap_lo_ = lo; trap_hi_ = hi; trap_fn_ = std::move(fn);
         if (!trap_mapped_) {
+            wx86_arena_commit_fixed(lo, hi - lo);   // exit stubs are written just below
             if (!g_arena) {
                 void* p = mmap(H(lo), hi - lo, PROT_READ|PROT_WRITE|PROT_EXEC,
                                MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE, -1, 0);

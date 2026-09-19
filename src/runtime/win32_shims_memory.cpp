@@ -12,6 +12,7 @@
 #include "runtime/guest_thread_ctx.h"
 #include "guest_region.h"
 #include "layout.h"
+#include "platform/vita_lazymem.h"   // lazy arena (WX86_ARENA_LAZY), inert by default
 #include <cstdint>
 #include <cstring>
 #include <functional>
@@ -85,6 +86,19 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     K("VirtualAlloc",4,[](Cpu&c){ uint32_t hint=c.arg(0),sz=c.arg(1)?c.arg(1):0x1000,ty=c.arg(2);
         if(hint){ uint32_t blk=g_plan.va->block_of(hint); if(blk){
             note(WX86_MEM_VA_COMMIT_IN,&c,hint,sz,ty,c.arg(3));   // commit inside an existing reservation
+            // Lazy arena: THIS is where a reservation's pages get their
+            // backing, exactly as Win32 says (MEM_RESERVE costs address
+            // space, MEM_COMMIT costs memory). Clipped to the reservation so
+            // a sloppy size can't back its neighbours. Off: the whole block
+            // was already backed at reserve time, so this is a no-op.
+            if((ty&0x1000u) && wx86_arena_lazy()){
+                uint64_t end=(uint64_t)hint+sz, blkEnd=(uint64_t)blk+g_plan.va->size_of(blk);
+                if(end>blkEnd) end=blkEnd;
+                if(end>hint && !wx86_arena_commit(hint,(uint32_t)(end-hint))){
+                    uint32_t ra=c.read_u32(c.reg(R_ESP));
+                    note(WX86_MEM_VA_FAIL,&c,hint,sz,ty,c.arg(3),ra);
+                    wx86_set_lasterr(c,8u);                        // ERROR_NOT_ENOUGH_MEMORY
+                    return 0u; } }
             uint32_t p0=hint&~0xFFFu, p1=(hint+sz+0xFFFu)&~0xFFFu;
             for(uint32_t p=p0;p<p1;p+=4096){ auto it=g_decommitted.find(p);
                 if(it!=g_decommitted.end()){ gzero(c,p,4096); g_decommitted.erase(it); } }
@@ -99,6 +113,18 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
         uint32_t a=g_plan.va->alloc(sz);
         if(!a){ uint32_t ra=c.read_u32(c.reg(R_ESP));           // record the faulting site
             note(WX86_MEM_VA_FAIL,&c,hint,sz,ty,c.arg(3),ra); }
+        // Lazy arena: a bare MEM_RESERVE touches nothing at all (no backing,
+        // no zero-fill) — that IS the saving. With MEM_COMMIT the pages are
+        // backed first, and the zero-fill below stays: Win32 promises zeros
+        // and the caller must not be able to tell the two modes apart.
+        if(a && wx86_arena_lazy()){
+            if(!(ty&0x1000u)) return a;
+            if(!wx86_arena_commit(a,sz)){
+                uint32_t ra=c.read_u32(c.reg(R_ESP));
+                note(WX86_MEM_VA_FAIL,&c,a,sz,ty,c.arg(3),ra);
+                g_plan.va->free(a);
+                wx86_set_lasterr(c,8u);                          // ERROR_NOT_ENOUGH_MEMORY
+                return 0u; } }
         if(a) gzero(c,a,sz);
         return a; });
     K("VirtualFree",3,[](Cpu&c){ uint32_t a=c.arg(0),sz=c.arg(1),ft=c.arg(2);
@@ -112,11 +138,21 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
             // whole image, and the next allocation overwrote its code/vtables.
             if(sz!=0 || (g_plan.va->block_of(a) && blk!=a)){ wx86_set_lasterr(c,87u); return 0u; }
             uint32_t bs=g_plan.va->size_of(blk);
-            if(g_plan.va->free(blk)) note(WX86_MEM_VA_RELEASE,&c,blk,bs,ft);
+            if(g_plan.va->free(blk)){ note(WX86_MEM_VA_RELEASE,&c,blk,bs,ft);
+                wx86_arena_release(blk,bs); }   // lazy arena: the pages go back to the system
             else { uint32_t ra=c.read_u32(c.reg(R_ESP));         // a LOST free = arena leak
                 note(WX86_MEM_VA_RELEASE_MISS,&c,a,bs,ft,0,ra); }
             return 1u; }
         if(ft&0x4000u){                                                      // MEM_DECOMMIT: keep backing,
+            // Win32/Wine (NtFreeVirtualMemory): dwSize 0 means "the whole
+            // reservation", and is REFUSED unless lpAddress is its base
+            // (STATUS_FREE_VM_NOT_AT_BASE -> ERROR_INVALID_ADDRESS). Treating
+            // it as "one page here" is what the engine used to do; a lazy
+            // policy that ever decommits for real would then hand back live
+            // memory. Measured 2537 such calls in the reference Wine trace,
+            // all answered 0, and the caller ignores the result.
+            if(!sz){ uint32_t b=g_plan.va->block_of(a);
+                if(b && b!=a){ wx86_set_lasterr(c,487u); return 0u; } }
             uint32_t p0=a&~0xFFFu, p1=(a+(sz?sz:1)+0xFFFu)&~0xFFFu;          // but a later recommit must zero
             note(WX86_MEM_VA_DECOMMIT,&c,p0,p1-p0,ft);
             for(uint32_t p=p0;p<p1;p+=4096) g_decommitted.insert(p); }

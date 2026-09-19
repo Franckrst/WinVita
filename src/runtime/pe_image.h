@@ -54,6 +54,12 @@ public:
     // Index 0 corresponds to VA == load_base.
     std::vector<uint8_t>&       image()       { return image_; }
     const std::vector<uint8_t>& image() const { return image_; }
+    // Frees the host copy once the image lives in guest memory (after
+    // Bridge::commit/link and any repatch_import). image_size() and the
+    // import/export tables stay valid; at_rva/read_u32/write_u32/patch_iat
+    // then fail cleanly (bounds are the buffer's size) instead of touching
+    // freed memory. The caller must not map this image again afterwards.
+    void release_image() { std::vector<uint8_t>().swap(image_); }
 
     uint32_t load_base()  const { return load_base_; }
     uint32_t image_size() const { return image_size_; }
