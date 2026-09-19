@@ -9,6 +9,7 @@
 #include "win32_shims_memory.h"
 #include "runtime/bridge.h"
 #include "runtime/cpu.h"
+#include "runtime/guest_thread_ctx.h"
 #include "guest_region.h"
 #include "layout.h"
 #include <cstdint>
@@ -102,6 +103,14 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
         return a; });
     K("VirtualFree",3,[](Cpu&c){ uint32_t a=c.arg(0),sz=c.arg(1),ft=c.arg(2);
         if(ft&0x8000u){ uint32_t blk=g_plan.va->block_of(a)?g_plan.va->block_of(a):a;  // MEM_RELEASE
+            // Win32: MEM_RELEASE takes the reservation's BASE and dwSize 0;
+            // anything else fails with ERROR_INVALID_PARAMETER and frees
+            // NOTHING. Releasing the enclosing block instead freed live
+            // memory: a PE-style in-memory loader that "releases" one page
+            // in the middle of the image it just mapped (seen in WoW 1.12's
+            // Warden module loader, whose call Wine answers with 0) lost the
+            // whole image, and the next allocation overwrote its code/vtables.
+            if(sz!=0 || (g_plan.va->block_of(a) && blk!=a)){ wx86_set_lasterr(c,87u); return 0u; }
             uint32_t bs=g_plan.va->size_of(blk);
             if(g_plan.va->free(blk)) note(WX86_MEM_VA_RELEASE,&c,blk,bs,ft);
             else { uint32_t ra=c.read_u32(c.reg(R_ESP));         // a LOST free = arena leak
