@@ -613,6 +613,29 @@ void NativeScheduler::finish_thread(GuestThread* t, bool ok, const char* fault) 
                         t->id, cpu_->reg(R_EAX), cpu_->reg(R_EBX), cpu_->reg(R_ECX), cpu_->reg(R_EDX),
                         cpu_->reg(R_ESI), cpu_->reg(R_EDI), cpu_->reg(R_EBP), esp);
           progress(l);
+          // Faulting instruction bytes + where the EIP sits. On a dynarec fault
+          // (unimplemented/illegal/div0) the EIP is the block the translator
+          // choked on, so these bytes ARE the offending opcode; "hors module"
+          // means generated / VirtualAlloc'd memory (wild execution) rather than
+          // a missing opcode in real image code. This is the only handle on the
+          // dump-less dynarec-fault crashes. read() fails soft (zeros) outside
+          // the arena, so it can never fault here.
+          { uint32_t fa = cpu_->fault_addr(); uint8_t op[16] = {0};
+            cpu_->read(fa, op, sizeof op);
+            uint32_t mb = 0; bool inMod = false;
+            for (size_t k = 0; k < mods.size(); ++k)
+                if (fa >= mods[k].first && fa - mods[k].first < mods[k].second) { inMod = true; mb = mods[k].first; break; }
+            if (inMod)
+                std::snprintf(l, sizeof l, "  fault opcode @%08x (module @%08x +0x%x): "
+                    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                    fa, mb, (unsigned)(fa - mb), op[0],op[1],op[2],op[3],op[4],op[5],op[6],op[7],
+                    op[8],op[9],op[10],op[11],op[12],op[13],op[14],op[15]);
+            else
+                std::snprintf(l, sizeof l, "  fault opcode @%08x (hors module -- genere/VirtualAlloc): "
+                    "%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
+                    fa, op[0],op[1],op[2],op[3],op[4],op[5],op[6],op[7],
+                    op[8],op[9],op[10],op[11],op[12],op[13],op[14],op[15]);
+            progress(l); }
           for (size_t k = 0; k < mods.size(); ++k) {
               std::snprintf(l, sizeof l, "  fault module @%08x taille %08x%s", mods[k].first, mods[k].second,
                             (cpu_->reg(R_EIP) - mods[k].first < mods[k].second) ? "  <- EIP ICI" : "");
