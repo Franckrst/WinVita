@@ -80,6 +80,13 @@ extern "C" {
 #include "dyn86_memintrin.h"    // native memcpy/memset intrinsics (D2_MEMINTRIN)
 
 void dynarec86_setup_emu_helpers(x86emu_t* emu);    // shim_impl.c
+/* D2Vita (lot eviction JIT) — registre d'emus de la periode de grace
+ * (dynablock.c). A appeler a la CREATION de chaque emu, jamais plus tard :
+ * l'argument de surete repose sur « l'enregistrement precede la premiere
+ * recherche de bloc de ce fil ». Le vecteur emus_ de cette classe ne peut PAS
+ * servir a ca : il exige le GIL (un push_back reallouerait le tableau), alors que le
+ * recupereur tourne sous mutex_dyndump et sans GIL. */
+void dyn86_emu_register(x86emu_t* emu);            // dynablock.c
 }
 
 // Box86's regs.h macros would shadow d2rt's enum Reg constants (the enum was
@@ -674,6 +681,7 @@ public:
         emu_.context = &ctx_;
         dynarec86_setup_emu_helpers(&emu_);
         emu_.df = d_none;
+        dyn86_emu_register(&emu_);     // grace de l'eviction JIT: l'emu de base aussi
         dyn86_diag_emu = &emu_;
 #ifndef __vita__
         struct sigaction sa;
@@ -682,6 +690,17 @@ public:
         sa.sa_flags = SA_SIGINFO;
         sigaction(SIGSEGV, &sa, nullptr);
         sigaction(SIGBUS, &sa, nullptr);
+        /* D2Vita (lot eviction JIT) : SIGILL et SIGTRAP rejoignent le
+         * diagnostic. L'eviction empoisonne la memoire qu'elle rend avec
+         * l'instruction ARM indefinie 0xE7F001F0 ; un fil qui reviendrait
+         * dans un bloc libere la execute et prend un SIGTRAP. Sans handler,
+         * tout ce qu'on obtenait etait « uncaught target signal 5 », qui ne
+         * dit ni quel fil, ni a quelle adresse, ni si cette adresse est dans
+         * l'arene JIT — autant dire rien. Le detecteur doit nommer sa prise,
+         * sinon il ne sert qu'a transformer une corruption silencieuse en
+         * plantage anonyme. */
+        sigaction(SIGILL,  &sa, nullptr);
+        sigaction(SIGTRAP, &sa, nullptr);
 #endif
     }
 
@@ -1109,6 +1128,11 @@ public:
         // zero blob.
         X87Blob b; blob_from_emu(b, emu_); blob_to_emu(*e, b);
         emus_.push_back(e);            // caller holds the GIL (native ctor path)
+        // Enregistrement pour la grace de l'eviction JIT. ICI, c'est-a-dire
+        // AVANT que le fil correspondant n'existe, donc a fortiori avant sa
+        // premiere recherche de bloc : c'est la condition exacte dont depend
+        // la surete du recupereur (argument complet dans dynablock.c).
+        dyn86_emu_register(e);
         return e;
     }
     void thread_emu_bind(void* e) override {
@@ -1490,6 +1514,30 @@ private:
 CpuBox86* g_instance = nullptr;
 
 } // namespace
+
+/* D2Vita (lot eviction JIT) — pousser UN emu vers une frontiere de bloc.
+ *
+ * Appele par le recupereur (dynablock.c), qui tourne sous mutex_dyndump et
+ * SANS le GIL. Il ne peut donc pas passer par nudge_thread_budget(), dont le
+ * contrat exige le GIL parce qu'il parcourt emus_. Ici on ne recoit qu'un emu
+ * deja identifie, pris dans le registre en ajout seul de dynablock.c : aucun
+ * parcours, aucun besoin du GIL.
+ *
+ * Le corps est celui de nudge_thread_budget, et pas une copie de ses deux
+ * lignes : save_slice porte un ordre desarmement-puis-accumulation qui decide
+ * de l'honnetete du champ de vivacite par fil. Le dupliquer ici, c'est le
+ * laisser diverger le jour ou il changera.
+ *
+ * Effet : le budget a zero fait sortir le fil au prochain PROLOGUE de bloc,
+ * exactement reprenable — donc une sortie de DynaRun, donc une generation de
+ * grace qui avance. Un fil dans une boucle tenant dans UN SEUL bloc reste
+ * hors d'atteinte (limitation documentee de la preemption) : c'est pour lui
+ * que le recupereur est borne. */
+extern "C" void dyn86_emu_nudge(void* emu) {
+    if (!emu) return;
+    CpuBox86::save_slice((x86emu_t*)emu);
+    __atomic_store_n(&((x86emu_t*)emu)->dyn86_budget, 0, __ATOMIC_RELAXED);
+}
 
 Cpu* make_cpu_box86() {
     if (g_instance) return nullptr;    // Box86 core is single-instance (global my_context)

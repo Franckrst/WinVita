@@ -138,6 +138,40 @@ typedef struct x86emu_s {
     uint32_t    dyn86_traps;        // entrees dans la fenetre de trap (= prises du GIL par ce fil)
     uint32_t    dyn86_gilcont;      // prises CONTENDUES (trylock echoue, puis lock bloquant)
     uint32_t    dyn86_gilwait_us;   // attente cumulee sur ces prises contendues (us, modulo 2^32)
+    // D2Vita (lot eviction JIT) : PERIODE DE GRACE. Ces deux champs disent, a
+    // un observateur SANS VERROU, si ce fil invite peut etre en train
+    // d'executer du code traduit — la seule question qui autorise ou interdit
+    // de rendre la memoire d'un bloc evince.
+    //   dyn86_rundepth  > 0  <=>  ce fil est DANS une activation de DynaRun.
+    //                   Compteur de PROFONDEUR et non bit de parite : DynaCall
+    //                   reentre DynaRun (rappels invite depuis un shim), et un
+    //                   schema pair/impair se serait inverse au premier
+    //                   imbriquement — c'est-a-dire aurait declare « dehors »
+    //                   un fil qui est dedans. Le pire bug possible ici.
+    //   dyn86_rungen    incremente a chaque SORTIE vers la profondeur 0. Sert
+    //                   a distinguer « toujours dans LA MEME activation
+    //                   qu'au moment du retrait » de « est ressorti depuis ».
+    // Ecrits UNIQUEMENT par le fil proprietaire, dans DynaRun (dynarec.c) :
+    // une activation par trap (~30-100k/s), pas une par bloc. Aucun code
+    // genere n'y touche. Queue de structure : aucun offset amont ne bouge.
+    // L'ordre memoire est assure par mutex_dyndump et non par des barrieres
+    // sur ce chemin chaud — l'argument complet est dans dynablock.c, au-dessus
+    // de dyn86_grace_passed().
+    uint32_t    dyn86_rundepth;
+    uint32_t    dyn86_rungen;
+    /* Sorties REPRENABLES consecutives accordees a ce fil parce que la
+     * traduction manquait de memoire (dynarec.c). Remis a zero des qu'une
+     * traduction aboutit. C'est la BORNE qui empeche l'echange d'un plantage
+     * contre un gel : au-dela, le fil retombe sur la mort nommee. */
+    uint32_t    dyn86_oomexit;
+    /* Valeur de dyn86_ev_reclaimed vue a la derniere sortie OOM de ce fil :
+     * c'est elle qui decide si dyn86_oomexit repart de zero (le mecanisme
+     * AVANCE quelque part) ou continue de monter (rien ne bouge nulle part). */
+    uint32_t    dyn86_oomwatch;
+    /* « Une vague est retiree et c'est MOI qui retiens sa grace » : fait sortir
+     * DBGetBlock de sa boucle de reessai tout de suite, pour aller chercher la
+     * sortie reprenable de DynaRun qui, elle, debloquera la vague. */
+    uint32_t    dyn86_evwait;
 } x86emu_t;
 
 #define EMUTYPE_NONE    0
