@@ -253,6 +253,450 @@ static inline uint64_t dyn86_prof_now_ns(void) {
     return (uint64_t)ts.tv_sec*1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Journal du moteur (src/platform/vita_host.h) : reference FORTE, meme
+ * bibliotheque — meme motif que dynarec.c. INERTE hors console (definition
+ * vide, vita_host.cpp), d'ou le stderr double dans dyn86_ev_say : sans lui la
+ * validation de niveau 1 sous qemu n'aurait rien a lire. */
+void wx86_vita_progress_c(const char* msg);
+
+/* ===================================================================== */
+/* D2Vita — EVICTION DU CACHE DE TRADUCTION (lot 2)                      */
+/* ===================================================================== */
+/*
+ * CE QUE CE BLOC RESOUT. Quand l'arene JIT ne peut plus grandir,
+ * AllocDynarecMap rend 0, FillBlock rend NULL, et le fil invite meurt :
+ * ce build n'a pas d'interpreteur (shim/shim_impl.c, Run() pose quit=1 et
+ * ERR_UNIMPL). Ici on rend la memoire d'anciens blocs et on retraduit. Un
+ * a-coup de retraduction vaut infiniment mieux qu'un processus mort.
+ *
+ * LE SEUL VRAI DANGER, ET COMMENT IL EST ECARTE. Le code traduit tourne
+ * SANS GIL : au moment ou on veut rendre la memoire d'un bloc, un autre fil
+ * invite peut avoir son PC dedans, ou detenir un dynablock_t* obtenu juste
+ * avant. Liberer sous ses pieds serait pire que le defaut d'origine. D'ou
+ * une separation stricte en deux temps :
+ *
+ *   RETRAIT  = InvalidDynablock(db, 0) : setJumpTableDefault + gone=1.
+ *              Ne rend AUCUNE memoire. Sur a tout instant, parce que TOUTES
+ *              les entrees dans un bloc passent par la table de sauts —
+ *              c'est deja ce sur quoi box86 fonde sa propre invalidation, et
+ *              les chainages sont des branchements INDIRECTS sur adresse
+ *              32 bits complete, jamais des B/BL a portee limitee. Un fil
+ *              deja dans le bloc le finit dans une memoire intacte, puis
+ *              rate la table de sauts et retraduit.
+ *
+ *   RECUPERATION = FreeDynarecMap + customFree, uniquement APRES une
+ *              PERIODE DE GRACE.
+ *
+ * LA GRACE, ENONCEE. « Tout emu invite vivant est sorti de DynaRun au moins
+ * une fois depuis le retrait, ou n'y est pas en ce moment. »
+ * Elle couvre les DEUX dangers d'un coup, ce qui est la raison de l'avoir
+ * choisie ainsi :
+ *   - les PC ARM, puisque executer du code traduit c'est etre dans DynaRun ;
+ *   - les dynablock_t* detenus par du code C, puisque DBGetBlock lit
+ *     db->done/db->block APRES avoir relache mutex_dyndump (dynablock.c, la
+ *     boucle plus bas) — mais tous ses appelants sont dans DynaRun.
+ *
+ * ORDRE MEMOIRE, SANS BARRIERE SUR LE CHEMIN CHAUD. dyn86_rundepth est ecrit
+ * par le fil proprietaire sans barriere (cf. dynarec.c). Le recupereur
+ * pourrait donc, en theorie, lire un 0 perime. C'est sur, et voici pourquoi :
+ * pour detenir un pointeur vers un bloc, ou pour executer du code traduit, un
+ * fil a NECESSAIREMENT traverse DBGetBlock, qui prend et relache
+ * mutex_dyndump. Son ecriture de rundepth precede ce relachement, qui precede
+ * la prise de mutex_dyndump par le recupereur (qui la tient pendant tout ce
+ * qui suit). Le seul fil dont on pourrait lire un rundepth perime est un fil
+ * qui vient d'entrer dans DynaRun sans avoir encore fait la moindre
+ * recherche — donc qui ne detient rien, et qui ne peut pas atteindre un bloc
+ * RETIRE puisqu'il n'est plus dans la table de sauts.
+ * Meme argument pour le registre d'emus : un emu qui a pu executer un bloc
+ * s'est enregistre avant sa premiere recherche, donc avant un relachement de
+ * mutex_dyndump.
+ * Dans l'autre sens, une lecture perimee de rungen ne peut que faire
+ * AJOURNER : conservateur, jamais dangereux.
+ *
+ * CE QU'ELLE NE COUVRE PAS, ET QUI EST BORNE. Une boucle entierement contenue
+ * dans UN SEUL dynablock ne repasse jamais par un prologue et ne peut pas
+ * etre preemptee (limitation documentee, src/dynarec86/dyn86.h). Un tel fil
+ * ne sort jamais de DynaRun et bloque la grace pour toujours. D'ou la BORNE :
+ * apres DYN86_EV_ROUNDS tours sans rien pouvoir recuperer, on abandonne et on
+ * retombe exactement sur le comportement d'aujourd'hui — la mort nommee. On
+ * ne troque jamais un plantage contre un gel.
+ */
+
+/* Registre d'emus : tableau fixe, en AJOUT SEUL, et volontairement distinct
+ * du vecteur emus_ de CpuBox86 — celui-la exige le GIL (un push_back peut
+ * reallouer) alors qu'on est ici sous mutex_dyndump et sans GIL. Un emu n'est
+ * jamais retire : un fil invite fini garde son emu, avec rundepth a 0, donc
+ * il passe la grace sans rien couter. */
+#define DYN86_MAXEMU    64
+#define DYN86_RETIRE_MAX 512    /* blocs retires par vague */
+#define DYN86_EV_ROUNDS  8      /* tours d'eviction avant d'abandonner */
+
+static x86emu_t* g_emureg[DYN86_MAXEMU];
+static volatile int g_emureg_n = 0;
+static int g_emureg_overflow = 0;
+
+/* Appele par CpuBox86 a la creation de CHAQUE emu (emu de base inclus),
+ * toujours AVANT que le fil correspondant n'execute quoi que ce soit. */
+void dyn86_emu_register(x86emu_t* e)
+{
+    if(!e) return;
+    for(int i=0; i<g_emureg_n; ++i) if(g_emureg[i]==e) return;
+    if(g_emureg_n >= DYN86_MAXEMU) {
+        /* Plus d'emus que le registre n'en tient : on ne peut plus PROUVER la
+         * grace, donc on desarme l'eviction plutot que de deviner. Une mort
+         * nommee vaut mieux qu'un usage-apres-liberation. */
+        if(!g_emureg_overflow) {
+            g_emureg_overflow = 1;
+            fprintf(stderr, "[jit] registre d'emus plein (%d) — EVICTION DESARMEE\n", DYN86_MAXEMU);
+            wx86_vita_progress_c("JIT: registre d'emus plein — eviction desarmee (securite)");
+        }
+        return;
+    }
+    g_emureg[g_emureg_n] = e;
+    g_emureg_n = g_emureg_n + 1;   /* le slot est ecrit AVANT le compteur */
+}
+
+/* Compteurs. Exportes (non statiques) pour que le portage puisse les afficher
+ * dans sa ligne de battement sans que le moteur ait a connaitre son format. */
+uint32_t dyn86_ev_rounds    = 0;  /* tours d'eviction entames                */
+uint32_t dyn86_ev_retired   = 0;  /* blocs retires (desinscrits)             */
+uint32_t dyn86_ev_reclaimed = 0;  /* blocs reellement liberes                */
+uint32_t dyn86_ev_deferred  = 0;  /* recuperations AJOURNEES : un fil etait
+                                   * encore dedans. C'est LA preuve que la
+                                   * grace sert a quelque chose ; a zero
+                                   * permanent, elle n'a jamais eu a mordre. */
+uint32_t dyn86_ev_refills   = 0;  /* traductions sauvees par une eviction    */
+uint32_t dyn86_ev_handback  = 0;  /* borne atteinte SANS avoir pu liberer :
+                                   * rendu a la boucle de reessai de
+                                   * DBGetBlock, qui cede HORS VERROU. Ce
+                                   * n'est PAS une mort — la mort, c'est
+                                   * dyn86_ev_fatal, compte dans dynarec.c au
+                                   * seul endroit qui la provoque vraiment. */
+uint32_t dyn86_ev_fatal     = 0;  /* fils invites reellement tues par la
+                                   * saturation (dynarec.c, repli Run())     */
+uint32_t dyn86_ev_oomexit   = 0;  /* sorties REPRENABLES accordees a un fil
+                                   * qui ne pouvait pas traduire : voir
+                                   * dynarec.c, c'est ce qui debloque la grace */
+uint32_t dyn86_ev_corrupt   = 0;  /* blocs dont le pointeur `self` ne se
+                                   * relit pas au moment de les rendre :
+                                   * detecteur d'usage-apres-liberation      */
+uint64_t dyn86_ev_bytes     = 0;  /* octets rendus a l'arene                 */
+
+static void dyn86_ev_say(const char* what);
+/* Declaree ICI et pas au point de definition : dyn86_ev_atexit l'appelle plus
+ * haut dans le fichier. Le build ARM de l'oracle ne le signalait qu'en
+ * avertissement (declaration implicite, C89) ; la chaine Vita en fait une
+ * ERREUR — la raison pour laquelle on lit le journal et pas le code de retour. */
+void dyn86_ev_dump(const char* what);
+
+static int dyn86_ev_poison(void)
+{
+    static int on = -1;
+    if(on < 0) {
+        const char* e = getenv("WX86_JITEVICT_POISON"); if(!e) e = getenv("D2_JITEVICT_POISON");
+        on = (e && *e=='0') ? 0 : 1;   /* absent => arme */
+    }
+    return on;
+}
+
+/* Vague en attente de recuperation. UNE SEULE a la fois : on ne retire une
+ * nouvelle vague que quand la precedente est rendue. Ca borne la memoire de
+ * service, ca borne le nombre de blocs desinscrits mais non rendus (donc la
+ * retraduction inutile), et ca rend l'etat trivial a raisonner. */
+static dynablock_t* g_retire[DYN86_RETIRE_MAX];
+static int      g_retire_n = 0;
+/* « L'arene a refuse au moins une allocation et rien n'a ete rendu depuis. »
+ * Sert a une seule chose, mais elle est decisive : ne pas TENTER une
+ * traduction dont on sait qu'elle echouera, tant qu'une vague attend sa
+ * grace. Un FillBlock rate coute deux passes completes du traducteur, ET il
+ * les paye EN TENANT mutex_dyndump. Avec cinq fils invites qui echouent tous,
+ * le verrou n'est jamais libre assez longtemps pour que le fil dont la grace
+ * attend la sortie puisse l'obtenir — les mutex pthread n'etant pas FIFO, il
+ * starve. Journal a l'appui : « retient=0(prof=1 gen=13124/13124) », l'emu
+ * principal fige alors qu'il executait 1,4 million de blocs par ailleurs. */
+static int      g_arena_full = 0;
+static uint32_t g_retire_gen[DYN86_MAXEMU];
+static int      g_retire_emus = 0;
+
+/* Vrai si CHAQUE emu de l'instantane est sorti de DynaRun depuis le retrait,
+ * ou n'y est pas en ce moment. Lit rundepth AVANT rungen : voir dynarec.c.
+ *
+ * AUCUN emu n'est exclu — PAS MEME CELUI DU FIL QUI RECUPERE. C'est le point
+ * le plus couteux de ce lot, et il a ete paye :
+ *
+ * La premiere version excluait `self`, sur l'argument que le fil evinceur est
+ * dans du C, que le chainage de blocs est un saut TERMINAL et que arm_next.S
+ * repart vers la CIBLE (bx r3), jamais vers le bloc source. Cet argument est
+ * juste, et il est incomplet. Il ignore D2_CALLRET — la prediction d'adresse
+ * de retour, armee par defaut dans ce portage (tools/rt_boot.cpp) : a chaque
+ * CALL invite, le traducteur EMPILE SUR LA PILE ARM le couple (adresse de
+ * retour x86, ADRESSE NATIVE DE RETOUR), et le RET fait un `BXcond(cEQ, x3)`
+ * dessus — il retourne DIRECTEMENT au milieu d'un bloc, sans consulter la
+ * table de sauts (dynarec_arm_helper.c, ret_to_epilog/retn_to_epilog).
+ * Desinscrire un bloc de la table ne met donc PAS ce bloc hors d'atteinte : le
+ * fil evinceur garde, sur sa propre pile ARM, des adresses natives vers tous
+ * les blocs qu'il a traverses depuis son entree dans DynaRun, et il y
+ * reviendra en remontant ses RET.
+ *
+ * Mesure : avec l'exclusion, 3 plantages sur 4 sous arene serree, signal 5 a
+ * hostoff=+0x14c DANS un bloc — un retour en plein milieu, exactement la
+ * signature de la prediction. Sans l'exclusion : aucun.
+ *
+ * Ce qui rend le progres possible malgre tout, c'est que la pile de prediction
+ * ne survit PAS a une sortie de DynaRun : arm_prolog/arm_epilog sauvent et
+ * restaurent xSPSave a chaque entree/sortie (cf. shim/debug.h). « Etre sorti
+ * de DynaRun au moins une fois » signifie donc AUSSI « n'a plus aucune adresse
+ * native en reserve » — la grace couvre la prediction par la meme phrase qui
+ * couvre le PC. Et le fil evinceur obtient cette sortie par le chemin
+ * reprenable de dynarec.c : il retire une vague, ne peut rien rendre lui-meme,
+ * sort proprement, revient, et c'est a ce moment-la que sa generation a
+ * avance et que la vague devient recuperable. */
+static int      g_grace_blocker = -1;      /* dernier emu ayant retenu la grace */
+static uint32_t g_grace_bd = 0, g_grace_bg = 0;
+
+static int dyn86_grace_passed(x86emu_t* self)
+{
+    (void)self;   /* aucune exclusion : voir ci-dessus */
+    /* D2_JITEVICT_NOGRACE=1 — INSTRUMENT DE BANC, jamais une configuration de
+     * jeu : supprime la periode de grace, c'est-a-dire rend la memoire d'un
+     * bloc sans verifier que personne n'est dedans. Sa raison d'etre est de
+     * PROUVER QUE LE DETECTEUR D'USAGE-APRES-LIBERATION MARCHE. Un detecteur
+     * qui n'a jamais rien detecte ne demontre rien : il peut etre correct, ou
+     * simplement mort. Avec ce bouton on fabrique la faute a la demande et on
+     * verifie que l'empoisonnement (instruction ARM indefinie) la voit. */
+    static int nograce = -1;
+    if(nograce < 0) {
+        const char* e = getenv("WX86_JITEVICT_NOGRACE"); if(!e) e = getenv("D2_JITEVICT_NOGRACE");
+        nograce = (e && *e=='1') ? 1 : 0;
+        if(nograce) fprintf(stderr, "[jit] BANC: PERIODE DE GRACE SUPPRIMEE (D2_JITEVICT_NOGRACE=1) — usage-apres-liberation ATTENDU\n");
+    }
+    if(nograce) { g_grace_blocker = -1; return 1; }
+    for(int i=0; i<g_retire_emus; ++i) {
+        x86emu_t* e = g_emureg[i];
+        if(!e) continue;
+        const volatile uint32_t* pd = &e->dyn86_rundepth;
+        const volatile uint32_t* pg = &e->dyn86_rungen;
+        uint32_t d = *pd;
+        if(d == 0) continue;                 /* dehors : sur */
+        uint32_t g = *pg;
+        if(g != g_retire_gen[i]) continue;   /* est ressorti depuis : sur */
+        /* Qui retient, et dans quel etat. Sans ce nom, un ajournement
+         * permanent n'est qu'un compteur qui monte : impossible de dire si la
+         * grace est trop stricte ou si un fil est reellement fige. */
+        g_grace_blocker = i; g_grace_bd = d; g_grace_bg = g;
+        return 0;                            /* toujours dans la meme activation */
+    }
+    g_grace_blocker = -1; g_grace_bd = 0; g_grace_bg = 0;
+    return 1;
+}
+
+/* Pousse les AUTRES emus vers une frontiere de bloc : le prologue de chaque
+ * bloc traduit decremente dyn86_budget, et a zero il sort de DynaRun de facon
+ * exactement REPRENABLE. Sans ca, un fil dans une longue sequence traduite
+ * sans trap ferait ajourner la recuperation jusqu'a la borne. Implemente cote
+ * CpuBox86 (dyn86_emu_nudge) pour ne pas dupliquer ici l'ordre porteur
+ * desarmement/accumulation de la vivacite par fil. */
+void dyn86_emu_nudge(void* emu);   /* cpu_box86.cpp */
+
+static void dyn86_nudge_others(x86emu_t* self)
+{
+    for(int i=0; i<g_emureg_n; ++i)
+        if(g_emureg[i] && g_emureg[i]!=self)
+            dyn86_emu_nudge(g_emureg[i]);
+}
+
+/* Rend la memoire de la vague si la grace est passee. Rend les octets rendus
+ * (0 = rien, soit parce qu'il n'y a pas de vague, soit parce qu'elle est
+ * ajournee). Appele sous mutex_dyndump. */
+static size_t dyn86_reclaim_wave(x86emu_t* self)
+{
+    if(!g_retire_n)
+        return 0;
+    if(!dyn86_grace_passed(self)) {
+        ++dyn86_ev_deferred;
+        /* RE-POUSSER A CHAQUE AJOURNEMENT, et pas seulement au retrait.
+         * Mesure avant ce correctif : 511 ajournements pour 2 recuperations —
+         * la grace ne convergeait pas. La cause est structurelle et vaut d'etre
+         * ecrite : les fils qui retiennent la grace sont, le plus souvent,
+         * ceux qui sont BLOQUES SUR LE MUTEX QUE L'EVICTEUR TIENT, dans
+         * LinkNext. Ils ont rundepth>0, ne progressent pas, et leur generation
+         * est figee tant que l'evicteur ne rend pas la main. Une seule poussee
+         * au moment du retrait se perd d'ailleurs : CpuBox86::run() recharge
+         * le budget a chaque debut de tranche. Repousser ici, a chaque
+         * ajournement, fait qu'au moment ou l'evicteur rend la main et ou le
+         * fil bloque repart, celui-ci sort de DynaRun au PROCHAIN prologue de
+         * bloc — et le tour suivant trouve la vague mure. */
+        dyn86_nudge_others(self);
+        return 0;
+    }
+    size_t freed = 0;
+    g_arena_full = 0;                 /* on rend de la memoire : l'arene respire */
+    for(int i=0; i<g_retire_n; ++i) {
+        dynablock_t* db = g_retire[i];
+        if(!db) continue;
+        /* `previous` d'abord : FreeInvalidDynablock ne suit pas la chaine, et
+         * le maillon precedent est lui aussi dans l'arene. L'oublier ferait
+         * fuir exactement ce qu'on essaie de recuperer. */
+        if(db->previous) { FreeInvalidDynablock(db->previous, 0); db->previous = NULL; }
+        /* DETECTEUR D'USAGE-APRES-LIBERATION, deux moitiees.
+         *
+         * (1) Relecture du pointeur `self` que FillBlock a ecrit en tete du
+         *     bloc. S'il ne se relit pas, quelqu'un a deja ecrit la-dedans et
+         *     l'arene est corrompue AVANT nous : on le dit au lieu de rendre
+         *     un bloc dont on ne sait plus rien.
+         * (2) Empoisonnement du code ARM rendu, avec l'instruction ARM
+         *     PERMANENTE INDEFINIE 0xE7F001F0 (UDF, celle que Linux et gdb
+         *     utilisent). C'est ce qui transforme « un fil est revenu dans un
+         *     bloc libere » — indetectable, corruption silencieuse, la faute
+         *     que ce lot doit absolument ne pas introduire — en un
+         *     deroutement immediat et nomme. La memoire rendue etant vite
+         *     reutilisee par une autre traduction, la fenetre est courte,
+         *     mais c'est precisement la fenetre ou une grace fautive se
+         *     manifesterait.
+         *     Cout : un memset par bloc RENDU, jamais par bloc execute.
+         *     D2_JITEVICT_POISON=0 le desarme si jamais il coute trop. */
+        if(*(dynablock_t**)db->actual_block != db) {
+            ++dyn86_ev_corrupt;
+            if(dyn86_ev_corrupt==1)
+                dyn86_ev_say("INTEGRITE: pointeur self illisible avant liberation");
+        } else if(dyn86_ev_poison()) {
+            uint32_t* w = (uint32_t*)db->actual_block;
+            size_t n = (size_t)db->size / sizeof(uint32_t);
+            for(size_t k=0; k<n; ++k) w[k] = 0xE7F001F0u;   /* ARM UDF */
+        }
+        freed += (size_t)db->size;
+        FreeDynarecMap((uintptr_t)db->actual_block);
+        customFree(db);
+        ++dyn86_ev_reclaimed;
+    }
+    g_retire_n = 0; g_retire_emus = 0;
+    dyn86_ev_bytes += (uint64_t)freed;
+    return freed;
+}
+
+/* Retire une vague : desinscrit des blocs et prend l'instantane de grace.
+ * Ne rend rien tout de suite — c'est le point. */
+static void dyn86_retire_wave(x86emu_t* self, int want)
+{
+    if(g_retire_n || g_emureg_overflow)
+        return;                      /* une vague a la fois */
+    if(want > DYN86_RETIRE_MAX) want = DYN86_RETIRE_MAX;
+    int n = dyn86_jit_collect_victims(g_retire, want);
+    if(n <= 0) return;
+    /* DEDOUBLONNAGE PAR CONSTRUCTION. InvalidDynablock rend NULL quand le bloc
+     * etait DEJA `gone` : c'est donc lui, et non une confiance accordee a
+     * l'enumerateur, qui garantit qu'un bloc n'entre qu'une fois dans la
+     * vague. Un doublon signifierait une double liberation — la faute meme
+     * que ce lot doit eviter — et le filet doit etre ici, au point ou la
+     * vague se constitue, pas dans la marche qui l'alimente : l'enumerateur
+     * est une heuristique de choix, celui-ci est un invariant. */
+    int k = 0;
+    for(int i=0; i<n; ++i)
+        if(InvalidDynablock(g_retire[i], 0))   /* on tient deja mutex_dyndump */
+            g_retire[k++] = g_retire[i];
+    if(k <= 0) return;
+    g_retire_n = k;
+    dyn86_ev_retired += (uint32_t)k;
+    /* Instantane APRES le retrait : un fil qui entre dans DynaRun ensuite ne
+     * peut plus atteindre ces blocs (ils ne sont plus dans la table de
+     * sauts), donc seuls comptent ceux deja dedans. */
+    g_retire_emus = g_emureg_n;
+    if(g_retire_emus > DYN86_MAXEMU) g_retire_emus = DYN86_MAXEMU;
+    for(int i=0; i<g_retire_emus; ++i) {
+        x86emu_t* e = g_emureg[i];
+        const volatile uint32_t* pg = e ? &e->dyn86_rungen : NULL;
+        g_retire_gen[i] = pg ? *pg : 0;
+    }
+    dyn86_nudge_others(self);
+}
+
+/* Un tour d'eviction, appele quand FillBlock a echoue FAUTE DE MEMOIRE.
+ * Rend non nul si de la memoire a ete rendue (donc si une retraduction vaut
+ * la peine d'etre retentee tout de suite). Sous mutex_dyndump. */
+/* Interrupteur d'arret (D2_JITEVICT=0). Sa raison d'etre est double : c'est le
+ * repli si l'eviction se revele fautive sur une console, et c'est le bras
+ * « avant » de l'A/B — le protocole du projet veut les deux bras dans LE MEME
+ * binaire, un seul bouton entre eux, sinon on compare deux compilations.
+ * Teste au site d'appel et non dans le tour : desarme, PAS UN SEUL compteur ne
+ * bouge et pas une ligne n'est ecrite, si bien que le bras « avant » est
+ * exactement le comportement d'avant ce lot. Absent => arme (convention
+ * D2_FAMINE : l'absence arme, seul un '0' explicite desarme). */
+int dyn86_evict_armed(void)
+{
+    static int armed = -1;
+    if(armed < 0) {
+        const char* e = getenv("WX86_JITEVICT"); if(!e) e = getenv("D2_JITEVICT");
+        armed = (e && *e=='0') ? 0 : 1;
+        if(!armed) fprintf(stderr, "[jit] EVICTION DESARMEE (D2_JITEVICT=0)\n");
+    }
+    return armed && !g_emureg_overflow;
+}
+
+/* Taille de vague ADAPTATIVE. 64 blocs (~40 Kio) suffisent largement quand
+ * l'arene a juste besoin d'un peu d'air — c'est le cas nominal, « evincer un
+ * peu, rarement ». Sous pression reelle, en revanche, chaque recuperation qui
+ * aboutit doit rapporter assez pour servir plusieurs traductions, sinon on
+ * repaie la periode de grace pour 40 Kio a chaque fois. La vague double donc a
+ * chaque tour qui n'a rien pu rendre, et retombe a 64 des qu'une traduction
+ * est sauvee : elle suit la demande au lieu de la deviner. */
+static int g_wave = 64;
+
+static void dyn86_ev_atexit(void) { dyn86_ev_dump("BILAN DE FIN DE RUN"); }
+
+static int dyn86_evict_round(x86emu_t* emu, size_t want)
+{
+    (void)want;
+    g_arena_full = 1;
+    ++dyn86_ev_rounds;
+    /* BILAN DE FIN DE RUN, arme au premier tour seulement. Les lignes
+     * intermediaires sont limitees en debit (sinon elles noieraient le
+     * journal), si bien que la DERNIERE ligne visible n'est pas l'etat final —
+     * piege dans lequel cette analyse est tombee une fois, en lisant
+     * « rendus=0 » sur une ligne emise au premier ajournement alors que des
+     * milliers de blocs avaient ete rendus ensuite. Un compteur qu'on ne peut
+     * lire qu'a un instant arbitraire ne mesure rien.
+     * Arme ICI et pas au boot : sans eviction, aucune ligne — ce qui rend
+     * l'assertion « l'eviction n'a jamais tire » verifiable par l'absence. */
+    /* Une ligne au TOUT PREMIER tour, toujours. C'est ce qui rend l'assertion
+     * « l'eviction n'a jamais tire » verifiable par l'ABSENCE de ligne : sans
+     * elle, un journal muet voudrait dire soit « zero eviction » soit « des
+     * evictions qui n'ont jamais atteint un palier d'affichage », et le banc
+     * anti-emballement ne prouverait rien. */
+    if(dyn86_ev_rounds == 1) { atexit(dyn86_ev_atexit); dyn86_ev_say("premier tour"); }
+    size_t freed = dyn86_reclaim_wave(emu);  /* vague precedente, si mure */
+    if(freed) { g_wave = 64; return 1; }
+    dyn86_retire_wave(emu, g_wave);          /* sinon, en preparer une */
+    freed = dyn86_reclaim_wave(emu);         /* souvent mure tout de suite */
+    if(freed) { g_wave = 64; return 1; }
+    if(g_wave < DYN86_RETIRE_MAX) g_wave <<= 1;
+    return 0;
+}
+
+/* Une ligne de journal a chaque changement d'etat notable, jamais par bloc.
+ * Sur console elle atterrit dans boot_progress.txt ; sous qemu,
+ * wx86_vita_progress_c est inerte, d'ou le stderr en plus — sans quoi la
+ * validation de niveau 1 n'aurait rien a lire. */
+static void dyn86_ev_say(const char* what) { dyn86_ev_dump(what); }
+
+/* Publie l'etat complet des compteurs. Exporte, parce que le seul endroit qui
+ * sait qu'un fil invite vient REELLEMENT de mourir est dynarec.c (le repli
+ * vers Run(), talon sans interpreteur), et qu'une mort qui ne s'accompagne pas
+ * du bilan de l'eviction laisse le lecteur incapable de dire si le mecanisme
+ * a echoue ou n'a simplement jamais ete sollicite. */
+void dyn86_ev_dump(const char* what)
+{
+    char m[208];
+    snprintf(m, sizeof m,
+        "JIT eviction: %s — tours=%u retires=%u rendus=%u ajournes=%u octets=%lluKo sauvees=%u rendues-au-reessai=%u sorties=%u morts=%u integrite=%u emus=%d retient=%d(prof=%u gen=%u/%u)",
+        what, dyn86_ev_rounds, dyn86_ev_retired, dyn86_ev_reclaimed,
+        dyn86_ev_deferred, (unsigned long long)(dyn86_ev_bytes>>10),
+        dyn86_ev_refills, dyn86_ev_handback, dyn86_ev_oomexit, dyn86_ev_fatal, dyn86_ev_corrupt,
+        g_emureg_n, g_grace_blocker, g_grace_bd, g_grace_bg,
+        (g_grace_blocker>=0 && g_grace_blocker<DYN86_MAXEMU) ? g_retire_gen[g_grace_blocker] : 0u);
+    fprintf(stderr, "[jit] %s\n", m);
+    wx86_vita_progress_c(m);
+}
+
 static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t filladdr, int create, int need_lock)
 {
     if(hasAlternate((void*)addr))
@@ -278,6 +722,27 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
             mutex_unlock(&my_context->mutex_dyndump);
             return block;
         }
+        /* CHEMIN RAPIDE DE PENURIE (voir g_arena_full). Une vague attend sa
+         * grace et l'arene est pleine : tenter la traduction serait payer deux
+         * passes du traducteur, sous le verrou, pour un echec certain. On
+         * essaie de rendre la vague ; si elle n'est pas mure, on rend la main
+         * TOUT DE SUITE — c'est ce qui laisse les autres fils sortir de
+         * DynaRun, et c'est leur sortie, pas notre acharnement, qui debloque
+         * la situation. */
+        if(g_arena_full && g_retire_n) {
+            if(!dyn86_reclaim_wave(emu)) {
+                dyn86_nudge_others(emu);
+                emu->dyn86_evwait = 1;
+                mutex_unlock(&my_context->mutex_dyndump);
+                return NULL;
+            }
+            /* La vague etait mure : la traduction qui suit ne tient QUE grace a
+             * la memoire qu'on vient de rendre. C'est donc bien une traduction
+             * sauvee, au meme titre que celles du chemin lent — ne pas la
+             * compter ici laisserait « sauvees=0 » sur des runs ou l'eviction
+             * a tout porte, et le compteur mentirait par omission. */
+            ++dyn86_ev_refills;
+        }
     }
 
     // MISS (definition): no live block for this address -> this lookup pays a
@@ -296,8 +761,55 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
         return NULL;
     }
     uint64_t dyn86_fb_t0 = dyn86_prof_now_ns();
+    uint32_t dyn86_af0 = dyn86_jit_allocfail;
     void* ret = FillBlock(block, filladdr);
     dyn86_fill_ns += dyn86_prof_now_ns() - dyn86_fb_t0; dyn86_fill_count++;
+    /* D2Vita (lot eviction JIT) — LE SITE. On est ici sous mutex_dyndump dans
+     * les DEUX cas (need_lock=1 : pris plus haut ; need_lock=0 : l'appelant le
+     * tient, cf. le commentaire de l'auto-interblocage plus bas), et aucun
+     * autre verrou n'est detenu : liberer d'ici emprunte exactement l'arete
+     * dyndump -> dynarec -> g_blk_mx que FreeDynablock utilise depuis
+     * toujours. Aucun ordre de verrou nouveau n'est introduit par l'eviction.
+     *
+     * La condition porte sur dyn86_jit_allocfail, pas sur `!ret` : FillBlock
+     * rend aussi NULL pour un opcode non implemente ou un abandon de passe,
+     * et evincer du code chaud n'y changerait rien. Seul un refus de
+     * l'ALLOCATEUR justifie de rendre de la memoire.
+     *
+     * La borne est ici, pas dans une boucle d'attente : DYN86_EV_ROUNDS
+     * tentatives, chacune une retraduction immediate si de la memoire a ete
+     * rendue. Si la grace n'est pas passee, on ne PATIENTE PAS en tenant le
+     * verrou — ce serait l'interblocage certain contre un fil bloque sur
+     * mutex_dyndump dans LinkNext (box86_dynarec_wait=1). On rend NULL, et
+     * c'est la boucle de reessai de DBGetBlock qui cede HORS VERROU : c'est
+     * elle, la fenetre de grace, et elle ne coute rien de plus. */
+    if(!ret && dyn86_jit_allocfail != dyn86_af0 && dyn86_evict_armed()) {
+        for(int ev=0; ev<DYN86_EV_ROUNDS && !ret; ++ev) {
+            if(!dyn86_evict_round(emu, (size_t)block->x86_size))
+                break;                       /* rien rendu : la grace n'est pas passee */
+            dyn86_fb_t0 = dyn86_prof_now_ns();
+            ret = FillBlock(block, filladdr);
+            dyn86_fill_ns += dyn86_prof_now_ns() - dyn86_fb_t0; dyn86_fill_count++;
+        }
+        /* Rien n'a pu etre rendu : il ne sert a RIEN de retenter ici. Le fil
+         * courant est dans DynaRun, donc il retient lui-meme la grace de la
+         * vague qu'il vient de retirer ; seule sa SORTIE la debloquera. On le
+         * dit a DBGetBlock, qui abandonne sa boucle de reessai sur-le-champ au
+         * lieu de refaire 64 traductions vouees a echouer. */
+        if(!ret && g_retire_n) emu->dyn86_evwait = 1;
+        if(ret) {
+            ++dyn86_ev_refills;
+            if(dyn86_ev_refills==1 || !(dyn86_ev_refills & 0x3F)) dyn86_ev_say("traduction sauvee");
+        } else {
+            /* Borne atteinte sans avoir pu liberer. On rend la main a la
+             * boucle de reessai de DBGetBlock, qui cede HORS VERROU : c'est
+             * elle, la fenetre de grace, et le tour suivant trouve tres
+             * souvent la vague mure. Ce n'est donc PAS la mort du fil, et le
+             * compteur ne doit pas pretendre le contraire. */
+            ++dyn86_ev_handback;
+            if(dyn86_ev_handback==1 || !(dyn86_ev_handback & 0xFF)) dyn86_ev_say("rendu a la boucle de reessai");
+        }
+    }
     if(!ret) {
         dyn86_fill_fail++;
         dynarec_log(LOG_DEBUG, "Fillblock of block %p for %p returned an error\n", block, (void*)addr);
@@ -414,6 +926,7 @@ dynablock_t* DBGetBlock(x86emu_t* emu, uintptr_t addr, int create)
             break;                                   // valid block: done
         if(!create || ++dyn86_retry > DYN86_DBGET_RETRY)
             break;                                   // permanent: honest abort path
+        if(emu->dyn86_evwait) { emu->dyn86_evwait = 0; sched_yield(); break; }  // ceder, puis sortir de DynaRun
         sched_yield();                               // let the invalidator finish its step
     }
     if(!db || !db->block || !db->done)
@@ -474,6 +987,7 @@ dynablock_t* DBAlternateBlock(x86emu_t* emu, uintptr_t addr, uintptr_t filladdr)
             break;                                   // valid block: done
         if(++dyn86_retry > DYN86_DBGET_RETRY)
             break;                                   // permanent: honest abort path
+        if(emu->dyn86_evwait) { emu->dyn86_evwait = 0; sched_yield(); break; }  // sortir de DynaRun d'abord
         sched_yield();                               // let the invalidator finish its step
     }
     if(!db || !db->block || !db->done)

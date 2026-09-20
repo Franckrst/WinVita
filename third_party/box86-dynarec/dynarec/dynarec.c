@@ -26,6 +26,18 @@ void x86test_check(x86emu_t* ref, uintptr_t ip);
 
 // D2Vita preemption seam (implemented in src/dynarec86/dyn86.c)
 extern int dyn86_should_break(void);
+// D2Vita (lot eviction JIT) : compteurs partages, definis dans custommem.c et
+// dynablock.c — voir le commentaire au site d'incrementation plus bas.
+extern uint32_t dyn86_jit_allocfail;
+extern uint32_t dyn86_ev_fatal;
+extern uint32_t dyn86_ev_oomexit;
+extern uint32_t dyn86_ev_reclaimed;
+extern int  dyn86_evict_armed(void);
+extern void dyn86_ev_dump(const char* what);
+/* Combien de sorties reprenables d'affilee un meme fil peut obtenir avant
+ * qu'on renonce. Voir le commentaire au site : c'est la borne qui interdit
+ * d'echanger un plantage contre un gel. */
+#define DYN86_OOM_EXITS 64
 
 #ifdef ARM
 void arm_prolog(x86emu_t* emu, void* addr) EXPORTDYN;
@@ -270,6 +282,19 @@ void DynaCall(x86emu_t* emu, uintptr_t addr)
 int my_setcontext(x86emu_t* emu, void* ucp);
 int DynaRun(x86emu_t* emu)
 {
+    /* D2Vita (lot eviction JIT) — MARQUE DE GRACE, entree.
+     * « Ce fil est dans du code traduit » est exactement « ce fil est dans une
+     * activation de DynaRun » : un trap fait SORTIR DynaRun (le shim est
+     * depeche par CpuBox86::run() APRES le retour), donc un fil bloque dans
+     * WaitForSingleObject est deja hors de portee. Le predicat est
+     * CONSERVATEUR — il inclut aussi le temps passe dans DBGetBlock/LinkNext/
+     * FillBlock — ce qui est voulu : ces chemins-la manipulent des
+     * dynablock_t* qu'il faut proteger tout autant que les PC ARM.
+     * Cout : deux incrementations d'un champ deja chaud, une fois par
+     * activation (~30-100k/s, soit par TRAP, jamais par bloc). Pas de
+     * barriere memoire ici : l'ordre necessaire vient de mutex_dyndump, cf.
+     * dyn86_grace_passed() dans dynablock.c. */
+    { volatile uint32_t* pd = &emu->dyn86_rundepth; *pd = *pd + 1; }
     // prepare setjump for signal handling
     JUMPBUFF jmpbuf[1] = {0};
     int skip = 0;
@@ -314,6 +339,80 @@ int DynaRun(x86emu_t* emu)
                 block = DBGetBlock(emu, R_EIP, 1);
             }
             if(!block || !block->block || !block->done) {
+                /* D2Vita (lot eviction JIT) — SORTIE REPRENABLE, et pourquoi
+                 * elle est indispensable a la periode de grace.
+                 *
+                 * Le recupereur ne rend la memoire d'un bloc que lorsque tous
+                 * les autres fils invites sont sortis de DynaRun au moins une
+                 * fois. Or, arene pleine, les fils qui ratent leur traduction
+                 * tournent ICI, DANS DynaRun : ils bloquent sur mutex_dyndump
+                 * dans LinkNext, echouent, recommencent. Ils ne franchissent
+                 * ni prologue de bloc (donc le budget mis a zero ne les touche
+                 * pas) ni trap. Resultat observe, mesure : 260 ajournements
+                 * pour 2 recuperations, puis plus jamais rien — le progres
+                 * demandait de la memoire, la memoire demandait le progres.
+                 *
+                 * On casse le cercle en faisant SORTIR le fil, exactement
+                 * comme le fait deja le sillon de preemption de LinkNext :
+                 * quit=1 sans erreur, EIP inchange. DynaRun rend la main,
+                 * CpuBox86::run() voit un arret propre hors fenetre de trap,
+                 * et run_guest reprend au meme EIP. Le fil a alors quitte
+                 * DynaRun — sa generation avance, la grace passe, la vague est
+                 * rendue, et sa traduction aboutit au tour suivant.
+                 *
+                 * BORNE, et sur QUOI elle porte. Sans borne ce serait un gel : si rien
+                 * n'est jamais libere, tous les fils tourneraient indefiniment
+                 * entre sortie et reprise, et un gel est PIRE qu'un plantage —
+                 * il n'est ni attribuable ni rapporte.
+                 * Mais compter les sorties de CE fil seul serait le mauvais
+                 * critere : sous forte pression, un fil peut sortir et revenir
+                 * des dizaines de fois pendant que le mecanisme rend
+                 * effectivement de la memoire aux autres — il serait tue en
+                 * plein succes collectif (mesure : morts=1 a 86 sorties alors
+                 * que 1408 blocs venaient d'etre rendus). La borne porte donc
+                 * sur l'ABSENCE DE PROGRES GLOBAL : le compteur ne monte que
+                 * si dyn86_ev_reclaimed n'a pas bouge depuis la sortie
+                 * precedente de ce fil. DYN86_OOM_EXITS sorties d'affilee sans
+                 * qu'UN SEUL bloc ait ete rendu nulle part, c'est un vrai
+                 * blocage, et le fil retombe alors sur la mort nommee. Le
+                 * compteur est aussi remis a zero des qu'une traduction de ce
+                 * fil aboutit (branche else, plus bas). */
+                if(dyn86_jit_allocfail && dyn86_evict_armed()
+                   && emu->dyn86_oomexit < DYN86_OOM_EXITS) {
+                    if(dyn86_ev_reclaimed != emu->dyn86_oomwatch) {
+                        emu->dyn86_oomwatch = dyn86_ev_reclaimed;
+                        emu->dyn86_oomexit = 0;      /* ca avance : on patiente */
+                    } else
+                        ++emu->dyn86_oomexit;
+                    ++dyn86_ev_oomexit;
+                    /* Ceder AVANT de sortir, hors de tout verrou. Sans ca, ce
+                     * fil ressort de run_guest et se rue immediatement sur
+                     * mutex_dyndump ; les mutex pthread n'etant pas FIFO, il
+                     * AFFAME les autres, dont celui que la grace attend. Vu en
+                     * clair dans le journal : « retient=0(prof=1
+                     * gen=13148/13148) » — l'emu principal, actif, bloque sur
+                     * le verrou, generation figee, pendant 118 sorties du fil
+                     * evinceur. La grace ne peut pas converger si le fil qui
+                     * l'attend empeche les autres d'avancer. */
+                    sched_yield();
+                    emu->quit = 1;          /* EIP inchange : strictement reprenable */
+                    continue;               /* while(!emu->quit) -> on sort */
+                }
+                /* LA mort. Run() est un talon sans interpreteur
+                 * (shim/shim_impl.c), donc franchir cette ligne TUE le fil
+                 * invite. Le compteur n'est incremente que si l'allocateur JIT
+                 * a deja refuse quelque chose : sinon la cause est un opcode
+                 * non implemente, pas la saturation, et les confondre ferait
+                 * accuser l'eviction d'un defaut qui n'est pas le sien. */
+                if(dyn86_jit_allocfail) {
+                    ++dyn86_ev_fatal;
+                    /* La PREMIERE mort reelle emporte le bilan complet : sans
+                     * ca, les compteurs d'eviction ne sont visibles qu'aux
+                     * paliers d'affichage, et un journal peut montrer une mort
+                     * sans dire si l'eviction avait tire, ajourne, ou jamais
+                     * ete appelee. */
+                    if(dyn86_ev_fatal==1) dyn86_ev_dump("MORT d'un fil invite");
+                }
                 skip = 0;
                 // no block, of block doesn't have DynaRec content (yet, temp is not null)
                 // Use interpreter (should use single instruction step...)
@@ -322,6 +421,7 @@ int DynaRun(x86emu_t* emu)
                     emu->test.clean = 0;
                 Run(emu, 1);
             } else {
+                emu->dyn86_oomexit = 0;   /* une traduction a abouti : la borne repart de zero */
                 dynarec_log(LOG_DEBUG, "%04d|Running DynaRec Block @%p (%p) of %d x86 insts (hash=0x%x) emu=%p\n", GetTID(), (void*)R_EIP, block->block, block->isize, block->hash, emu);
                 // block is here, let's run it!
                 arm_prolog(emu, block->block);
@@ -344,5 +444,18 @@ int DynaRun(x86emu_t* emu)
     // clear the setjmp
     emu->jmpbuf = old_jmpbuf;
     emu->xSPSave = old_savesp;
+    /* MARQUE DE GRACE, sortie. La generation n'avance qu'en retombant a la
+     * profondeur 0 : une activation imbriquee (DynaCall depuis un shim) ne
+     * doit pas faire croire au recupereur que le fil est ressorti, il est
+     * toujours dans le bloc exterieur. La generation est ecrite AVANT la
+     * profondeur : un lecteur qui verrait la profondeur a 0 sans voir la
+     * generation nouvelle conclurait quand meme « dehors », ce qui est vrai ;
+     * l'ordre inverse permettrait de voir une generation neuve avec une
+     * profondeur encore non nulle, ce qui est aussi vrai. Les deux lectures
+     * sont sures, seul l'entrelacement a l'envers serait gratuit. */
+    { volatile uint32_t* pd = &emu->dyn86_rundepth;
+      volatile uint32_t* pg = &emu->dyn86_rungen;
+      if (*pd == 1) *pg = *pg + 1;
+      *pd = *pd - 1; }
     return 0;   // D2Vita: missing return in upstream Box86 (non-void function)
 }
