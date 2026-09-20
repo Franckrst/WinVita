@@ -70,6 +70,7 @@ static int       g_mode = -1;            /* -1 = env not read yet           */
 #ifdef __vita__
 static SceUID    g_uid = -1;
 static Wx86KuExcpHandler g_old_dabt;
+static uint32_t  g_net_foreign;          /* foreign (non-arena) DABTs the net has waved through */
 #endif
 
 int wx86_lazymem_mode(void) {
@@ -285,15 +286,89 @@ void wx86_lazymem_stats(Wx86LazyStats* o) {
  * through membase with no check, so a chunk the engine failed to commit
  * would be a hard data abort. This commits it and returns, which makes
  * kubridge reload the context and re-execute the faulting instruction.
- * Every hit is a MISSED commit somewhere in the engine — hence the counter. */
+ * Every hit is a MISSED commit somewhere in the engine — hence the counter.
+ *
+ * PROCESS-WIDE, NOT ENGINE-SCOPED: kuKernelRegisterExceptionHandler installs
+ * this handler for the whole process, on every thread that takes a data
+ * abort — not just the emulated CPU. A fault from anywhere else (a closed
+ * Sony component, a future native shim, anything) reaches this function too,
+ * and wx86_lazymem_fault() correctly says "not mine" for it.
+ *
+ * Bug found and fixed here (2026-09-20): the old "no previous handler" branch
+ * called kuKernelReleaseExceptionHandler and nothing else, which unregisters
+ * the handler for the REST OF THE PROCESS's LIFETIME, permanently and with
+ * no log line. The very first foreign fault anywhere in the process — kernel
+ * PID 0x... aside, this includes libshacccg/GXM during vitaGL init — tore
+ * down the net for good; every genuine lazy-arena fault afterwards (normal
+ * operation of this mechanism) then had no handler to catch it and fell
+ * straight into the kernel's default handling: a hard, silent crash with no
+ * "stop:" line and an unfamiliar psp2core-SceKernelProcess.spsp2dmp dump —
+ * exactly what was observed on console. Confirmed by code audit; kubridge
+ * and Sony's tools are not at fault (see ROADMAP.md, phase 5).
+ *
+ * Verified against kubridge's own kernel source (bythos14/kubridge,
+ * src/exceptions.S + src/exceptions_bootstrap.S) before writing this fix:
+ *   - LReturnToExceptionHandler calls GetExceptionHandler() to look up the
+ *     per-process handler table EXACTLY ONCE per fault, at the very top of
+ *     dispatch, before the user handler ever runs.
+ *   - The chosen handler runs in user mode (exceptionBootstrap: blx r1),
+ *     then signals "done" with `udf #0`, which re-enters the kernel at
+ *     UndefExceptionHandler_lvl0 and falls into LRestoreExceptionContext.
+ *     That path reloads the ORIGINAL saved context (untouched since before
+ *     the jump to user mode) and rfe's straight back to the faulting PC —
+ *     UNCONDITIONALLY. It does NOT re-read the handler table.
+ *   - The table is consulted again only at the top of the NEXT fault's
+ *     dispatch (a fresh call to GetExceptionHandler).
+ * Consequence: what this function does to the registration BEFORE returning
+ * has no effect at all on how THIS fault replays — that was already decided
+ * the moment kubridge picked us to run. It only affects which handler (if
+ * any) sees the fault AFTER that replay: either the same address faulting
+ * again (a deterministic foreign fault) or a completely unrelated one on any
+ * thread.
+ *
+ * Fix: re-register ourselves immediately, in the same breath as noticing the
+ * foreign fault, instead of releasing and leaving the net down. Because the
+ * lookup that matters for THIS replay already happened (see above), a
+ * genuinely fatal, non-reproducible foreign abort still resolves exactly as
+ * before: the replay either succeeds (transient condition) or the kernel's
+ * default handling produces its usual crash and dump when it faults again
+ * with nobody left to hand it to a second time in a row — we are simply no
+ * longer the reason nobody is left. What changes is that a one-off foreign
+ * fault can never again permanently blind the net for the rest of the
+ * process.
+ *
+ * Residual, explicitly accepted risk: a foreign address that refaults at the
+ * exact same PC in a strictly deterministic way (identical context every
+ * time, so wx86_lazymem_fault() answers "not mine" forever) now loops the
+ * kernel replay indefinitely instead of producing a clean crash and dump.
+ * That is a detectable hang, not silent memory corruption or a masked
+ * kernel panic, and it only happens for that narrow, currently unseen case
+ * — a strictly better failure mode than the confirmed bug it replaces.
+ *
+ * No call to kuKernelReleaseExceptionHandler at all: releasing then
+ * re-registering would open a real (if brief) window — both calls take the
+ * same per-process spinlock kubridge's own GetExceptionHandler() takes on
+ * every thread's fault dispatch — during which a genuinely-ours lazy fault
+ * on another thread could see no handler installed. Simply not releasing
+ * removes that window entirely. `old` is passed as NULL on this
+ * re-registration: g_old_dabt must keep the value captured once at startup
+ * (any handler that existed before ours), never the "previous" value of
+ * lazy_dabt itself, or the chain above would loop back into this function.
+ */
 static void lazy_dabt(Wx86KuExcpContext* ctx) {
     g_net_fsr = ctx->fsr;
     if (wx86_lazymem_fault(ctx->far_)) return;
     if (g_old_dabt) { g_old_dabt(ctx); return; }
-    /* No previous handler: step aside and let the default one take the
-     * replayed abort, so the crash and its dump stay exactly what they were
-     * before this file existed. */
-    kuKernelReleaseExceptionHandler(WX86_KU_EXCP_DATA_ABORT);
+    uint32_t n = __atomic_add_fetch(&g_net_foreign, 1u, __ATOMIC_RELAXED);
+    int rc = kuKernelRegisterExceptionHandler(WX86_KU_EXCP_DATA_ABORT, lazy_dabt, NULL, NULL);
+    /* Unconditional — not gated behind a diagnostic knob. The old code was
+     * silent here, which is exactly what let the permanent-disarm bug hide
+     * across three separate code audits: nothing in any log said the net
+     * had ever seen a foreign fault, let alone that it had gone dark. */
+    lz_log("arene paresseuse : faute HORS arene (adresse hote=0x%08x fsr=0x%08x) — "
+           "filet %s (#%u cumule)",
+           (unsigned)ctx->far_, (unsigned)ctx->fsr,
+           rc < 0 ? "RE-ENREGISTREMENT ECHOUE, DESARME" : "re-enregistre", (unsigned)n);
 }
 #endif
 
