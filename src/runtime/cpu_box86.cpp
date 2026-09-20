@@ -185,6 +185,11 @@ extern "C" {
 #if defined(D2_TLSCOUNT) || defined(D2_B5CENSUS)
 extern "C" { unsigned long long d2_tls_hits = 0; }
 #endif
+// dynablock.c's counter of translations that produced no block -- in practice,
+// the JIT pool refusing memory. Read (never written) here to tell an exhausted
+// pool apart from a genuinely unimplemented opcode when naming a fault.
+extern "C" uint32_t dyn86_fill_fail;
+
 extern "C" {
     unsigned long long d2rt_b5_calls  = 0;   // entries into try_intrinsic
     unsigned long long d2rt_b5_loads  = 0;   // intrinsics-table lookups
@@ -1340,7 +1345,17 @@ public:
             if (EMU().error) {
                 t_fault_addr = ip;
                 t_fault_err = EMU().error;     // ERR_UNIMPL=1 / ERR_DIVBY0=2 / ERR_ILLEGAL=4
-                t_fault = "box86 dynarec fault (unimplemented/illegal/div0)";
+                // Name the JIT-pool death. An exhausted pool surfaces here as
+                // ERR_UNIMPL, because a block that could not be translated
+                // lands in shim_impl.c's Run() stub, which has no interpreter
+                // to fall back to and just sets quit + ERR_UNIMPL. Reported as
+                // the generic dynarec fault it is indistinguishable from a
+                // genuinely unimplemented opcode -- and it is by far the more
+                // common of the two in the field. dyn86_fill_fail tells them
+                // apart: it counts translations that produced no block.
+                t_fault = (t_fault_err == 1 && dyn86_fill_fail)
+                        ? "box86 dynarec fault (piscine JIT saturee, aucun bloc traduit disponible)"
+                        : "box86 dynarec fault (unimplemented/illegal/div0)";
                 if (fault) *fault = t_fault;
                 return false;
             }
