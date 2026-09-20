@@ -279,6 +279,124 @@ void wx86_lazymem_stats(Wx86LazyStats* o) {
     o->eng_last_va = g_eng_va;
 }
 
+/* ---- foreign-fault repeat tracking (see lazy_dabt below for the full story) ----
+ *
+ * Deliberately built OUTSIDE any #ifdef __vita__: it has no Vita dependency
+ * (uintptr_t/uint32_t/atomics/plat_pause are already portable in this file),
+ * so it compiles -- and can be unit-tested -- on desktop and qemu-arm too,
+ * even though its only real caller (lazy_dabt) is Vita-only. That is what
+ * makes tools/lazymem_net_selftest.cpp possible: kubridge, and any closed
+ * component that could refault at a fixed (address, PC) forever, exist only
+ * on real hardware, so the bound below cannot be exercised end to end off
+ * console -- but the counting primitive it is built on can be, exactly.
+ *
+ * WX86_NET_MAX_REPLAY: how many times in a row the SAME (host fault
+ * address, faulting PC) is tolerated before giving up on it. Chosen as 3:
+ * 1 (first sighting: log + re-arm, the previous fix's behaviour, unchanged)
+ * + 1 free retry for a genuinely transient condition (the kind the previous
+ * fix's own comment already expected: "the replay either succeeds... or the
+ * kernel's default handling produces its usual crash") + 1 more margin
+ * before concluding it is truly stuck -- without letting the count grow
+ * large enough to matter either way. Verified against kubridge's own kernel
+ * source (exceptions.S / exceptions_bootstrap.S, same source read for the
+ * commit this extends) before picking a number: EVERY occurrence, transient
+ * or not, pays a full kernel exception round trip -- context save/restore of
+ * 13 GPRs plus 32 VFP/NEON doubles, a spinlock taken with IRQs suspended
+ * (ksceKernelSpinlockLowLockCpuSuspendIntr), a mode switch to user and back
+ * through the exceptionBootstrap trampoline -- plus, in THIS handler
+ * specifically, an unconditional kuKernelRegisterExceptionHandler call and an
+ * fprintf to stderr (lz_log). None of that is free, but none of it is what
+ * makes a tight loop dangerous either: what matters is that it is BOUNDED.
+ * Even if a future change made every step here as fast as physically
+ * possible, 3 iterations of a kernel exception round trip is microseconds to
+ * low milliseconds on this CPU -- nowhere near any plausible watchdog window
+ * -- while the previous, unbounded version could run for as long as the
+ * faulting address kept faulting, which is the failure mode believed to have
+ * caused the two full console reboots this fix responds to (see ROADMAP.md,
+ * phase 5, point 4bis: kernel-level infinite replay is exactly the shape of
+ * bug a hardware watchdog exists to catch).
+ *
+ * A table, not a single global counter: g_last_replay above already exists
+ * for a DIFFERENT purpose (an already-COMMITTED arena chunk that refaults
+ * for some other reason), and reusing it here would conflate two unrelated
+ * fault classes through one shared slot -- exactly the kind of cross-thread
+ * false positive/negative its own comment already warns about for its own,
+ * narrower use. This is a small, separate, fixed-size table instead:
+ *   - Address ALONE is not enough to identify "the same fault coming back":
+ *     two different call sites, at two different moments, can legitimately
+ *     fault on the same reused host page. Comparing the faulting PC too is
+ *     what tells "the same instruction refaulting" apart from coincidence.
+ *   - Fixed size (WX86_NET_TRACK_N slots), round-robin eviction when full:
+ *     correctness for the case this guards against (ONE address stuck in a
+ *     loop) does not depend on which slot holds it, and a genuinely stuck
+ *     fault reappears on the very next call regardless of which slot it
+ *     lands in -- eviction caused by unrelated, CONCURRENT foreign faults on
+ *     other addresses can only delay reaching the limit for a given address
+ *     (its counter restarts at 1 if evicted and then hit again), never
+ *     prevent it, since the count keeps climbing back up every time that
+ *     address keeps refaulting. Honest limit, stated plainly: if
+ *     WX86_NET_TRACK_N or more DISTINCT foreign addresses were all looping
+ *     at once (never observed, and would itself be an extraordinary
+ *     situation), the table could keep resetting several of their counters
+ *     and delay each one's individual bail-out past WX86_NET_MAX_REPLAY
+ *     calls to that specific address -- still bounded (every slot is reused
+ *     at least once every WX86_NET_TRACK_N insertions), just not by exactly
+ *     that number in that pathological case.
+ *   - A short spinlock guards the table, not lock-free atomics: this path
+ *     already gave up async-signal-safety the moment lz_log() started
+ *     calling fprintf() (previous commit), so a brief, uncontended spin here
+ *     adds no new class of risk.
+ */
+#define WX86_NET_TRACK_N    8
+#define WX86_NET_MAX_REPLAY 3
+typedef struct { uintptr_t far_; uint32_t pc; uint32_t n; } Wx86NetTrackSlot;
+static Wx86NetTrackSlot g_net_track[WX86_NET_TRACK_N];
+static volatile uint8_t g_net_track_busy;
+static uint32_t         g_net_track_next;   /* round-robin eviction cursor */
+
+/* Returns how many times (far_, pc) has now been seen IN A ROW (1 on first
+ * sighting this "streak"). Never allocates; blocks at most as long as the
+ * tiny critical section below (an array scan/update, no I/O). */
+static uint32_t net_track_hit(uintptr_t far_, uint32_t pc) {
+    while (__atomic_test_and_set(&g_net_track_busy, __ATOMIC_ACQUIRE)) plat_pause();
+    int slot = -1;
+    for (int i = 0; i < WX86_NET_TRACK_N; ++i)
+        if (g_net_track[i].n && g_net_track[i].far_ == far_ && g_net_track[i].pc == pc) { slot = i; break; }
+    if (slot < 0) {
+        for (int i = 0; i < WX86_NET_TRACK_N; ++i)
+            if (!g_net_track[i].n) { slot = i; break; }
+        if (slot < 0) { slot = (int)(g_net_track_next % WX86_NET_TRACK_N); ++g_net_track_next; }
+        g_net_track[slot].far_ = far_;
+        g_net_track[slot].pc = pc;
+        g_net_track[slot].n = 0;
+    }
+    uint32_t n = ++g_net_track[slot].n;
+    __atomic_clear(&g_net_track_busy, __ATOMIC_RELEASE);
+    return n;
+}
+
+/* TEST-ONLY entry points (tools/lazymem_net_selftest.cpp). No engine path
+ * calls these -- lazy_dabt is the only real caller of net_track_hit, and it
+ * is Vita-only. They exist because lazy_dabt itself cannot be exercised off
+ * real hardware: there is no kubridge, and no closed component able to
+ * refault deterministically at a fixed address+PC, under qemu-arm or on
+ * desktop. This lets the counting primitive the bail-out decision is built
+ * on be proven correct on every platform that builds this file -- strictly
+ * better than leaving it entirely unverified until console access is
+ * available again. What this does NOT prove, and cannot: the Vita-only
+ * kuKernelRegisterExceptionHandler/kuKernelReleaseExceptionHandler calls
+ * around it in lazy_dabt, or real kernel replay timing. Those stay
+ * unverified before an actual console run. */
+uint32_t wx86_lazymem_test_net_hit(uintptr_t far_, uint32_t pc) { return net_track_hit(far_, pc); }
+uint32_t wx86_lazymem_test_net_max_replay(void) { return WX86_NET_MAX_REPLAY; }
+uint32_t wx86_lazymem_test_net_track_n(void) { return WX86_NET_TRACK_N; }
+void wx86_lazymem_test_net_reset(void) {
+    while (__atomic_test_and_set(&g_net_track_busy, __ATOMIC_ACQUIRE)) plat_pause();
+    memset(g_net_track, 0, sizeof g_net_track);
+    g_net_track_next = 0;
+    __atomic_clear(&g_net_track_busy, __ATOMIC_RELEASE);
+}
+
 /* ---- reservation ---------------------------------------------------------- */
 
 #ifdef __vita__
@@ -337,38 +455,114 @@ void wx86_lazymem_stats(Wx86LazyStats* o) {
  * fault can never again permanently blind the net for the rest of the
  * process.
  *
- * Residual, explicitly accepted risk: a foreign address that refaults at the
- * exact same PC in a strictly deterministic way (identical context every
- * time, so wx86_lazymem_fault() answers "not mine" forever) now loops the
- * kernel replay indefinitely instead of producing a clean crash and dump.
- * That is a detectable hang, not silent memory corruption or a masked
- * kernel panic, and it only happens for that narrow, currently unseen case
- * — a strictly better failure mode than the confirmed bug it replaces.
+ * UPDATE (2026-09-20, same day, after this exact residual risk materialised):
+ * the paragraph above accepted "a foreign address that refaults identically
+ * forever now loops instead of crashing" as a strictly-better trade-off, on
+ * the reasoning that a detectable hang beats a silent kernel crash. That
+ * reasoning under-weighted WHERE the hang runs: this replay loop is inside
+ * the KERNEL's own exception dispatch, not user-space, so nothing in the
+ * process (or even a user-space watchdog) can ever observe or interrupt it.
+ * A loop with no possible exit is exactly the shape of fault a hardware
+ * watchdog exists to catch by rebooting the whole device. Two console test
+ * runs with WX86_ARENA_LAZY=1 after this fix shipped each ended in a full
+ * console reboot, one right after the other — the log froze at a different,
+ * early point each time (consistent with a genuinely async foreign fault,
+ * not a deterministic one always hitting the same spot), and the user
+ * physically observed the console restart, not just the app dying. This is
+ * not proven at the kernel level (no console access is available while this
+ * follow-up is being written — see ROADMAP.md, phase 5), but it is by far
+ * the most coherent explanation on the facts, and the residual risk this
+ * comment already named is a mechanism fully capable of producing exactly
+ * that symptom. Treated as confirmed for engineering purposes; see the
+ * bound added below and ROADMAP.md for the full writeup and its honest
+ * uncertainty.
  *
- * No call to kuKernelReleaseExceptionHandler at all: releasing then
- * re-registering would open a real (if brief) window — both calls take the
- * same per-process spinlock kubridge's own GetExceptionHandler() takes on
- * every thread's fault dispatch — during which a genuinely-ours lazy fault
- * on another thread could see no handler installed. Simply not releasing
- * removes that window entirely. `old` is passed as NULL on this
- * re-registration: g_old_dabt must keep the value captured once at startup
- * (any handler that existed before ours), never the "previous" value of
- * lazy_dabt itself, or the chain above would loop back into this function.
+ * Fix: bound how many times in a row the SAME foreign fault (same host
+ * address AND same PC — see the net_track_hit block above this function for
+ * why both, and the full reasoning for the limit and the table) is allowed
+ * to replay before this handler deliberately lets it crash instead. Below
+ * the limit, behaviour is UNCHANGED from the paragraph above: re-register
+ * (no window where the net is down) and log. At the limit, this handler
+ * does the one thing proven above to make a replay actually terminal
+ * instead of a no-op for the fault in hand: it releases the handler and
+ * does NOT re-register. Because the replay of THIS fault was already
+ * decided before this call even started running (see above), releasing now
+ * has zero effect on it; what it does is ensure that when this exact
+ * address faults again at this exact PC — guaranteed, since by definition
+ * it got here by doing exactly that WX86_NET_MAX_REPLAY times running —
+ * GetExceptionHandler() finds nothing registered and the kernel's own
+ * default handling takes over: the clean crash and dump this file has
+ * always aimed to preserve for a fault that was never going to resolve.
+ *
+ * This is NOT the bug this file already fixed once, and the difference is
+ * exact and important: the earlier bug released on the FIRST foreign fault
+ * ever seen, unconditionally, disarming the net for the rest of the
+ * process's life before a single genuine lazy-arena fault had a chance to
+ * occur. This release only ever happens after WX86_NET_MAX_REPLAY identical
+ * occurrences of ONE specific (address, PC) pair — every other foreign
+ * fault, and every subsequent occurrence of a DIFFERENT (address, PC) pair,
+ * still gets the full re-register-and-log treatment from the paragraph
+ * above, unaffected.
+ *
+ * Does the net need to re-arm for foreign faults at OTHER addresses after
+ * this release, in case the process somehow survives? On this platform,
+ * the answer verified in the kernel source is that it practically cannot
+ * come up: a user-mode data abort with no handler is fatal to the WHOLE
+ * PROCESS, not just the faulting thread (LFatalError explicitly calls
+ * sceKernelExitProcess on the sibling stack-corruption path, and nothing
+ * reviewed in exceptions.S / exceptions_bootstrap.S offers a thread-only
+ * recovery route). Re-registering immediately after this release, hoping to
+ * cover that near-impossible survival case, would defeat the entire fix: it
+ * would let THIS exact fault be caught again on its very next occurrence,
+ * resurrecting the infinite loop this bound exists to end — release is the
+ * mechanism that turns "replay" into "crash" for this address, and it only
+ * works if it is not immediately undone. Explicit, honest limitation: if
+ * Vita/kubridge semantics are ever wrong about this, or change in the
+ * future, the net stays down for the rest of that process's life after this
+ * release, same failure mode as the bug fixed earlier — accepted here only
+ * because the alternative (never bounding the loop at all) is the confirmed,
+ * worse, console-rebooting failure this exact fix responds to.
+ *
+ * No call to kuKernelReleaseExceptionHandler EXCEPT at the bound above: a
+ * bare release+re-register pair below the limit would open a real (if
+ * brief) window — both calls take the same per-process spinlock kubridge's
+ * own GetExceptionHandler() takes on every thread's fault dispatch — during
+ * which a genuinely-ours lazy fault on another thread could see no handler
+ * installed. Simply not releasing below the limit removes that window
+ * entirely. `old` is passed as NULL on the re-registration below the limit:
+ * g_old_dabt must keep the value captured once at startup (any handler that
+ * existed before ours), never the "previous" value of lazy_dabt itself, or
+ * the chain above would loop back into this function.
  */
 static void lazy_dabt(Wx86KuExcpContext* ctx) {
     g_net_fsr = ctx->fsr;
     if (wx86_lazymem_fault(ctx->far_)) return;
     if (g_old_dabt) { g_old_dabt(ctx); return; }
     uint32_t n = __atomic_add_fetch(&g_net_foreign, 1u, __ATOMIC_RELAXED);
+    uint32_t hits = net_track_hit((uintptr_t)ctx->far_, (uint32_t)ctx->pc);
+    if (hits >= WX86_NET_MAX_REPLAY) {
+        /* Give up on THIS (address, PC) pair: release, do not re-register.
+         * The next occurrence of this exact, by-now-proven-stuck fault has
+         * no handler to catch it and crashes cleanly (see comment above). */
+        kuKernelReleaseExceptionHandler(WX86_KU_EXCP_DATA_ABORT);
+        lz_log("arene paresseuse : faute HORS arene REPETEE A L'IDENTIQUE "
+               "(adresse hote=0x%08x pc=0x%08x fsr=0x%08x, %u fois de suite) — "
+               "ABANDON : filet DESARME pour CETTE faute precise, plantage propre "
+               "attendu a la prochaine repetition (#%u cumule)",
+               (unsigned)ctx->far_, (unsigned)ctx->pc, (unsigned)ctx->fsr,
+               (unsigned)hits, (unsigned)n);
+        return;
+    }
     int rc = kuKernelRegisterExceptionHandler(WX86_KU_EXCP_DATA_ABORT, lazy_dabt, NULL, NULL);
     /* Unconditional — not gated behind a diagnostic knob. The old code was
      * silent here, which is exactly what let the permanent-disarm bug hide
      * across three separate code audits: nothing in any log said the net
      * had ever seen a foreign fault, let alone that it had gone dark. */
-    lz_log("arene paresseuse : faute HORS arene (adresse hote=0x%08x fsr=0x%08x) — "
-           "filet %s (#%u cumule)",
-           (unsigned)ctx->far_, (unsigned)ctx->fsr,
-           rc < 0 ? "RE-ENREGISTREMENT ECHOUE, DESARME" : "re-enregistre", (unsigned)n);
+    lz_log("arene paresseuse : faute HORS arene (adresse hote=0x%08x pc=0x%08x fsr=0x%08x) — "
+           "filet %s (repetition %u/%u, #%u cumule)",
+           (unsigned)ctx->far_, (unsigned)ctx->pc, (unsigned)ctx->fsr,
+           rc < 0 ? "RE-ENREGISTREMENT ECHOUE, DESARME" : "re-enregistre",
+           (unsigned)hits, (unsigned)WX86_NET_MAX_REPLAY, (unsigned)n);
 }
 #endif
 

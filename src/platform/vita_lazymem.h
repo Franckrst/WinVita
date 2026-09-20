@@ -111,6 +111,19 @@ void wx86_lazymem_stats(Wx86LazyStats* out);
  * predictable load+branch answers "nothing to do". */
 extern uint8_t* wx86_lazymem_state;
 
+/* TEST-ONLY. Not part of the engine contract, not called by any real code
+ * path: exposes the bounded foreign-fault repeat counter that the Vita-only
+ * safety net (vita_lazymem.c, lazy_dabt) bails out on, so
+ * tools/lazymem_net_selftest.cpp can prove the counting/threshold/eviction
+ * logic on desktop and qemu-arm -- platforms with no kubridge and no closed
+ * component able to refault deterministically the way lazy_dabt itself
+ * guards against, so lazy_dabt cannot be exercised there at all. Always
+ * compiled (no #ifdef __vita__): the logic itself has no Vita dependency. */
+uint32_t wx86_lazymem_test_net_hit(uintptr_t host_addr, uint32_t pc);
+uint32_t wx86_lazymem_test_net_max_replay(void);
+uint32_t wx86_lazymem_test_net_track_n(void);
+void     wx86_lazymem_test_net_reset(void);
+
 #ifdef __cplusplus
 }
 #endif

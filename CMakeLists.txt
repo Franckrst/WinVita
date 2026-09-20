@@ -85,3 +85,16 @@ add_executable(pe_analyze tools/pe_analyze.cpp)
 # octet pour octet, et tourne sur bureau. Voir tools/present_scale_selftest.cpp.
 add_executable(present_scale_selftest tools/present_scale_selftest.cpp)
 target_link_libraries(present_scale_selftest PRIVATE winx86_core)
+
+# -- Auto-controle du compteur de repetition de faute etrangere (arene paresseuse) --
+# lazy_dabt (vita_lazymem.c) est le seul appelant reel de net_track_hit, et il
+# vit sous #ifdef __vita__ : ni bureau ni qemu-arm n'ont de kubridge, ni de
+# composant ferme capable de refauter deterministiquement a la meme adresse+PC,
+# donc lazy_dabt lui-meme ne peut pas etre exerce ici. net_track_hit, lui, est
+# delibierement compile sans condition de plateforme (voir vita_lazymem.c) :
+# ce binaire le prouve directement via les points d'entree TEST-ONLY de
+# vita_lazymem.h. Voir tools/lazymem_net_selftest.cpp pour ce qui est prouve
+# et ce qui reste hors de portee sans console.
+find_package(Threads REQUIRED)
+add_executable(lazymem_net_selftest tools/lazymem_net_selftest.cpp)
+target_link_libraries(lazymem_net_selftest PRIVATE winx86_core Threads::Threads)

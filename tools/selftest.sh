@@ -35,6 +35,30 @@ run() { # $1 = nom, $2... = sources
 EXTRA="-Wno-unused-parameter" \
   run present_scale "$ROOT/tools/present_scale_selftest.cpp" "$ROOT/src/platform/present_scale.cpp"
 
+# Le compteur de repetition de faute etrangere de l'arene paresseuse
+# (WX86_ARENA_LAZY) : lazy_dabt lui-meme vit sous #ifdef __vita__ et ne peut
+# pas etre exerce ici (pas de kubridge, pas de composant ferme qui refaute a
+# l'identique), mais le compteur (adresse, PC) -> repetitions dont depend sa
+# decision d'abandon est compile sans condition de plateforme. vita_lazymem.c
+# est compile a part EN C (-std=gnu17, comme build.sh le fait reellement pour
+# ce fichier) plutot que directement par $CXX : le lier tel quel dans un
+# g++ ... fichier.c fichier.cpp aurait recompile le .c en C++ (voir le
+# commentaire de l'auto-controle alt_table plus bas pour le meme piege), ce
+# qui aurait teste une semantique differente de celle reellement livree.
+# -pthread : le test d'acces concurrent utilise std::thread.
+echo "== lazymem_net =="
+if ! ${CC:-gcc} -std=gnu17 -O2 -Wall -Wextra -Werror -I"$ROOT/src" -c "$ROOT/src/platform/vita_lazymem.c" \
+      -o "$OUT/lazymem_net_vita_lazymem.o" 2>"$OUT/lazymem_net.build.log"; then
+  echo "ECHEC de compilation :"; cat "$OUT/lazymem_net.build.log"; fail=1
+elif ! $CXX -std=gnu++17 -O2 -Wall -Wextra -Werror -pthread -I"$ROOT/src" \
+      "$ROOT/tools/lazymem_net_selftest.cpp" "$ROOT/src/platform/vita_host.cpp" \
+      "$OUT/lazymem_net_vita_lazymem.o" -o "$OUT/lazymem_net" \
+      2>>"$OUT/lazymem_net.build.log"; then
+  echo "ECHEC de compilation :"; cat "$OUT/lazymem_net.build.log"; fail=1
+elif ! "$OUT/lazymem_net"; then
+  echo "ECHEC a l'execution"; fail=1
+fi
+
 # Le clavier virtuel : en-tete AUTONOME, donc entierement prouvable ici.
 # 1 297 verifications — les 95 ASCII imprimables, le dessin borne au panneau,
 # tactile == dessin, MAJ a trois etats, mode masque, bornes de l'echo, et un
