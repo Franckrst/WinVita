@@ -53,9 +53,9 @@ if [ -n "${LIBTAG:-}" ]; then
 fi
 LIB="$OUT/$LIBNAME"
 
-# -I$ROOT/src en DERNIER : les unites C de la couche platform (vita_lazymem.c)
-# s'incluent par chemin complet ("platform/..."), comme le C++. Place apres les
-# chemins de box86, il ne peut pas detourner un include du dynarec.
+# -I$ROOT/src en DERNIER : les unites C de la couche platform s'incluent par
+# chemin complet ("platform/..."), comme le C++. Place apres les chemins de
+# box86, il ne peut pas detourner un include du dynarec.
 CFLAGS="-O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
   -DDYNAREC -DARM -DUSE_MMAP -DTRACE_MEMSTAT $VITA_EXTRA \
   -I$SHIM -I$DYN86 -I$B86/include -I$B86 -I$B86/dynarec -I$ROOT/src \
@@ -88,7 +88,6 @@ $DYN86/alt_table.c
 $DYN86/dyn86_emitprof.c
 $DYN86/dyn86_memintrin.c
 $DYN86/dyn86_intrin.c
-$PLAT/vita_lazymem.c
 "
 [ "${TARGET:-}" = vita ] && CORE_SRC="$CORE_SRC $SHIM/vita/mman_vita.c"
 
@@ -282,33 +281,8 @@ if [ "${#TODO_OBJ[@]}" -gt 0 ]; then
   [ "$fails" -eq 0 ] || { echo "FATAL: $fails unite(s) en echec" >&2; exit 1; }
 fi
 
-# --- Vita : stubs d'import FAIBLES de kubridge -------------------------------
-# platform/vita_lazymem.c appelle kuKernelMem{Reserve,Commit,Decommit} et le
-# gestionnaire d'exception du fork bythos14. kubridge est un plugin noyau, pas
-# une bibliotheque du SDK : ses stubs n'existent nulle part, on les genere a
-# partir de notre propre base de NID (src/platform/kubridge.yml).
-# FAIBLES (GEN_WEAK_EXPORTS=1) : sans kubridge charge, l'eboot doit quand meme
-# demarrer — la sonde de vita_lazymem.c detecte l'absence et revient au chemin
-# classique. Les objets sont ranges DANS l'archive : le consommateur n'a aucune
-# ligne d'edition de liens a ajouter, et un objet non reference n'est pas tire.
-KU_OBJS=""
-if [ "${TARGET:-}" = vita ]; then
-    VSDK="${VITASDK:-/usr/local/vitasdk}"
-    KU="$OUT/kubridge"
-    if [ ! -f "$KU/.stamp" ] || [ "$PLAT/kubridge.yml" -nt "$KU/.stamp" ]; then
-        [ -x "$VSDK/bin/vita-libs-gen" ] || { echo "FATAL: $VSDK/bin/vita-libs-gen absent (stubs kubridge)" >&2; exit 1; }
-        rm -rf "$KU"; mkdir -p "$KU"
-        "$VSDK/bin/vita-libs-gen" "$PLAT/kubridge.yml" "$KU" >/dev/null
-        for f in "$KU"/*.S; do
-            "$VSDK/bin/arm-vita-eabi-as" --defsym GEN_WEAK_EXPORTS=1 "$f" -o "${f%.S}.wo"
-        done
-        touch "$KU/.stamp"
-    fi
-    KU_OBJS=$(echo "$KU"/*.wo)
-fi
-
 AR="${CC%-gcc}-ar"
 rm -f "$LIB"
-$AR rcs "$LIB" "$OBJ"/core/*.o "$OBJ"/pass*/*.o "$OBJ"/rt/*.o $KU_OBJS
+$AR rcs "$LIB" "$OBJ"/core/*.o "$OBJ"/pass*/*.o "$OBJ"/rt/*.o
 echo "== $LIB =="
 $AR t "$LIB" | wc -l
