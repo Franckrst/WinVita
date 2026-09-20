@@ -541,6 +541,43 @@ dynablock_t* FindDynablockFromNativeAddress(void* p)
 #ifdef TRACE_MEMSTAT
 static uint32_t dynarec_allocated = 0;
 #endif
+
+/* D2Vita (lot eviction JIT) — pourquoi ces deux symboles vivent ICI.
+ *
+ * dyn86_jit_allocfail : compte les refus de CE allocateur, et lui seul. Le
+ * site d'eviction (dynablock.c) doit distinguer « FillBlock a echoue faute de
+ * MEMOIRE » de « FillBlock a echoue parce que l'opcode n'est pas implemente,
+ * ou parce que la passe 2/3 a abandonne ». Evincer sur la seconde famille
+ * serait du vandalisme pur : on jetterait du code chaud sans que ca change
+ * quoi que ce soit au resultat. Comparer ce compteur avant/apres l'appel
+ * donne la reponse EXACTE, sans deviner.
+ *
+ * D2_JITFAILAFTER=<n> : injection de panne. A partir du n-ieme chunk, cet
+ * allocateur cesse d'en ouvrir de nouveaux et ne sert plus que depuis les
+ * chunks existants. C'est EXACTEMENT le comportement de la piscine Vita une
+ * fois pleine (mman_vita.c : la piscine est un allocateur a butee, box86 ne
+ * rend jamais ses chunks), et c'est le seul moyen de reproduire le defaut
+ * sous qemu-arm — ou mman_vita.c n'est pas compile du tout, le mmap de Linux
+ * etant lie a sa place.
+ *
+ * D2_JITCHUNK_KB=<n> : taille de chunk (defaut DYNMMAPSZ = 2048 Kio). Sans
+ * lui, la borne ci-dessus n'a que 2 Mio de resolution, et pour un jeu de code
+ * chaud de 3 Mio le seul reglage disponible saute de « aucun effet » (2
+ * chunks) a « 60 % de sur-reservation » (1 chunk). Or ce n'est PAS le defaut
+ * du parc : sur console le jeu chaud fait ~14 Mio pour une piscine de 16 Mio
+ * — une piscine LEGEREMENT trop petite, decoupee en 8 chunks. Un banc qui ne
+ * sait reproduire que l'emballement total prouverait autre chose que ce qu'on
+ * corrige. Baisser la taille de chunk rend le MEME rapport chunks/besoin, et
+ * donc la meme situation.
+ *
+ * Ce sont des BOUTONS D'ENVIRONNEMENT, pas des #ifdef de test : le code
+ * eprouve doit etre le code livre. Absents => zero surcout (des entiers deja
+ * charges, testes une fois par CREATION DE CHUNK, jamais par bloc traduit). */
+uint32_t dyn86_jit_allocfail = 0;
+static int      dyn86_failafter = -1;   /* -1 = pas encore lu ; 0 = inerte */
+static uint32_t dyn86_chunks = 0;       /* chunks ouverts depuis le boot */
+static size_t   dyn86_chunksz = 0;      /* 0 = pas encore lu => DYNMMAPSZ */
+
 uintptr_t AllocDynarecMap(size_t size)
 {
     if(!size)
@@ -587,14 +624,40 @@ uintptr_t AllocDynarecMap(size_t size)
         }
         // check if new
         if(!list->chunks[i].size) {
+            /* Injection de panne (D2_JITFAILAFTER) — voir l'en-tete plus haut.
+             * Place ICI, sur la CREATION DE CHUNK, et pas sur le service depuis
+             * un chunk existant : c'est la seule facon de modeliser une arene
+             * FINIE, donc de rendre l'espace libere par l'eviction reellement
+             * utile. Un refus place plus bas refuserait aussi les allocations
+             * que l'eviction vient de rendre possibles, et le banc ne
+             * prouverait rien. */
+            if(dyn86_failafter < 0) {
+                const char* e = getenv("WX86_JITFAILAFTER");
+                if(!e) e = getenv("D2_JITFAILAFTER");
+                dyn86_failafter = e ? atoi(e) : 0;
+                const char* c = getenv("WX86_JITCHUNK_KB");
+                if(!c) c = getenv("D2_JITCHUNK_KB");
+                dyn86_chunksz = c ? ((size_t)atoi(c) << 10) : (size_t)DYNMMAPSZ;
+                if(!dyn86_chunksz) dyn86_chunksz = DYNMMAPSZ;
+                if(dyn86_failafter > 0 || c)
+                    fprintf(stderr, "[jit] INJECTION: arene bornee a %d chunks de %zu Ko (= %zu Ko)\n",
+                               dyn86_failafter, dyn86_chunksz>>10,
+                               (size_t)dyn86_failafter*(dyn86_chunksz>>10));
+            }
+            if(dyn86_failafter > 0 && (int)dyn86_chunks >= dyn86_failafter) {
+                ++dyn86_jit_allocfail;
+                mutex_unlock(&mutex_dynarec);
+                return 0;
+            }
             // alloc a new block, aversized or not, we are at the end of the list
-            size_t allocsize = (sz>DYNMMAPSZ)?sz:DYNMMAPSZ;
+            size_t allocsize = (sz>dyn86_chunksz)?sz:dyn86_chunksz;
             // allign sz with pagesize
             allocsize = (allocsize+(box86_pagesize-1))&~(box86_pagesize-1);
             #ifndef USE_MMAP
             void *p = NULL;
             if(!(p=box_memalign(box86_pagesize, allocsize))) {
                 dynarec_log(LOG_INFO, "Cannot create dynamic map of %zu bytes\n", allocsize);
+                ++dyn86_jit_allocfail;
                 mutex_unlock(&mutex_dynarec);
                 return 0;
             }
@@ -603,6 +666,7 @@ uintptr_t AllocDynarecMap(size_t size)
             void* p = mmap(NULL, allocsize, PROT_READ|PROT_WRITE|PROT_EXEC, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
             if(p==MAP_FAILED) {
                 dynarec_log(LOG_INFO, "Cannot create dynamic map of %zu bytes (%s)\n", allocsize, strerror(errno));
+                ++dyn86_jit_allocfail;
                 mutex_unlock(&mutex_dynarec);
                 return 0;
             }
@@ -613,6 +677,15 @@ uintptr_t AllocDynarecMap(size_t size)
 #ifdef TRACE_MEMSTAT
             dynarec_allocated += allocsize;
 #endif
+            ++dyn86_chunks;
+            /* Trace du banc, UNIQUEMENT quand une injection est armee : c'est
+             * elle qui donne le nombre de chunks reellement consommes par un
+             * scenario, donc la valeur a donner a D2_JITFAILAFTER pour placer
+             * la borne juste en dessous. Sans elle il faudrait chercher ce
+             * reglage a l'aveugle. */
+            if(dyn86_failafter > 0)
+                fprintf(stderr, "[jit] arene: chunk %u ouvert (%zu Ko au total)\n",
+                           dyn86_chunks, (size_t)dyn86_chunks*(dyn86_chunksz>>10));
             list->chunks[i].block = p;
             list->chunks[i].first = p;
             list->chunks[i].size = allocsize;
@@ -678,6 +751,105 @@ void FreeDynarecMap(uintptr_t addr)
         }
     }
     mutex_unlock(&mutex_dynarec);
+}
+
+/* D2Vita (lot eviction JIT) — enumerateur de victimes.
+ *
+ * Il n'existe AUCUN registre des dynablocks : getDB parcourt la table de
+ * sauts (indexee par adresse INVITE, donc inutilisable pour « donne-moi des
+ * blocs a jeter »), et rien d'autre ne les liste. Mais l'arene elle-meme les
+ * contient tous : chaque sous-bloc ALLOUE commence par le pointeur `self`
+ * que FillBlock/CreateEmptyBlock y ecrivent (dynarec_arm.c). C'est exactement
+ * la marche que FindDynablockFromNativeAddress fait deja, a ceci pres qu'elle
+ * cherche une adresse et que celle-ci ramasse.
+ *
+ * `next.fill` est teste, lui. FindDynablockFromNativeAddress ne le teste pas
+ * et rend donc le `self` RANCE d'un sous-bloc libere (defaut latent signale
+ * mais hors perimetre ici) ; un enumerateur qui ferait pareil rendrait des
+ * pointeurs pendants a la pelle des la premiere eviction.
+ *
+ * CURSEUR TOURNANT persistant : sans donnee de chaleur — et en ajouter une
+ * demanderait d'emettre du code, ce qu'un mecanisme de survie n'a pas le droit
+ * de faire — le choix des victimes est une horloge sans bit de reference,
+ * c'est-a-dire du remplacement quasi aleatoire. C'est le compromis assume :
+ * un bloc chaud evince par erreur coute UNE retraduction, pas une session.
+ *
+ * VERROU : prend mutex_dynarec (l'arene bouge sous Alloc/FreeDynarecMap).
+ * L'appelant (dynablock.c) tient deja mutex_dyndump, donc l'arete empruntee
+ * est dyndump -> dynarec, celle que FreeDynablock -> FreeDynarecMap utilise
+ * depuis toujours. Aucun ordre nouveau. Les champs de dynablock_t lus ici
+ * (`gone`) sont ecrits sous dyndump, que l'appelant tient : coherent. */
+/* CURSEUR : (maillon, indice de chunk) — et surtout PAS un offset d'octet
+ * dans le chunk. La premiere version en gardait un, et c'etait faux de facon
+ * instructive : la recuperation qu'on vient de declencher appelle freeBlock,
+ * qui COALESCE les marqueurs voisins. L'offset memorise tombait alors au
+ * milieu d'une zone fusionnee, donc sur un blockmark_t qui n'existe plus ;
+ * NEXT_BLOCK y lisait des tailles arbitraires et la marche partait dans le
+ * decor — au mieux elle ne rendait plus aucune victime (mesure : 64 blocs
+ * retires en tout et pour tout sur 250 tours, soit 51 Kio rendus sur une
+ * arene de 2304 Kio, c'est-a-dire une eviction qui ne servait a rien), au
+ * pire elle aurait rendu des dynablock_t* fabriques a partir d'octets
+ * quelconques. Un chunk se parcourt donc TOUJOURS depuis son debut, ou la
+ * chaine de marqueurs est valide par construction ; seul l'indice de chunk
+ * tourne. */
+static mmaplist_t* dyn86_walk_list = NULL;
+static int         dyn86_walk_chunk = 0;
+
+int dyn86_jit_collect_victims(dynablock_t** out, int max)
+{
+    if(!out || max<=0)
+        return 0;
+    int n = 0;
+    mutex_lock(&mutex_dynarec);
+    if(!mmaplist) { mutex_unlock(&mutex_dynarec); return 0; }
+    /* Revalidation du maillon : l'arene peut avoir change entre deux appels,
+     * et un pointeur garde tel quel serait un pari. */
+    mmaplist_t* list = mmaplist; int ci = 0;
+    if(dyn86_walk_list) {
+        for(mmaplist_t* v = mmaplist; v; v = v->next)
+            if(v==dyn86_walk_list) { list = v; ci = dyn86_walk_chunk; break; }
+    }
+    if(ci < 0 || ci >= NCHUNK) ci = 0;
+    /* AU PLUS UN TOUR, et la borne doit etre EXACTEMENT le nombre de creneaux
+     * existants — pas un multiple « genereux ».
+     *
+     * La version precedente bornait a NCHUNK*8 creneaux. Quand l'arene a
+     * moins de blocs vivants que `max`, la marche faisait alors PLUSIEURS
+     * TOURS et ramassait les memes blocs plusieurs fois. La vague contenait
+     * des doublons, donc la recuperation liberait deux fois le meme bloc, et
+     * empoisonnait de la memoire deja reattribuee a une autre traduction.
+     * Mesure : inoffensif avec 9 chunks (la vague de 64 tenait dans un tour),
+     * 3 plantages sur 4 avec 3 chunks — un usage-apres-liberation bien reel,
+     * attrape par l'empoisonnement, pas par le raisonnement. */
+    int nslots = 0;
+    for(mmaplist_t* v = mmaplist; v; v = v->next) nslots += NCHUNK;
+    int visited = 0;
+    const int maxvisit = nslots;
+    while(n < max && visited < maxvisit) {
+        blocklist_t* ch = &list->chunks[ci];
+        ++visited;
+        if(ch->size && ch->block) {
+            blockmark_t* m = (blockmark_t*)ch->block;
+            blockmark_t* last = LAST_BLOCK(ch->block, ch->size);
+            while(m < last && n < max) {
+                if(m->next.fill) {
+                    dynablock_t* db = *(dynablock_t**)((uintptr_t)m + sizeof(blockmark_t));
+                    /* `gone` : deja retire (il appartient a une chaine
+                     * `previous` ou a la vague en cours). Le reprendre le
+                     * mettrait deux fois dans la file, donc le libererait
+                     * deux fois. */
+                    if(db && !db->gone && db->actual_block)
+                        out[n++] = db;
+                }
+                m = NEXT_BLOCK(m);
+            }
+        }
+        ++ci;
+        if(ci >= NCHUNK) { ci = 0; list = list->next ? list->next : mmaplist; }
+    }
+    dyn86_walk_list = list; dyn86_walk_chunk = ci;
+    mutex_unlock(&mutex_dynarec);
+    return n;
 }
 
 static uintptr_t getDBSize(uintptr_t addr, size_t maxsize, dynablock_t** db)

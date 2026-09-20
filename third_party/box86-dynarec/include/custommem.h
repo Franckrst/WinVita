@@ -23,6 +23,14 @@ typedef struct dynablock_s dynablock_t;
 // custom protection flag to mark Page that are Write protected for Dynarec purpose
 uintptr_t AllocDynarecMap(size_t size);
 void FreeDynarecMap(uintptr_t addr);
+/* D2Vita (lot eviction JIT) — contrat complet au-dessus des definitions,
+ * custommem.c. dyn86_jit_allocfail ne compte QUE les refus d'AllocDynarecMap,
+ * ce qui permet au site d'eviction de distinguer une panne de memoire d'un
+ * opcode non implemente. dyn86_jit_collect_victims remplit `out` avec au plus
+ * `max` blocs vivants pris a un curseur tournant sur l'arene, et rend combien
+ * il en a mis ; l'appelant DOIT tenir mutex_dyndump. */
+extern uint32_t dyn86_jit_allocfail;
+int dyn86_jit_collect_victims(dynablock_t** out, int max);
 
 void addDBFromAddressRange(uintptr_t addr, size_t size);
 void cleanDBFromAddressRange(uintptr_t addr, size_t size, int destroy);
