@@ -203,16 +203,31 @@ static int jitpool_grow(void) {
         g_jitseg_max = segs;
     }
     if (g_jitseg_n >= (int)g_jitseg_max) return 0;
-    size_t want = (size_t)g_jitseg_cap_mb << 20;
-    SceUID u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
-    void* pb = 0;
-    if (u < 0 || sceKernelGetMemBlockBase(u, &pb) < 0 || !pb) {
+    /* Step the request down instead of giving up on the first refusal.
+     * A full-size segment is refused as soon as the rest of the process has
+     * eaten the budget, and the old code then set g_jitseg_refused and never
+     * asked again -- for anything, at any size. The pool froze at whatever it
+     * had, and since this build has no interpreter, the first block that could
+     * not be translated killed the guest thread outright (crash signature
+     * SMRD2J34ZXU2A55I: 52 of the 62 claims received from 0.1.6, at ~45 min of
+     * play, after "JIT: segment 2/2 de 16 Mo REFUSE" and 130 refused 2 MiB
+     * fallbacks). Taking the 4 MiB that ARE free beats taking nothing. */
+    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0;
+    for (unsigned mb = g_jitseg_cap_mb; mb >= 1u; mb >>= 1) {
+        want = (size_t)mb << 20;
+        u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
+        if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) break;
+        last_rc = u;                     /* the kernel's own code, for the log */
         if (u >= 0) sceKernelFreeMemBlock(u);
+        u = -1; pb = 0;
+    }
+    if (!pb) {
         g_jitseg_refused = 1;
-        char m[176];
+        char m[208];
         snprintf(m, sizeof m,
-            "JIT: segment %d/%u de %u Mo REFUSE (sce=0x%08x) — piscine figee a %u Mo, repli bloc-par-bloc au-dela",
-            g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)u, dyn86_jitpool_size >> 20);
+            "JIT: segment %d/%u REFUSE de %u Mo jusqu'a 1 Mo (sce=0x%08x) — piscine figee a %u Mo,"
+            " repli bloc-par-bloc au-dela",
+            g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)last_rc, dyn86_jitpool_size >> 20);
         wx86_vita_progress_c(m);
         return 0;
     }
@@ -220,10 +235,17 @@ static int jitpool_grow(void) {
     g_jitseg[g_jitseg_n].uid = u;
     ++g_jitseg_n;
     dyn86_jitpool_size += (unsigned int)want;
-    { char m[176];
+    /* Say what the pool IS and what it was asked to be. The old line read
+     * "segment 1/2 de 16 Mo reserve (piscine totale 16 Mo)", which a reader
+     * takes for 32 MiB of pool with the first half open -- while the second
+     * half may well be impossible, as it was on every 0.1.6 console that
+     * reported. The remaining segments are opened on demand, and a refusal
+     * then is fatal to the guest thread, so the target is worth printing. */
+    { char m[208];
         snprintf(m, sizeof m,
-            "JIT: segment %d/%u de %u Mo reserve (piscine totale %u Mo ; le tas ne peut plus l'affamer)",
-            g_jitseg_n, g_jitseg_max, g_jitseg_cap_mb, dyn86_jitpool_size >> 20);
+            "JIT: segment %d/%u de %u Mo reserve (piscine %u Mo ; cible %u Mo, le reste ouvert a la demande)",
+            g_jitseg_n, g_jitseg_max, (unsigned)(want >> 20), dyn86_jitpool_size >> 20,
+            g_jitseg_cap_mb * g_jitseg_max);
         wx86_vita_progress_c(m); }
     return 1;
 }
@@ -308,6 +330,23 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 void* p = (char*)s->base + s->used;
                 s->used += size;
                 dyn86_jitpool_used += (unsigned int)size;
+                /* Pressure, announced while there is still room. The pool only
+                 * ever grows (nothing evicts a translated block), so saturation
+                 * is visible ten minutes before it turns fatal -- whereas the
+                 * "fail=" counter on the alive: line only moves once blocks are
+                 * already being refused, which on the reported sessions all
+                 * happened inside the watchdog's 10 s blind window. */
+                if (!g_jitseg_refused && g_jitseg_n >= (int)g_jitseg_max && dyn86_jitpool_size) {
+                    static unsigned said_pct = 0;
+                    unsigned pct = (unsigned)((uint64_t)dyn86_jitpool_used * 100u / dyn86_jitpool_size);
+                    unsigned step = pct >= 95u ? 95u : pct >= 90u ? 90u : pct >= 75u ? 75u : 0u;
+                    if (step > said_pct) { said_pct = step;
+                        char m[176];
+                        snprintf(m, sizeof m,
+                            "JIT: piscine a %u%% (%u/%u Mo, %u segments) — rien n'est jamais evince,"
+                            " un bloc non traduisible tue le fil invite",
+                            pct, dyn86_jitpool_used >> 20, dyn86_jitpool_size >> 20, (unsigned)g_jitseg_n);
+                        wx86_vita_progress_c(m); } }
                 dyn86_jit_cur += (unsigned int)size;
                 g_blk[slot].base = p;   g_blk[slot].size = size;
                 g_blk[slot].uid  = s->uid;   /* the SEGMENT's uid: required by the VM sync */
