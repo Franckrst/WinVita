@@ -136,6 +136,28 @@ int dyn86_intrin_add(uintptr_t va, dyn86_intrin_fn fn, uint16_t retn,
  * the same thing (box86's divergence detector requires this). */
 const dyn86_intrin_t* dyn86_intrin_find(uintptr_t va);
 
+/* ---- what a helper needs to see, without box86's private headers ----------
+ *
+ * The contract above tells a helper to read `emu->regs[...]`, but x86emu_t is
+ * internal to the dynarec: a CONSUMER (a port registering its own target)
+ * cannot include it without dragging in box86's whole private tree. These
+ * three accessors are that missing half of the contract, and nothing more.
+ *
+ * `idx` is the register INDEX, i.e. the BIT POSITION of the matching
+ * DYN86_IR_* flag: 0=EAX 1=ECX 2=EDX 3=EBX 4=ESP 5=EBP 6=ESI 7=EDI.
+ *
+ * A read is only meaningful when that register's bit is set in `inmask` (the
+ * registers live in r4-r11 and are only stored to `emu` for the ones inmask
+ * names — reading any other returns a STALE value, see INPUTS above), and a
+ * write only reaches the guest when the bit is set in `regmask` (the emitted
+ * code reloads exactly those after the call). */
+uint32_t dyn86_intrin_getreg(const void* emu, int idx);
+void     dyn86_intrin_setreg(void* emu, int idx, uint32_t val);
+/* Host address of a guest address, i.e. the dynarec's own G2H translation.
+ * A helper works on guest memory through this — it must never assume a
+ * mapping of its own. Returns NULL only if no membase has been set yet. */
+void*    dyn86_intrin_host(uint32_t guest_va);
+
 /* Arming-proof line, published by the periodic status window. Returns the
  * number of bytes written, with a distinct marker when nothing is armed --
  * a silent counter proves nothing if the run never reaches a final report,

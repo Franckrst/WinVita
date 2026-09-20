@@ -3,6 +3,14 @@
  * Box86 is (c) ptitSeb, MIT license — see third_party/box86-dynarec/LICENSE
  */
 #include <stdio.h>
+
+/* Same three includes dyn86_memintrin.c uses, and for the same reason: the
+ * accessors below are the CONSUMER-facing half of the helper contract, so the
+ * box86-private layout has to be resolved HERE, once, rather than leak into
+ * every port that registers a target. */
+#include "debug.h"                 /* dyn86_membase / DYN86_G2H */
+#include "regs.h"
+#include "emu/x86emu_private.h"
 #include "dyn86_intrin.h"
 
 int dyn86_intrin_on = 0;
@@ -33,6 +41,33 @@ const dyn86_intrin_t* dyn86_intrin_find(uintptr_t va)
     for (int i = 0; i < dyn86_intrin_n; ++i)
         if (dyn86_intrin_tbl[i].va == va) return &dyn86_intrin_tbl[i];
     return 0;
+}
+
+/* Index -> box86 register slot. The DYN86_IR_* bit positions are the x86
+ * encoding order (AX CX DX BX SP BP SI DI), which is exactly _AX.._DI in
+ * regs.h — asserted by the compile-time check below rather than assumed, so a
+ * future renumbering on either side breaks the build instead of silently
+ * reading the wrong register. */
+typedef char dyn86_intrin_regorder_check[
+    (_AX == 0 && _CX == 1 && _DX == 2 && _BX == 3 &&
+     _SP == 4 && _BP == 5 && _SI == 6 && _DI == 7) ? 1 : -1];
+
+uint32_t dyn86_intrin_getreg(const void* emu, int idx)
+{
+    if (!emu || (unsigned)idx > 7) return 0;
+    return ((const x86emu_t*)emu)->regs[idx].dword[0];
+}
+
+void dyn86_intrin_setreg(void* emu, int idx, uint32_t val)
+{
+    if (!emu || (unsigned)idx > 7) return;
+    ((x86emu_t*)emu)->regs[idx].dword[0] = val;
+}
+
+void* dyn86_intrin_host(uint32_t guest_va)
+{
+    if (!dyn86_membase) return 0;
+    return (void*)DYN86_G2H(guest_va);
 }
 
 int dyn86_intrin_report(char* out, unsigned cap)
