@@ -250,6 +250,23 @@ static int jitpool_grow(void) {
     return 1;
 }
 
+/* First segment with room for `size`. Each segment is a pure bump allocator
+ * (`used` only ever grows), so a linear scan over at most JITPOOL_MAX_SEGS
+ * entries is both correct and free.
+ *
+ * WHY A SCAN AND NOT "the last segment", which is what this file did until
+ * now: a new segment used to be opened ONLY once the previous one could not
+ * serve the request, so "last" and "the only one with room" happened to
+ * coincide. The degressive ladder already cracked that coincidence -- a
+ * 1 MiB segment 2 opened while 900 KiB sat unused in segment 1 makes those
+ * 900 KiB unreachable. Anticipated growth (next commit) breaks it outright:
+ * it opens segment 2 while segment 1 is HALF EMPTY. */
+static JitSeg* jitseg_fit(size_t size) {
+    for (int i = 0; i < g_jitseg_n; ++i)
+        if (g_jitseg[i].used + size <= g_jitseg[i].size) return &g_jitseg[i];
+    return 0;
+}
+
 static Blk* blk_find(const void* p) {
     for (int i = 0; i < DYN86_MAXBLK; ++i)
         if (g_blk[i].base && (const char*)p >= (const char*)g_blk[i].base
@@ -322,11 +339,9 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         }
         /* --- pool: 16 MiB segments, growing on demand --- */
         {
-            JitSeg* s = (g_jitseg_n > 0) ? &g_jitseg[g_jitseg_n - 1] : 0;
-            if (!(s && s->used + size <= s->size)) {
-                s = jitpool_grow() ? &g_jitseg[g_jitseg_n - 1] : 0;
-            }
-            if (s && s->used + size <= s->size) {
+            JitSeg* s = jitseg_fit(size);
+            if (!s) s = jitpool_grow() ? jitseg_fit(size) : 0;
+            if (s) {
                 void* p = (char*)s->base + s->used;
                 s->used += size;
                 dyn86_jitpool_used += (unsigned int)size;
