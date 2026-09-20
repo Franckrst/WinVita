@@ -186,10 +186,69 @@ static unsigned  g_jitseg_cap_mb = 0;     /* target size per segment, 0 = not re
 static unsigned  g_jitseg_max = 0;        /* target segment count */
 static int       g_jitseg_refused = 0;    /* a request failed: stop asking */
 
+/* ANTICIPATED growth (D2Vita 0.1.8) -- why this function grew a mode.
+ *
+ * The 0.1.6 field reports settle the question the degressive ladder below
+ * was written for. Eight consoles, builds 0.1.2..0.1.6:
+ *   - "segment 1/2 de 16 Mo reserve": 8 reports out of 8, always between
+ *     3 s and 13 s of boot;
+ *   - "segment 2/2" asked for: ONCE, at 2690 s -- and REFUSED;
+ *   - "segment 2/2 ... reserve" (a success): ZERO occurrences, parc-wide.
+ * The 32 MiB pool this file's default configuration aims for HAS NEVER
+ * EXISTED on a player's console. Every observed session ran on 16 MiB.
+ *
+ * And the pool does NOT grow without bound. The emitted-ARM curve converges:
+ * 2.86 MiB at 13 s, 13.64 MiB at 2055 s, then +0.07/+0.11/+0.09/+0.02 MiB per
+ * 150 s window -- a finite hot code set of ~14 MiB reached in ~15 min, then
+ * ~0.7 MiB/h of residual drift. So nothing is leaking and there is nothing
+ * worth evicting: the pool is simply ~2 MiB too small, and the growth
+ * mechanism that would have covered that is correct but FIRES TOO LATE.
+ *
+ * Too late is measurable, not a figure of speech: the single observed
+ * request left at 2690 s, when 5120 KiB were still reported free, and the
+ * kernel refused even 2 MiB (sce=0x80024B0B, MEMBLOCK_OVERFLOW = VM address
+ * space, not a shortage of bytes). At 13 s there were 7168 KiB free and a
+ * 4 MiB segment would have gone through, putting the pool at 20 MiB -- above
+ * the 14 MiB the session actually needed, for its whole duration.
+ *
+ * Hence `eager`: ask while the answer can still be yes.
+ *   eager=1  anticipated, triggered by a FILL THRESHOLD (see jitpool_pressure
+ *            below, default 50% of the pool), i.e. ~2 min into play, once
+ *            boot's own allocations are done and long before the need. A
+ *            FLOOR of free user memory is honoured, so this can never starve
+ *            what boots after it, and a floor refusal does NOT latch: the
+ *            next crossing tries again, and the demand path still can.
+ *   eager=0  the historical path: at exhaustion, no floor (desperation beats
+ *            policy -- a refused block kills the guest thread), and a kernel
+ *            refusal all the way down to 1 MiB latches g_jitseg_refused.
+ *
+ * WHAT THIS COSTS THE HEAPS: nothing, and that is checkable rather than
+ * hopeful. Neither heap draws from the free user memory a JIT segment takes.
+ *   - the GUEST heap is a GuestRegion carved inside the arena memblock
+ *     (rt_boot.cpp: HEAP_BASE=0x00020000, HEAP_SIZE=0x018E0000 = 25472 KiB,
+ *     hard-capped by the module base at 0x01900000). Its size is a
+ *     compile-time constant of the port; free user memory never enters into
+ *     it. The "HeapAlloc returns NULL for a 4269 KiB glyph atlas" family is
+ *     that 25472 KiB ceiling, in a different address space -- taking JIT
+ *     memory cannot worsen it, and giving JIT memory back cannot fix it.
+ *   - the HOST newlib heap is one fixed block of 38912 KiB
+ *     (_newlib_heap_size_user, vita_present.cpp), reserved by the loader
+ *     BEFORE main() and therefore already deducted from every "free user"
+ *     figure quoted above.
+ * The one thing that does compete post-boot is box86's own RW metadata
+ * (customMalloc's 64 KiB mmap blocks: one dynablock_t per translated block),
+ * and the reports measure it: free user went 7168 KiB -> 5120 KiB over 45
+ * min, i.e. ~2 MiB, converging with the block count. That is exactly what
+ * the floor below is sized to protect. */
+static unsigned  g_jitfloor_kb = 0;       /* free-user floor, eager mode only */
+static unsigned  g_jitthresh_pct = 0;     /* fill % that arms an eager grow */
+static unsigned  g_jiteager_mark = 0;     /* pool bytes used at the last eager try */
+static int       g_jiteager_full = 0;     /* eager side done: target reached */
+
 /* Tries to open ONE more segment. Returns 0 without touching the kernel if
  * the configured cap is already reached OR a previous attempt already
  * failed (no hammering the kernel on every new PROT_EXEC block request). */
-static int jitpool_grow(void) {
+static int jitpool_grow(int eager) {
     if (g_jitseg_refused) return 0;
     if (!g_jitseg_cap_mb) {
         const char* e = getenv("WX86_JITPOOL_MB"); if (!e) e = getenv("D2_JITPOOL_MB");
@@ -201,8 +260,22 @@ static int jitpool_grow(void) {
         if (segs < 1) segs = 1;
         if (segs > JITPOOL_MAX_SEGS) segs = JITPOOL_MAX_SEGS;
         g_jitseg_max = segs;
+        /* Floor of free USER memory an anticipated grow must leave behind.
+         * Default 3072 KiB = the ~2 MiB of box86 RW metadata a 45 min
+         * session was measured to still need, plus a margin. Raise it if a
+         * console shows a post-boot allocation failing; set 0 to disable the
+         * floor entirely (the eager grow then behaves like the demand one). */
+        const char* ef = getenv("WX86_JITFLOOR_KB"); if (!ef) ef = getenv("D2_JITFLOOR_KB");
+        g_jitfloor_kb = ef ? (unsigned)atoi(ef) : 3072u;
+        /* Fill percentage of the pool that arms an anticipated grow. 50% is
+         * reached ~2 min into play on the reported sessions (10.4 MiB of
+         * emitted ARM at 177 s on console B), i.e. after boot and ~40 min
+         * before the wall. 0 disables anticipation (0.1.7 behaviour). */
+        const char* et = getenv("WX86_JITPOOL_PCT"); if (!et) et = getenv("D2_JITPOOL_PCT");
+        g_jitthresh_pct = et ? (unsigned)atoi(et) : 50u;
+        if (g_jitthresh_pct > 100u) g_jitthresh_pct = 100u;
     }
-    if (g_jitseg_n >= (int)g_jitseg_max) return 0;
+    if (g_jitseg_n >= (int)g_jitseg_max) { g_jiteager_full = 1; return 0; }
     /* Step the request down instead of giving up on the first refusal.
      * A full-size segment is refused as soon as the rest of the process has
      * eaten the budget, and the old code then set g_jitseg_refused and never
@@ -212,9 +285,21 @@ static int jitpool_grow(void) {
      * SMRD2J34ZXU2A55I: 52 of the 62 claims received from 0.1.6, at ~45 min of
      * play, after "JIT: segment 2/2 de 16 Mo REFUSE" and 130 refused 2 MiB
      * fallbacks). Taking the 4 MiB that ARE free beats taking nothing. */
-    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0;
+    /* Free user memory read ONCE, before the ladder: the floor has to judge
+     * every candidate size against the same figure, and the kernel call is
+     * not free. rc<0 => the floor cannot be evaluated, so it is NOT applied
+     * (an unreadable gauge must not silently forbid the fix). */
+    long free_kb = -1;
+    if (eager && g_jitfloor_kb) {
+        SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
+        if (sceKernelGetFreeMemorySize(&fi) >= 0) free_kb = (long)(fi.size_user >> 10);
+    }
+    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0; int floored = 0;
     for (unsigned mb = g_jitseg_cap_mb; mb >= 1u; mb >>= 1) {
         want = (size_t)mb << 20;
+        /* Floor: an anticipated grow never takes the last of the budget. */
+        if (free_kb >= 0 && free_kb - (long)(mb << 10) < (long)g_jitfloor_kb) { floored = 1; continue; }
+        floored = 0;
         u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
         if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) break;
         last_rc = u;                     /* the kernel's own code, for the log */
@@ -222,12 +307,54 @@ static int jitpool_grow(void) {
         u = -1; pb = 0;
     }
     if (!pb) {
-        g_jitseg_refused = 1;
-        char m[208];
-        snprintf(m, sizeof m,
-            "JIT: segment %d/%u REFUSE de %u Mo jusqu'a 1 Mo (sce=0x%08x) — piscine figee a %u Mo,"
-            " repli bloc-par-bloc au-dela",
-            g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)last_rc, dyn86_jitpool_size >> 20);
+        /* A FLOOR refusal is a policy decision, not a shortage: do not latch,
+         * and do not print the alarming "piscine figee" line. The next
+         * threshold crossing asks again, and the demand path (eager=0) is
+         * never floored, so nothing here can turn a survivable session into
+         * a fatal one. */
+        if (floored) {
+            /* One line per DISTINCT free-memory reading. The retry itself is
+             * rate-limited to one per MiB translated, which during the ramp
+             * would still be a dozen identical lines; what a reader needs is
+             * the value MOVING, not the repetition. */
+            static long said_free = -2;
+            if (free_kb == said_free) return 0;
+            said_free = free_kb;
+            char m[192];
+            snprintf(m, sizeof m,
+                "JIT: segment %d/%u ajourne — plancher %u Ko de RAM user (libre %ld Ko), piscine %u Mo ; nouvel essai au prochain palier",
+                g_jitseg_n + 1, g_jitseg_max, g_jitfloor_kb, free_kb, dyn86_jitpool_size >> 20);
+            wx86_vita_progress_c(m);
+            return 0;
+        }
+        /* A KERNEL refusal all the way down to 1 MiB is a real wall -- but
+         * WHOSE wall depends on who asked, and conflating the two would be a
+         * regression.
+         *   demand (eager=0): latch g_jitseg_refused, exactly as in 0.1.7.
+         *     At that point the pool is full and the guest thread is about to
+         *     die anyway; re-asking per block only adds kernel calls.
+         *   anticipated (eager=1): do NOT latch. This attempt happens ~40 min
+         *     before the pool is full, so a refusal here says nothing about
+         *     what the kernel will answer later, and latching it would ROB
+         *     the demand path of the single attempt 0.1.7 always got. Stop
+         *     the ANTICIPATION side only, and say so once.
+         * The eager side therefore has its own stop flag and its own line;
+         * the word "figee" stays reserved for the case where the pool really
+         * is frozen at its final size. */
+        char m[224];
+        if (eager) {
+            g_jiteager_full = 1;
+            snprintf(m, sizeof m,
+                "JIT: segment %d/%u anticipe REFUSE de %u Mo jusqu'a 1 Mo (sce=0x%08x) — anticipation abandonnee,"
+                " la demande a l'epuisement reste armee (piscine %u Mo)",
+                g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)last_rc, dyn86_jitpool_size >> 20);
+        } else {
+            g_jitseg_refused = 1;
+            snprintf(m, sizeof m,
+                "JIT: segment %d/%u REFUSE de %u Mo jusqu'a 1 Mo (sce=0x%08x) — piscine figee a %u Mo,"
+                " repli bloc-par-bloc au-dela",
+                g_jitseg_n + 1, g_jitseg_max, g_jitseg_cap_mb, (unsigned)last_rc, dyn86_jitpool_size >> 20);
+        }
         wx86_vita_progress_c(m);
         return 0;
     }
@@ -235,19 +362,62 @@ static int jitpool_grow(void) {
     g_jitseg[g_jitseg_n].uid = u;
     ++g_jitseg_n;
     dyn86_jitpool_size += (unsigned int)want;
-    /* Say what the pool IS and what it was asked to be. The old line read
-     * "segment 1/2 de 16 Mo reserve (piscine totale 16 Mo)", which a reader
-     * takes for 32 MiB of pool with the first half open -- while the second
-     * half may well be impossible, as it was on every 0.1.6 console that
-     * reported. The remaining segments are opened on demand, and a refusal
-     * then is fatal to the guest thread, so the target is worth printing. */
-    { char m[208];
+    /* Say what the pool IS, what it was asked to be, WHO asked, and what is
+     * left. The 0.1.6 line read "segment 1/2 de 16 Mo reserve (piscine totale
+     * 16 Mo)", which a reader takes for 32 MiB of pool with the first half
+     * open -- while the second half was in fact never obtained on any console
+     * of the parc. "anticipe" vs "a la demande" is the field's only way to
+     * tell whether the change in this commit actually fires; "libre user" is
+     * what tells us whether the floor is set anywhere near right. */
+    if (g_jitseg_n >= (int)g_jitseg_max) g_jiteager_full = 1;
+    { char m[224];
+        SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
+        int frc = sceKernelGetFreeMemorySize(&fi);
         snprintf(m, sizeof m,
-            "JIT: segment %d/%u de %u Mo reserve (piscine %u Mo ; cible %u Mo, le reste ouvert a la demande)",
-            g_jitseg_n, g_jitseg_max, (unsigned)(want >> 20), dyn86_jitpool_size >> 20,
-            g_jitseg_cap_mb * g_jitseg_max);
+            "JIT: segment %d/%u de %u Mo reserve (%s) — piscine %u Mo ; cible %u Mo ; libre user %d Ko",
+            g_jitseg_n, g_jitseg_max, (unsigned)(want >> 20),
+            eager ? "anticipe" : "a la demande", dyn86_jitpool_size >> 20,
+            g_jitseg_cap_mb * g_jitseg_max, frc < 0 ? -1 : (int)(fi.size_user >> 10));
         wx86_vita_progress_c(m); }
     return 1;
+}
+
+/* Called after every successful pool sub-allocation. Opens the next segment
+ * as soon as the pool crosses the fill threshold -- the whole point of the
+ * change: the 0.1.6 parc only ever asked at exhaustion, and at exhaustion
+ * the kernel says no. Cheap by construction: it returns on a plain integer
+ * test until the threshold is crossed, and once crossed it is rate-limited
+ * to one kernel attempt per megabyte of further translation, so a floored
+ * (deferred) grow cannot turn into a kernel-call storm. */
+static void jitpool_anticipate(void) {
+    if (g_jiteager_full || g_jitseg_refused || !g_jitthresh_pct) return;
+    if (g_jitseg_n >= (int)g_jitseg_max) { g_jiteager_full = 1; return; }
+    if (!dyn86_jitpool_size) return;
+    if ((unsigned long long)dyn86_jitpool_used * 100ull
+        < (unsigned long long)dyn86_jitpool_size * g_jitthresh_pct) return;
+    /* Rate limit: retry only after another MiB has been translated. */
+    if (g_jiteager_mark && dyn86_jitpool_used < g_jiteager_mark + (1u << 20)) return;
+    g_jiteager_mark = dyn86_jitpool_used;
+    jitpool_grow(1);
+}
+
+/* First segment with room for `size`. Each segment is a pure bump allocator
+ * (`used` only ever grows), so a linear scan over at most JITPOOL_MAX_SEGS
+ * entries is both correct and free.
+ *
+ * WHY A SCAN AND NOT "the last segment", which is what this file did until
+ * now: under the old demand-only policy a new segment was opened ONLY once
+ * the previous one could not serve the request, so "last" and "the only one
+ * with room" happened to coincide. Anticipated growth breaks that
+ * coincidence by construction -- it opens segment 2 while segment 1 is HALF
+ * EMPTY. Keeping the "last segment" shortcut would have stranded 8 MiB of a
+ * 16 MiB segment, i.e. given back with one hand more than the change gains
+ * with the other. Caught by tools/jitpool_selftest.c, scenario "anticipe",
+ * before it ever reached a console. */
+static JitSeg* jitseg_fit(size_t size) {
+    for (int i = 0; i < g_jitseg_n; ++i)
+        if (g_jitseg[i].used + size <= g_jitseg[i].size) return &g_jitseg[i];
+    return 0;
 }
 
 static Blk* blk_find(const void* p) {
@@ -322,11 +492,9 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         }
         /* --- pool: 16 MiB segments, growing on demand --- */
         {
-            JitSeg* s = (g_jitseg_n > 0) ? &g_jitseg[g_jitseg_n - 1] : 0;
-            if (!(s && s->used + size <= s->size)) {
-                s = jitpool_grow() ? &g_jitseg[g_jitseg_n - 1] : 0;
-            }
-            if (s && s->used + size <= s->size) {
+            JitSeg* s = jitseg_fit(size);
+            if (!s) s = jitpool_grow(0) ? jitseg_fit(size) : 0;
+            if (s) {
                 void* p = (char*)s->base + s->used;
                 s->used += size;
                 dyn86_jitpool_used += (unsigned int)size;
@@ -352,6 +520,14 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 g_blk[slot].uid  = s->uid;   /* the SEGMENT's uid: required by the VM sync */
                 g_blk[slot].vm   = 1;
                 g_blk[slot].pool = 1;              /* do NOT return to the kernel on munmap */
+                /* Anticipated growth. Placed HERE and not earlier because it
+                 * can open a segment and therefore invalidate `s`
+                 * (&g_jitseg[g_jitseg_n-1]); every dereference of `s` is
+                 * above this line. Still under g_blk_mx, exactly like the
+                 * demand-path grow it replaces in timing -- no new lock edge
+                 * (g_blk_mx stays a leaf: jitpool_grow only calls the
+                 * kernel's memblock API and the progress log). */
+                jitpool_anticipate();
                 pthread_mutex_unlock(&g_blk_mx);
                 dyn86_vita_open_vm_thread();
                 return p;

@@ -97,5 +97,30 @@ elif ! "$OUT/alt_table"; then
   echo "ECHEC a l'execution"; fail=1
 fi
 
+# La politique de croissance de la PISCINE JIT (mman_vita.c). Ce fichier ne se
+# compile QUE pour la console : ni le CMake bureau ni l'oracle qemu-arm ne le
+# voient (qemu lie le mmap de Linux). La seule verification qu'il ait jamais
+# eue, c'etait de livrer et de lire les rapports de plantage — et ils ont
+# parle : sur 8 consoles 0.1.6, le 2e segment de piscine n'a ete demande
+# qu'une fois, a 2690 s, et refuse ; une traduction sans memoire tue le fil
+# invite (pas d'interpreteur dans ce build).
+# Ce filet compile le VRAI mman_vita.c contre un faux noyau
+# (tools/tests/fake_psp2/) qui modelise le budget user ET le retrecissement de
+# l'espace d'adressage VM — c'est ce second cadran qui reproduit le defaut :
+# 2 Mo refuses alors que 5120 Ko sont annonces libres.
+# En C, comme dans la bibliotheque (le fichier ne compile pas en C++).
+echo "== jitpool =="
+if ! ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra \
+      -I"$ROOT/tools/tests/fake_psp2" -I"$ROOT/src/dynarec86/shim/vita" \
+      -o "$OUT/jitpool" "$ROOT/tools/jitpool_selftest.c" \
+      "$ROOT/src/dynarec86/shim/vita/mman_vita.c" -lpthread \
+      2>"$OUT/jitpool.build.log"; then
+  echo "ECHEC de compilation :"; cat "$OUT/jitpool.build.log"; fail=1
+elif ! "$OUT/jitpool" >"$OUT/jitpool.run.log" 2>&1; then
+  echo "ECHEC a l'execution :"; cat "$OUT/jitpool.run.log"; fail=1
+else
+  echo "   OK: 5 scenarios de croissance de piscine"
+fi
+
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi
 exit "$fail"
