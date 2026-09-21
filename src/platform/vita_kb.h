@@ -237,18 +237,38 @@ namespace draw_detail {
 inline constexpr uint32_t rgb(uint32_t r, uint32_t g, uint32_t b) {
     return 0xFF000000u | (b << 16) | (g << 8) | r;
 }
-inline void px(uint32_t* fb, int W, int H, int x, int y, uint32_t v) {
-    if (x >= 0 && x < W && y >= 0 && y < H) fb[(size_t)y * W + x] = v;
+// alpha in [0,100]: 100 = opaque (default, every pre-existing call site keeps
+// today's behaviour unchanged), 0 = invisible. Blended per byte against
+// whatever is already in the framebuffer (the game frame, or an earlier
+// keyboard shape drawn this same call — layers compose the way a translucent
+// overlay is expected to), alpha channel always written back as 0xFF since
+// this is the final scanout buffer, not an intermediate compositing surface.
+inline uint32_t blend(uint32_t dst, uint32_t v, int alpha) {
+    if (alpha >= 100) return v;
+    if (alpha <= 0)   return dst;
+    const uint32_t a = (uint32_t)alpha, ia = 100u - a;
+    uint32_t out = 0xFF000000u;
+    for (int shift = 0; shift <= 16; shift += 8) {
+        const uint32_t s = (v >> shift) & 0xFFu, d = (dst >> shift) & 0xFFu;
+        out |= ((s * a + d * ia) / 100u) << shift;
+    }
+    return out;
 }
-inline void rect(uint32_t* fb, int W, int H, int x, int y, int w, int h, uint32_t v) {
+inline void px(uint32_t* fb, int W, int H, int x, int y, uint32_t v, int alpha = 100) {
+    if (x >= 0 && x < W && y >= 0 && y < H) {
+        uint32_t& d = fb[(size_t)y * W + x];
+        d = (alpha >= 100) ? v : blend(d, v, alpha);
+    }
+}
+inline void rect(uint32_t* fb, int W, int H, int x, int y, int w, int h, uint32_t v, int alpha = 100) {
     for (int yy = y; yy < y + h; ++yy)
-        for (int xx = x; xx < x + w; ++xx) px(fb, W, H, xx, yy, v);
+        for (int xx = x; xx < x + w; ++xx) px(fb, W, H, xx, yy, v, alpha);
 }
-inline void frame(uint32_t* fb, int W, int H, int x, int y, int w, int h, uint32_t v) {
-    for (int xx = x; xx < x + w; ++xx) { px(fb, W, H, xx, y, v); px(fb, W, H, xx, y + h - 1, v); }
-    for (int yy = y; yy < y + h; ++yy) { px(fb, W, H, x, yy, v); px(fb, W, H, x + w - 1, yy, v); }
+inline void frame(uint32_t* fb, int W, int H, int x, int y, int w, int h, uint32_t v, int alpha = 100) {
+    for (int xx = x; xx < x + w; ++xx) { px(fb, W, H, xx, y, v, alpha); px(fb, W, H, xx, y + h - 1, v, alpha); }
+    for (int yy = y; yy < y + h; ++yy) { px(fb, W, H, x, yy, v, alpha); px(fb, W, H, x + w - 1, yy, v, alpha); }
 }
-inline void ch(uint32_t* fb, int W, int H, char c, int x, int y, int sc, uint32_t v) {
+inline void ch(uint32_t* fb, int W, int H, char c, int x, int y, int sc, uint32_t v, int alpha = 100) {
     const unsigned char* g = glyph(c);
     if (!g) return;
     for (int gy = 0; gy < 16; ++gy)
@@ -256,45 +276,49 @@ inline void ch(uint32_t* fb, int W, int H, char c, int x, int y, int sc, uint32_
             if (g[gy] & (0x80 >> gx))
                 for (int sy = 0; sy < sc; ++sy)
                     for (int sx = 0; sx < sc; ++sx)
-                        px(fb, W, H, x + gx * sc + sx, y + gy * sc + sy, v);
+                        px(fb, W, H, x + gx * sc + sx, y + gy * sc + sy, v, alpha);
 }
-inline void text(uint32_t* fb, int W, int H, const char* t, int x, int y, int sc, uint32_t v) {
-    for (int i = 0; t[i]; ++i) ch(fb, W, H, t[i], x + i * 8 * sc, y, sc, v);
+inline void text(uint32_t* fb, int W, int H, const char* t, int x, int y, int sc, uint32_t v, int alpha = 100) {
+    for (int i = 0; t[i]; ++i) ch(fb, W, H, t[i], x + i * 8 * sc, y, sc, v, alpha);
 }
-inline void dot(uint32_t* fb, int W, int H, int x, int y, uint32_t v) {   // masked-mode dot
+inline void dot(uint32_t* fb, int W, int H, int x, int y, uint32_t v, int alpha = 100) {   // masked-mode dot
     static const unsigned char d[8] = { 0x3c, 0x7e, 0xff, 0xff, 0xff, 0xff, 0x7e, 0x3c };
     for (int gy = 0; gy < 8; ++gy)
         for (int gx = 0; gx < 8; ++gx)
             if (d[gy] & (0x80 >> gx))
                 for (int sy = 0; sy < 2; ++sy)
                     for (int sx = 0; sx < 2; ++sx)
-                        px(fb, W, H, x + gx * 2 + sx, y + gy * 2 + sy, v);
+                        px(fb, W, H, x + gx * 2 + sx, y + gy * 2 + sy, v, alpha);
 }
 } // namespace draw_detail
 
 // Draws nothing when the keyboard is closed — the check is duplicated here
 // and in the caller: a closed keyboard leaving a trace on screen would be a
 // permanent display glitch.
-inline void draw(const State& s, uint32_t* fb, int scr_w, int scr_h) {
+//
+// alpha (0-100, default 100 = opaque): every existing caller keeps today's
+// look with zero source changes; a caller that wants to still see the game
+// behind the keyboard passes a lower value (e.g. 50).
+inline void draw(const State& s, uint32_t* fb, int scr_w, int scr_h, int alpha = 100) {
     using namespace draw_detail;
     if (!fb || !s.open) return;
     const Layout& L = layout(s);
     const int y0 = panel_y0(L, scr_h);
     if (y0 < 0) return;
-    rect(fb, scr_w, scr_h, 0, y0, scr_w, scr_h - y0, rgb(0x18,0x18,0x18));
+    rect(fb, scr_w, scr_h, 0, y0, scr_w, scr_h - y0, rgb(0x18,0x18,0x18), alpha);
 
     if (L.echo) {
         const int ex = 8, ey = y0 + PAD, ew = scr_w - 16, eh = ECHO_H;
-        rect(fb, scr_w, scr_h, ex, ey, ew, eh, rgb(0x0C,0x0C,0x0C));
-        frame(fb, scr_w, scr_h, ex, ey, ew, eh, rgb(0x50,0x50,0x50));
+        rect(fb, scr_w, scr_h, ex, ey, ew, eh, rgb(0x0C,0x0C,0x0C), alpha);
+        frame(fb, scr_w, scr_h, ex, ey, ew, eh, rgb(0x50,0x50,0x50), alpha);
         int n = s.echo_n; if (n < 0) n = 0; if (n > ECHO_MAX) n = ECHO_MAX;
         for (int i = 0; i < n; ++i) {
             const int cx = ex + 6 + i * 16, cy = ey + (eh - 32) / 2;
-            if (s.mask) dot(fb, scr_w, scr_h, cx, cy + 8, rgb(0xC0,0xC0,0xC0));
-            else        ch(fb, scr_w, scr_h, s.echo[i], cx, cy, 2, rgb(0xE0,0xE0,0xE0));
+            if (s.mask) dot(fb, scr_w, scr_h, cx, cy + 8, rgb(0xC0,0xC0,0xC0), alpha);
+            else        ch(fb, scr_w, scr_h, s.echo[i], cx, cy, 2, rgb(0xE0,0xE0,0xE0), alpha);
         }
         // caret
-        rect(fb, scr_w, scr_h, ex + 6 + n * 16, ey + 6, 2, eh - 12, rgb(0xFF,0xC0,0x40));
+        rect(fb, scr_w, scr_h, ex + 6 + n * 16, ey + 6, 2, eh - 12, rgb(0xFF,0xC0,0x40), alpha);
     }
 
     for (int r = 0; r < nrows_total(L); ++r) {
@@ -311,17 +335,17 @@ inline void draw(const State& s, uint32_t* fb, int scr_w, int scr_h) {
             uint32_t fill = fnrow ? rgb(0x26,0x26,0x26) : rgb(0x30,0x30,0x30);
             if (armed) fill = rgb(0xC0,0x80,0x10);          // engaged modifier: amber
             if (sel)   fill = rgb(0x20,0x70,0xC0);          // selection: blue
-            rect(fb, scr_w, scr_h, x, y, w, h, fill);
-            if (sel) frame(fb, scr_w, scr_h, x, y, w, h, rgb(0xFF,0xFF,0xFF));
+            rect(fb, scr_w, scr_h, x, y, w, h, fill, alpha);
+            if (sel) frame(fb, scr_w, scr_h, x, y, w, h, rgb(0xFF,0xFF,0xFF), alpha);
             if (!fnrow) {
                 const char f = face(L, r, c, s.shift != 0);
-                if (f && f != ' ') ch(fb, scr_w, scr_h, f, x + (w - 16) / 2, y + (h - 32) / 2, 2, rgb(0xFF,0xFF,0xFF));
+                if (f && f != ' ') ch(fb, scr_w, scr_h, f, x + (w - 16) / 2, y + (h - 32) / 2, 2, rgb(0xFF,0xFF,0xFF), alpha);
             } else {
                 const char* t = L.fn[c];
                 const int n = (int)strlen(t);
-                text(fb, scr_w, scr_h, t, x + (w - n * 8) / 2, y + (h - 16) / 2, 1, rgb(0xFF,0xFF,0xFF));
+                text(fb, scr_w, scr_h, t, x + (w - n * 8) / 2, y + (h - 16) / 2, 1, rgb(0xFF,0xFF,0xFF), alpha);
                 if (L.fnact[c] == ACT_SHIFT && s.shift == 2)     // shift locked: underline bar
-                    rect(fb, scr_w, scr_h, x + 6, y + h - 6, w - 12, 3, rgb(0xFF,0xFF,0xFF));
+                    rect(fb, scr_w, scr_h, x + 6, y + h - 6, w - 12, 3, rgb(0xFF,0xFF,0xFF), alpha);
             }
         }
     }

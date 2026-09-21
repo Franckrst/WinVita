@@ -40,6 +40,36 @@ static void t_ferme_ne_dessine_rien() {
     CHECK(std::memcmp(fb2.data(), ref2.data(), fb2.size() * 4) == 0, "apres fermeture : le tampon a change");
 }
 
+static void t_alpha_blend() {
+    // Pure math, no framebuffer: black under white at 50 % must land exactly
+    // on mid-gray (integer truncation makes this deterministic, not a range).
+    using d2kb::draw_detail::rgb;
+    using d2kb::draw_detail::blend;
+    CHECK(blend(rgb(0,0,0), rgb(255,255,255), 50) == rgb(127,127,127), "50%% de blanc sur noir doit donner gris moyen exact");
+    CHECK(blend(rgb(10,20,30), rgb(200,150,90), 100) == rgb(200,150,90), "alpha=100 : la source remplace, sans lire la destination");
+    CHECK(blend(rgb(10,20,30), rgb(200,150,90), 0) == rgb(10,20,30), "alpha=0 : la destination ne bouge pas");
+
+    // Through the public entry point: default alpha (unspecified) must draw
+    // byte-identical to before this feature existed -- a translucent keyboard
+    // that OTHER engine consumers (e.g. carn-vita) never asked for would be a
+    // silent visual regression for them.
+    d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
+    auto fb_opaque = fb_new(); d2kb::draw(s, fb_opaque.data(), W, H);
+    auto fb_explicit100 = fb_new(); d2kb::draw(s, fb_explicit100.data(), W, H, 100);
+    CHECK(std::memcmp(fb_opaque.data(), fb_explicit100.data(), fb_opaque.size() * 4) == 0,
+          "alpha implicite != alpha=100 explicite : le defaut a change de comportement");
+
+    // A translucent draw must still show the game frame through the panel --
+    // the backdrop color survives, blended, not overwritten by a flat fill.
+    auto fb_bg = std::vector<uint32_t>((size_t)W * H, rgb(255, 0, 0));   // saturated red "game frame"
+    d2kb::draw(s, fb_bg.data(), W, H, 50);
+    const int y0 = d2kb::panel_y0(d2kb::LAY_FULL, H);
+    const uint32_t panel_px = fb_bg[(size_t)(y0 + 2) * W + 2];           // panel background, no key/text there
+    CHECK(panel_px != rgb(255, 0, 0), "alpha=50 : le panneau doit changer le fond (rien dessine ?)");
+    CHECK((panel_px & 0xFF) > 0x40, "alpha=50 : le rouge du fond doit encore transparaitre (%02x)", panel_px & 0xFF);
+    CHECK(fb_bg[0] == rgb(255, 0, 0), "alpha=50 : hors du panneau, le fond ne doit pas bouger");
+}
+
 static void t_dessin_borne_au_panneau() {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, 0);
     auto fb = fb_new();
@@ -231,14 +261,18 @@ static void t_disposition_simple() {
     char out = 0; d2kb::activate(s, 1, 0, &out); CHECK(out == 'A', "simple: (1,0) != A");
 }
 
-// --ppm <file>: renders an image of the keyboard (visual preview, not a test).
-static int dump_ppm(const char* path, int simple, int mask) {
+// --ppm <file> [alpha]: renders an image of the keyboard (visual preview, not
+// a test) over a busy checkerboard backdrop, so a translucent alpha actually
+// shows something worth judging by eye instead of a flat color.
+static int dump_ppm(const char* path, int simple, int mask, int alpha = 100) {
     d2kb::State s; std::memset(&s, 0, sizeof s); d2kb::open_kb(s, simple);
     s.mask = mask; s.shift = 1; s.r = 2; s.c = 3;
     const char* demo = mask ? "motdepasse" : "Compte-D2 2026!";
     for (int i = 0; demo[i]; ++i) d2kb::echo_push(s, demo[i]);
-    std::vector<uint32_t> fb((size_t)W * H, 0xFF203040u);
-    d2kb::draw(s, fb.data(), W, H);
+    std::vector<uint32_t> fb((size_t)W * H);
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x)
+        fb[(size_t)y * W + x] = ((x / 20 + y / 20) & 1) ? 0xFF4060A0u : 0xFFC08040u;
+    d2kb::draw(s, fb.data(), W, H, alpha);
     FILE* f = std::fopen(path, "wb"); if (!f) return 1;
     std::fprintf(f, "P6\n%d %d\n255\n", W, H);
     for (size_t i = 0; i < fb.size(); ++i) {
@@ -251,8 +285,10 @@ static int dump_ppm(const char* path, int simple, int mask) {
 
 int main(int argc, char** argv) {
     if (argc >= 3 && !std::strcmp(argv[1], "--ppm"))
-        return dump_ppm(argv[2], argc > 3 ? std::atoi(argv[3]) : 0, argc > 4 ? std::atoi(argv[4]) : 0);
+        return dump_ppm(argv[2], argc > 3 ? std::atoi(argv[3]) : 0, argc > 4 ? std::atoi(argv[4]) : 0,
+                         argc > 5 ? std::atoi(argv[5]) : 100);
     t_ferme_ne_dessine_rien();
+    t_alpha_blend();
     t_dessin_borne_au_panneau();
     t_couverture_ascii();
     t_activation();
