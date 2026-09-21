@@ -407,12 +407,48 @@ void* customMalloc(size_t size)
         p_blocks = (blocklist_t*)box_realloc(p_blocks, c_blocks*sizeof(blocklist_t));
     }
     size_t allocsize = (fullsize>MMAPSIZE)?fullsize:MMAPSIZE;
+    /* D2Vita — INJECTION DE PENURIE (D2_CUSTOMFAILAFTER=N). Le refus du noyau
+     * sur ce tas est arrive en production mais ne se produit JAMAIS sous qemu,
+     * ou mmap ne refuse rien : sans de quoi le fabriquer, le traitement du
+     * refus ci-dessous resterait du code jamais execute, donc une reparation
+     * non verifiable. Meme intention que D2_JITFAILAFTER pour l'arene JIT.
+     * Compteur sous mutex_blocks, deja tenu ici. */
+    static int cm_failafter = -1;
+    static unsigned cm_blocks = 0;
+    if(cm_failafter < 0) {
+        const char* e = getenv("D2_CUSTOMFAILAFTER");
+        cm_failafter = (e && e[0]) ? atoi(e) : 0;
+        if(cm_failafter > 0)
+            printf_log(LOG_NONE, "[custom] INJECTION: tas de metadonnees borne a %d blocs de %u Kio\n",
+                       cm_failafter, (unsigned)(MMAPSIZE>>10));
+    }
     #ifdef USE_MMAP
-    void* p = mmap(NULL, allocsize, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
-    memset(p, 0, allocsize);
+    void* p;
+    if(cm_failafter > 0 && (int)cm_blocks >= cm_failafter) {
+        p = MAP_FAILED;
+    } else {
+        ++cm_blocks;
+        p = mmap(NULL, allocsize, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    }
+    /* D2Vita: l'amont N'ETAIT PAS TESTE. mmap rend (void*)-1, pas NULL, et le
+     * memset qui suivait ecrivait 64 Kio a partir de 0xFFFFFFFF : sur Vita
+     * c'est la faute hote signature hfault_sys|SceLibKernel|0x120 (memset de
+     * la newlib y est un saut de queue vers sceClibMemset, d'ou un pc dans le
+     * module systeme et un lr dans customMalloc). La RAM utilisateur de la
+     * console est engagee a 100% au boot : ce refus n'est pas theorique, il
+     * est arrive en 0.1.7 comme en 0.1.9, sur cinq consoles. Le refus doit
+     * remonter comme un refus. */
+    if(p==MAP_FAILED) p = NULL; else memset(p, 0, allocsize);
     #else
     void* p = box_calloc(1, allocsize);
     #endif
+    if(!p) {
+        /* Rendre le numero de bloc pris plus haut : sans ca, p_blocks[i] reste
+         * un trou que la boucle de recherche du prochain appel dereference. */
+        --n_blocks;
+        mutex_unlock(&mutex_blocks);
+        return NULL;
+    }
 #ifdef TRACE_MEMSTAT
     customMalloc_allocated += allocsize;
 #endif
@@ -440,6 +476,7 @@ void* customCalloc(size_t n, size_t size)
 {
     size_t newsize = roundSize(n*size);
     void* ret = customMalloc(newsize);
+    if(!ret) return NULL;   /* D2Vita: meme defaut un cran plus haut */
     memset(ret, 0, newsize);
     return ret;
 }
@@ -463,6 +500,11 @@ void* customRealloc(void* p, size_t size)
             }
             mutex_unlock(&mutex_blocks);
             void* newp = customMalloc(size);
+            /* D2Vita: meme trou que dans customMalloc, atteignable par
+             * krealloc (kh_resize de la table lockaddress). Un refus doit
+             * rendre NULL SANS liberer l'ancien bloc — semantique realloc :
+             * l'appelant garde une reference valide et peut renoncer. */
+            if(!newp) return NULL;
             memcpy(newp, p, sizeBlock(sub));
             customFree(p);
             return newp;

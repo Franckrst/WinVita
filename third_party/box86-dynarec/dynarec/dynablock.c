@@ -366,6 +366,11 @@ uint32_t dyn86_ev_deferred  = 0;  /* recuperations AJOURNEES : un fil etait
                                    * grace sert a quelque chose ; a zero
                                    * permanent, elle n'a jamais eu a mordre. */
 uint32_t dyn86_ev_refills   = 0;  /* traductions sauvees par une eviction    */
+/* Refus du TAS DE METADONNEES (custommem.c), distinct de dyn86_jit_allocfail
+ * qui compte les refus d'ARENE. Deux penuries differentes, deux compteurs :
+ * les confondre ferait passer un manque de RAM utilisateur pour une arene
+ * JIT trop petite, et enverrait le reglage dans la mauvaise direction. */
+uint32_t dyn86_meta_allocfail = 0;
 uint32_t dyn86_ev_handback  = 0;  /* borne atteinte SANS avoir pu liberer :
                                    * rendu a la boucle de reessai de
                                    * DBGetBlock, qui cede HORS VERROU. Ce
@@ -750,6 +755,37 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
     // invalidated by the hash test in DBGetBlock).
     if(dyn86_jitprof) ++dyn86_jp_lookup_miss;
     block = AddNewDynablock(addr);
+
+    /* D2Vita — REFUS DU TAS DE METADONNEES. AddNewDynablock passe par
+     * customCalloc, donc par les blocs mmap de 64 Kio de custommem.c : le
+     * SEUL poste memoire que ce port demande encore au noyau en pleine
+     * partie. Ce refus existait deja sur console (RAM utilisateur engagee a
+     * 100% au boot) mais n'etait pas un refus : customMalloc ecrivait a
+     * travers MAP_FAILED et tuait le processus (signature
+     * hfault_sys|SceLibKernel|0x120, 0.1.7 et 0.1.9, cinq consoles).
+     * Maintenant que le refus remonte, il se traite comme le refus d'arene
+     * JIT juste en dessous, avec la MEME machinerie : une vague d'eviction
+     * rend les dynablock_t par customFree (cf. le commentaire l.287), donc
+     * elle rend exactement la memoire qui manque ici.
+     * Le NULL final n'est pas une mort : c'est la boucle de reessai de
+     * DBGetBlock qui cede HORS VERROU, seule fenetre de grace legitime. */
+    if(!block && dyn86_evict_armed()) {
+        for(int ev=0; ev<DYN86_EV_ROUNDS && !block; ++ev) {
+            if(!dyn86_evict_round(emu, sizeof(dynablock_t)))
+                break;
+            block = AddNewDynablock(addr);
+        }
+        if(block) ++dyn86_ev_refills;
+    }
+    if(!block) {
+        ++dyn86_meta_allocfail;
+        if(dyn86_meta_allocfail == 1 || !(dyn86_meta_allocfail & 0xFF))
+            dyn86_ev_say("refus du tas de metadonnees");
+        if(g_retire_n) emu->dyn86_evwait = 1;
+        if(need_lock)
+            mutex_unlock(&my_context->mutex_dyndump);
+        return NULL;
+    }
 
     // fill the block
     block->x86_addr = (void*)addr;
