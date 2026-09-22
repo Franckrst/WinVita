@@ -119,7 +119,7 @@ if ! ${CC:-gcc} -std=gnu11 -O1 -g -Wall -Wextra \
 elif ! "$OUT/jitpool" >"$OUT/jitpool.run.log" 2>&1; then
   echo "ECHEC a l'execution :"; cat "$OUT/jitpool.run.log"; fail=1
 else
-  echo "   OK: 9 scenarios (6 piscine JIT, 3 piscine RW des metadonnees)"
+  echo "   OK: 7 scenarios (4 piscine JIT, 3 piscine RW des metadonnees)"
 fi
 
 if [ "$fail" -eq 0 ]; then echo "SELFTEST: PASS"; else echo "SELFTEST: FAIL"; fi

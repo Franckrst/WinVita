@@ -186,29 +186,19 @@ static void sc_anticipe(void) {
     CHECK(!log_has("mmap FAIL"),             "anticipe : aucune allocation refusee");
 }
 
-/* --- scenario 3: the floor is honoured and self-tunes the size taken.
- * Free user after seg1 = 4 MiB, floor 3072 KiB => 1 MiB is the largest step
- * that leaves the floor intact; 2 MiB would leave 2048 KiB and must not be
- * taken. This is the guard against fixing the pool by starving what boots
- * after it. */
-static void sc_plancher(void) {
+/* --- scenario 3 : SANS PLANCHER, l'anticipation prend ce qui est la.
+ * C'etait le scenario du plancher : avec 4 Mo libres apres le segment 1 et un
+ * plancher de 3072 Ko, seul 1 Mo pouvait etre pris. Le plancher a ete retire
+ * — les metadonnees de box86 qu'il reservait vivent maintenant en phycont —
+ * donc la descente d'echelle prend le plus grand palier qui TIENNE, soit
+ * 4 Mo. C'est l'effet recherche : sur console, le segment 2 echouait a ses
+ * cinq tailles alors que quelques megaoctets etaient la. */
+static void sc_anticipe_sans_plancher(void) {
     g_free_user  = (16u << 20) + (4u << 20);
     g_vm_max     = 16u << 20;
     translate(10u << 20);
-    CHECK(dyn86_jitpool_size == (17u << 20), "plancher : 1 Mo pris, pas 2 (plancher 3072 Ko tenu)");
-    CHECK(g_free_user >= (3072L << 10),      "plancher : >= 3072 Ko de RAM user laisses libres");
-}
-
-/* --- scenario 4: the floor is a POLICY, never a new way to die. When the
- * floor defers a grow and the pool then runs out for real, the demand path
- * must still take the memory: a thin margin beats a dead thread. */
-static void sc_plancher_pas_fatal(void) {
-    g_free_user  = (16u << 20) + (2u << 20);     /* 2 MiB left: the floor forbids eager */
-    g_vm_max     = 16u << 20;
-    translate(18u << 20);
-    CHECK(log_has("ajourne"),                 "plancher : l'ajournement est journalise");
-    CHECK(dyn86_jitpool_size > (16u << 20),   "plancher : la demande a l'epuisement passe OUTRE le plancher");
-    CHECK(!log_has("piscine figee"),          "plancher : pas de mort par politique");
+    CHECK(dyn86_jitpool_size == (20u << 20), "sans plancher : 4 Mo pris, pas 1");
+    CHECK(!log_has("ajourne"),               "sans plancher : plus d'ajournement de politique");
 }
 
 /* --- scenario 5: an anticipated grow refused BY THE KERNEL must not steal
@@ -288,39 +278,15 @@ static void sc_rwpool_absente(void) {
     CHECK(dyn86_rwpool_size == 0,                "absente : aucune piscine fantome");
 }
 
-/* --- scenario 9 : LE PLANCHER EST INOPERANT QUAND IL FAUDRAIT QU'IL SERVE.
- * Sur console, sceKernelGetFreeMemorySize rend un size_user NEGATIF des la
- * 13e seconde (« libre user=-2048 Ko », tous les journaux de terrain). Or
- * jitpool_grow ne consulte le plancher que si free_kb >= 0 — un garde pose
- * pour ne pas laisser une jauge illisible interdire une allocation legitime.
- * Consequence non voulue : la seule situation ou le plancher aurait quelque
- * chose a proteger est justement celle ou il ne s'applique pas. Le segment
- * anticipe part alors demander au noyau, qui refuse (0x80024B0B sur console,
- * a 88 s).
- * Ce scenario EPINGLE ce comportement. Il n'affirme pas qu'il est correct :
- * il le rend visible, pour qu'un changement de politique soit un choix et non
- * une surprise. La piscine RW en phycont retire de toute facon au plancher
- * son objet — les metadonnees ne viennent plus de la RAM utilisateur. */
-static void sc_plancher_jauge_negative(void) {
-    g_free_user  = -(2L << 20);                  /* ce que la console annonce */
-    g_vm_max     = 16u << 20;
-    g_vm_close_at = 9u << 20;
-    (void)translate(20u << 20);
-    CHECK(!log_has("ajourne"),                   "jauge negative : le plancher n'est JAMAIS consulte");
-    CHECK(log_has("REFUSE"),                     "jauge negative : c'est le noyau qui tranche, pas la politique");
-}
-
 int main(void) {
     static const struct { const char* nom; void (*fn)(void); } SC[] = {
         { "0.1.7 tel que livre (anticipation desarmee)", sc_0_1_7 },
         { "0.1.8 anticipation a 50%",                    sc_anticipe },
-        { "plancher de RAM user respecte",               sc_plancher },
-        { "plancher non fatal (la demande passe outre)", sc_plancher_pas_fatal },
+        { "anticipation sans plancher",                  sc_anticipe_sans_plancher },
         { "refus anticipe : pas de latch",               sc_eager_nonlatch },
         { "piscine RW en phycont (user a zero)",         sc_rwpool_phycont },
         { "piscine RW : repli en USER_RW",               sc_rwpool_repli },
         { "piscine RW : les deux refus, pas de mort",    sc_rwpool_absente },
-        { "plancher inoperant sur jauge negative",       sc_plancher_jauge_negative },
     };
     int bad = 0;
     for (unsigned i = 0; i < sizeof SC / sizeof SC[0]; ++i) {

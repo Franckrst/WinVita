@@ -215,12 +215,10 @@ static int       g_jitseg_refused = 0;    /* a request failed: stop asking */
  *   eager=1  anticipated, triggered by a FILL THRESHOLD (see jitpool_pressure
  *            below, default 50% of the pool), i.e. ~2 min into play, once
  *            boot's own allocations are done and long before the need. A
- *            FLOOR of free user memory is honoured, so this can never starve
- *            what boots after it, and a floor refusal does NOT latch: the
- *            next crossing tries again, and the demand path still can.
- *   eager=0  the historical path: at exhaustion, no floor (desperation beats
- *            policy -- a refused block kills the guest thread), and a kernel
- *            refusal all the way down to 1 MiB latches g_jitseg_refused.
+ *            a kernel refusal does NOT latch: the next crossing tries again,
+ *            and the demand path still can.
+ *   eager=0  the historical path: at exhaustion, a kernel refusal all the way
+ *            down to 1 MiB latches g_jitseg_refused.
  *
  * WHAT THIS COSTS THE HEAPS: nothing, and that is checkable rather than
  * hopeful. Neither heap draws from the free user memory a JIT segment takes.
@@ -235,12 +233,13 @@ static int       g_jitseg_refused = 0;    /* a request failed: stop asking */
  *     (_newlib_heap_size_user, vita_present.cpp), reserved by the loader
  *     BEFORE main() and therefore already deducted from every "free user"
  *     figure quoted above.
- * The one thing that does compete post-boot is box86's own RW metadata
+ * The one thing that used to compete post-boot was box86's own RW metadata
  * (customMalloc's 64 KiB mmap blocks: one dynablock_t per translated block),
- * and the reports measure it: free user went 7168 KiB -> 5120 KiB over 45
- * min, i.e. ~2 MiB, converging with the block count. That is exactly what
- * the floor below is sized to protect. */
-static unsigned  g_jitfloor_kb = 0;       /* free-user floor, eager mode only */
+ * measured at ~2 MiB over a 45 min session. It has its own reserve now -- the
+ * RW pool further down, 8 MiB in the PHYCONT partition -- so nothing else
+ * draws from free user memory once play has started, and a JIT segment can
+ * take what is there without starving anyone. That is why the floor this
+ * comment used to end on no longer exists. */
 static unsigned  g_jitthresh_pct = 0;     /* fill % that arms an eager grow */
 static unsigned  g_jiteager_mark = 0;     /* pool bytes used at the last eager try */
 static int       g_jiteager_full = 0;     /* eager side done: target reached */
@@ -260,13 +259,18 @@ static int jitpool_grow(int eager) {
         if (segs < 1) segs = 1;
         if (segs > JITPOOL_MAX_SEGS) segs = JITPOOL_MAX_SEGS;
         g_jitseg_max = segs;
-        /* Floor of free USER memory an anticipated grow must leave behind.
-         * Default 3072 KiB = the ~2 MiB of box86 RW metadata a 45 min
-         * session was measured to still need, plus a margin. Raise it if a
-         * console shows a post-boot allocation failing; set 0 to disable the
-         * floor entirely (the eager grow then behaves like the demand one). */
-        const char* ef = getenv("WX86_JITFLOOR_KB"); if (!ef) ef = getenv("D2_JITFLOOR_KB");
-        g_jitfloor_kb = ef ? (unsigned)atoi(ef) : 3072u;
+        /* Il y avait ici un PLANCHER de RAM utilisateur (D2_JITFLOOR_KB, 3072
+         * Ko) qu'une croissance anticipee devait laisser derriere elle. Il
+         * reservait la place des metadonnees RW de box86, seul autre
+         * consommateur de cette partition apres le boot. Ces metadonnees ont
+         * desormais leur propre reserve en phycont (la piscine RW plus bas),
+         * donc le plancher ne protegeait plus personne.
+         * Il ne protegeait d'ailleurs deja plus personne SUR CONSOLE : il
+         * etait garde par « free_kb >= 0 » et size_user est vu negatif des la
+         * 13e seconde, si bien que la seule situation ou il aurait servi
+         * etait justement celle ou il ne s'appliquait pas. Le retirer rend
+         * ~3 Mo a la descente d'echelle du segment 2, qui echoue aujourd'hui
+         * a ses cinq tailles. */
         /* Fill percentage of the pool that arms an anticipated grow. 50% is
          * reached ~2 min into play on the reported sessions (10.4 MiB of
          * emitted ARM at 177 s on console B), i.e. after boot and ~40 min
@@ -285,21 +289,9 @@ static int jitpool_grow(int eager) {
      * SMRD2J34ZXU2A55I: 52 of the 62 claims received from 0.1.6, at ~45 min of
      * play, after "JIT: segment 2/2 de 16 Mo REFUSE" and 130 refused 2 MiB
      * fallbacks). Taking the 4 MiB that ARE free beats taking nothing. */
-    /* Free user memory read ONCE, before the ladder: the floor has to judge
-     * every candidate size against the same figure, and the kernel call is
-     * not free. rc<0 => the floor cannot be evaluated, so it is NOT applied
-     * (an unreadable gauge must not silently forbid the fix). */
-    long free_kb = -1;
-    if (eager && g_jitfloor_kb) {
-        SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
-        if (sceKernelGetFreeMemorySize(&fi) >= 0) free_kb = (long)(fi.size_user >> 10);
-    }
-    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0; int floored = 0;
+    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0;
     for (unsigned mb = g_jitseg_cap_mb; mb >= 1u; mb >>= 1) {
         want = (size_t)mb << 20;
-        /* Floor: an anticipated grow never takes the last of the budget. */
-        if (free_kb >= 0 && free_kb - (long)(mb << 10) < (long)g_jitfloor_kb) { floored = 1; continue; }
-        floored = 0;
         u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
         if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) break;
         last_rc = u;                     /* the kernel's own code, for the log */
@@ -307,26 +299,6 @@ static int jitpool_grow(int eager) {
         u = -1; pb = 0;
     }
     if (!pb) {
-        /* A FLOOR refusal is a policy decision, not a shortage: do not latch,
-         * and do not print the alarming "piscine figee" line. The next
-         * threshold crossing asks again, and the demand path (eager=0) is
-         * never floored, so nothing here can turn a survivable session into
-         * a fatal one. */
-        if (floored) {
-            /* One line per DISTINCT free-memory reading. The retry itself is
-             * rate-limited to one per MiB translated, which during the ramp
-             * would still be a dozen identical lines; what a reader needs is
-             * the value MOVING, not the repetition. */
-            static long said_free = -2;
-            if (free_kb == said_free) return 0;
-            said_free = free_kb;
-            char m[192];
-            snprintf(m, sizeof m,
-                "JIT: segment %d/%u ajourne — plancher %u Ko de RAM user (libre %ld Ko), piscine %u Mo ; nouvel essai au prochain palier",
-                g_jitseg_n + 1, g_jitseg_max, g_jitfloor_kb, free_kb, dyn86_jitpool_size >> 20);
-            wx86_vita_progress_c(m);
-            return 0;
-        }
         /* A KERNEL refusal all the way down to 1 MiB is a real wall -- but
          * WHOSE wall depends on who asked, and conflating the two would be a
          * regression.
@@ -387,8 +359,8 @@ static int jitpool_grow(int eager) {
  * change: the 0.1.6 parc only ever asked at exhaustion, and at exhaustion
  * the kernel says no. Cheap by construction: it returns on a plain integer
  * test until the threshold is crossed, and once crossed it is rate-limited
- * to one kernel attempt per megabyte of further translation, so a floored
- * (deferred) grow cannot turn into a kernel-call storm. */
+ * to one kernel attempt per megabyte of further translation, so a refused
+ * grow cannot turn into a kernel-call storm. */
 static void jitpool_anticipate(void) {
     if (g_jiteager_full || g_jitseg_refused || !g_jitthresh_pct) return;
     if (g_jitseg_n >= (int)g_jitseg_max) { g_jiteager_full = 1; return; }
