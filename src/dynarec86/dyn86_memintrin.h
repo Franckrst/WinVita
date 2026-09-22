@@ -51,9 +51,42 @@ extern "C" {
 #endif
 
 /* 0 = off (default, byte-for-byte the original code)
- * 1 = serve natively
- * 2 = PROFILE only: measure the distribution then return 0 (guest does everything) */
+ * 1 = serve natively (helper call)
+ * 2 = PROFILE only: measure the distribution then return 0 (guest does everything)
+ * 3 = mode 1 PLUS the INLINE SHORT PATH (see below) */
 extern int dyn86_memintrin;
+
+/* ---- MODE 3: INLINE SHORT PATH (D2_MEMINTRIN=3) -----------------------------
+ * WHY. Measured on console (patrol bench, 3 control passes, control-to-control
+ * spread 1.0%): control 21.09 fps, D2_MEMINTRIN=2 (PLUMBING ONLY) 20.75,
+ * D2_MEMINTRIN=1 21.52. The plumbing alone costs 1.6 points while the native
+ * work gives back 3.6 -- and the measured size census says why that trade is
+ * so bad: over a 4000-frame bench, 3,113,000 of 3,117,552 memcpy calls (99.85%)
+ * are SHORTER THAN 64 BYTES, and 1,166,000 of 1,392,765 memset calls (83.7%).
+ * A fixed per-call cost of about a hundred cycles dominates a 40-byte copy.
+ *
+ * WHAT MODE 3 EMITS. For those short calls the translator emits the copy
+ * ITSELF, with no call at all: an acceptance test (size < 64, both ends inside
+ * the arena, no overlap) then a branch-free "by bits" copy using NEON for the
+ * 32/16/8-byte blocks and predicated ARM for the 4/2/1 tail. Anything the test
+ * refuses branches to the mode-1 helper call, which is emitted unchanged just
+ * before it. Emitted sequence and proofs: dyn86_memfast.h.
+ *
+ * REGISTERS. The sequence only uses the dynarec's three scratch registers
+ * (r1/r2/r3), xEIP (dead at block entry, rewritten by the RET), q0/q1 (the
+ * NEON cache is empty at block entry and d0-d15 are caller-saved anyway), and
+ * xEAX -- which it writes ONLY after the last refusal branch, so a faithful
+ * fallback never touches EAX. No guest register other than EAX is modified,
+ * exactly like mode 1. */
+#define DYN86_MI_MODE_FAST 3
+#define DYN86_MI_FASTN     64u      /* sizes STRICTLY below this go inline */
+
+/* Read by the TRANSLATOR, frozen before the first block is translated:
+ * 1 = emit the inline sequence. Never 1 while the cross-check oracle is armed
+ * (the inline path does not call this file, so it would slip past it). */
+extern int dyn86_mi_fast;
+extern int dyn86_mi_fastchk;                  /* D2_MEMFASTCHECK: emit the inline oracle */
+extern unsigned long long dyn86_mi_fast_blocks; /* blocks where the sequence was emitted */
 
 /* Guest VAs of the two entry points, published by rt_boot AFTER the PE is
  * loaded (the guest executable may be relocated: these are not constants).
@@ -65,10 +98,13 @@ extern uintptr_t dyn86_mi_cpy_va, dyn86_mi_set_va;
 extern uint32_t dyn86_mi_span;
 extern uint32_t dyn86_mi_maxn;
 
-/* Counters (final report). served/fallback are CALLS, not blocks. */
+/* Counters (final report). served/fallback are CALLS, not blocks.
+ * The total number of calls is served+fb: a separate `calls` counter used to
+ * be incremented on the hot path and cost a full 64-bit read-modify-write
+ * (five ARM instructions) per call for a number that is a sum of two others.
+ * In mode 3 these counters only see what the inline path REFUSED. */
 extern unsigned long long dyn86_mi_cpy_served, dyn86_mi_cpy_fb, dyn86_mi_cpy_bytes;
 extern unsigned long long dyn86_mi_set_served, dyn86_mi_set_fb, dyn86_mi_set_bytes;
-extern unsigned long long dyn86_mi_cpy_calls,  dyn86_mi_set_calls;
 /* Fallback reasons (diagnostic): 0 = out of arena, 1 = size, 2 = profile. */
 extern unsigned long long dyn86_mi_rej[4];
 
@@ -116,6 +152,25 @@ void dyn86_mi_arm_verify(uint32_t trap_va);
  * Return 1 = served (EAX written to emu->regs[0]), 0 = fallback. */
 int dyn86_mi_copy(void* emu, uint32_t esp);
 int dyn86_mi_set (void* emu, uint32_t esp);
+
+/* --- ORACLE OF THE INLINE PATH (D2_MEMFASTCHECK=1) ---
+ * D2_MEMVERIFY cannot see the inline path (it never calls this file). So the
+ * inline path carries its own: when dyn86_mi_fastchk is armed AT TRANSLATION
+ * TIME, a PRE call (which replays the acceptance test in C and snapshots 16
+ * guard bytes on each side of the destination) and a POST call (which
+ * compares destination against source byte for byte -- the inline path
+ * refuses overlap, so the source is intact -- and re-checks both guards, which
+ * is what catches a write PAST the requested size) are emitted around the
+ * inline copy. Both always return 0 and touch no guest register.
+ * ONE CALL IN FLIGHT AT A TIME: the snapshot is a single static slot, so this
+ * oracle is only meaningful under D2SCHED=coop (which is what
+ * tools/oracle_memintrin.sh runs). Under the native scheduler two guest
+ * threads could interleave a PRE and a POST and compare the wrong call. */
+int dyn86_mi_fast_pre_cpy (void* emu, uint32_t esp);
+int dyn86_mi_fast_post_cpy(void* emu, uint32_t esp);
+int dyn86_mi_fast_pre_set (void* emu, uint32_t esp);
+int dyn86_mi_fast_post_set(void* emu, uint32_t esp);
+extern unsigned long long dyn86_mi_fc_n, dyn86_mi_fc_bad, dyn86_mi_fc_skip;
 
 #ifdef __cplusplus
 }

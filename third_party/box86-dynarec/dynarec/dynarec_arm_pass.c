@@ -24,6 +24,7 @@
 extern int dyn86_nopend;                 /* D2_NOPEND — contrat plus bas */
 extern unsigned long dyn86_nopend_dropped, dyn86_nopend_kept, dyn86_nopend_seen;
 #include "dynarec_arm_helper.h"
+#include "dyn86_memfast.h"     /* D2Vita : chemin court EN LIGNE (D2_MEMINTRIN=3) */
 #include "custommem.h"
 #include "elfloader.h"
 
@@ -251,6 +252,14 @@ uintptr_t arm_pass(dynarec_arm_t* dyn, uintptr_t addr)
        && ((dyn86_mi_cpy_va && addr == dyn86_mi_cpy_va)
         || (dyn86_mi_set_va && addr == dyn86_mi_set_va))) {
         int is_set = (dyn86_mi_set_va && addr == dyn86_mi_set_va);
+        // D2_MEMINTRIN=3 : CHEMIN COURT EN LIGNE, emis AVANT l'appel ci-dessous
+        // (99,85 % des memcpy et 83,7 % des memset font moins de 64 octets ;
+        // pour eux l'appel coute plus que la copie). Tout ce que le test
+        // d'acceptation refuse branche sur dyn->memfast_mark, c'est-a-dire sur
+        // la sequence d'appel qui suit, inchangee. Contrat, registres utilises
+        // et preuves de fidelite : src/dynarec86/dyn86_memfast.h.
+        if(dyn86_mi_fast) { D2MF_EMIT(is_set); }
+        else dyn->memfast_mark = dyn->arm_size;
         // r0 = xEmu (invariant du dynarec), r1 = ESP invite.
         MOV_REG(x1, xESP);
         // CALL_ : scratch x3 pour l'adresse, valeur de retour rangee dans x1.

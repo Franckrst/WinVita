@@ -130,6 +130,12 @@ typedef struct dynarec_arm_s {
                                     // memcpy/memset (dyn86_memintrin.h). Offset,
                                     // dans le code ARM du bloc, du corps traduit
                                     // d'origine.
+    int                 memfast_mark;// D2Vita (D2_MEMINTRIN=3) : meme marque,
+                                    // pour les branches « le chemin INLINE a
+                                    // refuse » (taille >= 64, hors arene,
+                                    // chevauchement). Offset, dans le code ARM
+                                    // du bloc, de la sequence d'appel au helper
+                                    // du mode 1. Contrat : dyn86_memfast.h.
     // ---- D2Vita — fastmmu : sortir l'ADD de base du chemin critique --------
     // Contrat complet, preuves de surete et recensement : dynarec_arm_mmu.h.
     //
