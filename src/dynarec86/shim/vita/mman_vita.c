@@ -439,7 +439,12 @@ unsigned int   dyn86_rwpool_size = 0;   /* publie dans la ligne MEM: */
 unsigned int   dyn86_rwpool_used = 0;
 #define RWPOOL_MAX_SERVE  (256u << 10)  /* MMAPSIZE de box86 = 64 Kio, et de la marge */
 
-/* Reserve la piscine, UNE fois. Appele sous g_blk_mx. */
+/* Reserve la piscine, UNE fois. Appele sous g_blk_mx — et comme jitpool_grow,
+ * ne touche que l'API memblock du noyau et le journal de progression, donc
+ * g_blk_mx reste une FEUILLE dans l'ordre des verrous. C'est l'invariant que
+ * custommem.c documente de son cote (« nothing under mutex_blocks may reach
+ * the dynarec arena ») : le casser ici rouvrirait l'interblocage que tout ce
+ * fichier est ecrit pour eviter. */
 static void rwpool_reserve(void) {
     g_rwpool_tried = 1;
     const char* e = getenv("WX86_RWPOOL_MB"); if (!e) e = getenv("D2_RWPOOL_MB");

@@ -30,7 +30,11 @@
 #include "dynarec/arm_lock_helper.h"
 #include "khash.h"
 
+/* build.sh passe deja -DUSE_MMAP : sans le garde, chaque compilation de ce
+ * fichier sort un avertissement de redefinition. */
+#ifndef USE_MMAP
 #define USE_MMAP
+#endif
 //#define USE_MMAP_MORE
 
 // init inside dynablocks.c
