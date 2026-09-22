@@ -24,12 +24,31 @@ typedef uint64_t     SceUInt64;
  * printed as sce=0x80024B0B in every field report of this failure. */
 #define SCE_KERNEL_ERROR_MEMBLOCK_OVERFLOW 0x80024B0B
 #define SCE_KERNEL_MEMBLOCK_TYPE_USER_RW   0x0C20D060
+/* Partition PHYCONT, ou la piscine RW des metadonnees de box86 est
+ * reservee. Meme moitie basse (D060 = RW cache) que USER_RW : seul le
+ * selecteur de partition change. C'est ce qui autorise a y mettre des
+ * structures lues par le CPU sans craindre la latence d'une fenetre non
+ * cachee (les variantes _NC_ portent 8060). */
+#define SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW 0x0C80D060
+typedef int SceKernelMemBlockType;
 
+/* MIROIR EXACT de psp2/kernel/sysmem.h du VitaSDK. Cette structure divergeait
+ * sur DEUX points, et chacun cachait un comportement du vrai noyau :
+ *   - les champs etaient des SceSize (non signes) la ou le SDK declare des
+ *     int. Or size_user est VU NEGATIF sur console des la 13e seconde
+ *     (« libre user=-2048 Ko » dans tous les journaux de terrain), et le
+ *     plancher de jitpool_grow est garde par « free_kb >= 0 ». Avec des
+ *     champs non signes, ce cas — le seul qui compte, celui ou la memoire
+ *     manque — etait irreproductible ici.
+ *   - size_user et size_cdram etaient INTERVERTIS. Le test restait coherent
+ *     avec lui-meme (faux noyau et mman_vita.c lisent le meme en-tete), donc
+ *     rien n'echouait ; mais il modelisait une disposition qui n'est pas
+ *     celle de la console. */
 typedef struct SceKernelFreeMemorySizeInfo {
-    SceSize size;          /* sizeof(SceKernelFreeMemorySizeInfo) */
-    SceSize size_cdram;
-    SceSize size_user;
-    SceSize size_phycont;
+    int size;          /* sizeof(SceKernelFreeMemorySizeInfo) */
+    int size_user;
+    int size_cdram;
+    int size_phycont;
 } SceKernelFreeMemorySizeInfo;
 
 SceUID sceKernelAllocMemBlock(const char* name, int type, SceSize size, void* opt);

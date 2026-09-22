@@ -420,6 +420,122 @@ static JitSeg* jitseg_fit(size_t size) {
     return 0;
 }
 
+/* ============================ PISCINE RW ==================================
+ * POURQUOI. Les metadonnees de box86 (custommem.c : un dynablock_t par bloc
+ * traduit, les noeuds des arbres rouge-noir) sont le SEUL poste memoire que ce
+ * portage demande encore au noyau UNE FOIS LA PARTIE LANCEE. Tout le reste est
+ * reserve au boot : l'arene (295 Mo), le tas newlib (38 Mo, pris par le
+ * chargeur avant main), la piscine JIT. Et il ne reste rien : sur console,
+ * « libre user » vaut -2048 Ko des la 13e seconde, et le noyau a ete vu
+ * refuser un bloc VM d'UN megaoctet a 88 s.
+ *
+ * Ce que ca donnait : mmap rend MAP_FAILED, customMalloc ecrivait 64 Kio a
+ * partir de 0xFFFFFFFF, le processus mourait (signature de plantage
+ * hfault_sys|SceLibKernel|0x120, 11 remontees, cinq consoles). Le moteur sait
+ * desormais traiter ce refus, mais traiter un refus n'est pas l'eviter.
+ *
+ * D'OU VIENT LA MEMOIRE. De la partition PHYCONT, 26 624 Ko qu'aucune ligne
+ * MEM: d'aucune session n'a jamais vu bouger. Trois faits l'autorisent :
+ *   - l'attribut de cache de USER_MAIN_PHYCONT_RW (0x0C80D060) est bit pour
+ *     bit celui de USER_RW (0x0C20D060) ; seul le selecteur de partition
+ *     differe (les variantes _NC_ portent 8060, la CDRAM aussi) ;
+ *   - la sonde D2_MEMPROBE sur console accorde le bloc et le place a
+ *     0x84400000, la MEME fenetre d'adressage que USER_RW — les variantes non
+ *     cachees, elles, atterrissent a 0x70000000 ;
+ *   - rien d'autre dans ce portage ne demande du phycont.
+ * L'etiquette « SLOW » de vitaGL classe des emplacements de tampons GPU ; elle
+ * ne dit rien d'une structure de 48 octets lue par le coeur ARM.
+ *
+ * CE QU'ELLE NE SERT PAS. Les grosses demandes : l'arene elle-meme passe par
+ * ce meme mmap au boot (295 Mo). La piscine ne sert que ce qui tient sous
+ * RWPOOL_MAX_SERVE, c'est-a-dire les blocs de 64 Kio de custommem.c et leur
+ * marge ; au-dela, le chemin noyau d'origine, inchange.
+ *
+ * TAILLE. Plafond mesure du tas de metadonnees : 124 a 131 octets par bloc
+ * traduit (console ET qemu, trois sessions), soit ~2 Mo pour une piscine JIT
+ * de 16 Mo — la taille effective observee sur console, le second segment
+ * etant refuse. 8 Mo laissent donc un facteur 4, et 18 Mo de phycont intacts.
+ *
+ * REPLI. Phycont refuse -> USER_RW ; refuse aussi -> aucune piscine, et le
+ * chemin bloc-par-bloc d'origine reprend la main. Une piscine absente ne peut
+ * pas rendre le portage pire qu'avant elle. D2_RWPOOL_MB=0 la desarme. */
+static void*   g_rwpool_base = 0;
+static size_t  g_rwpool_used = 0;
+static SceUID  g_rwpool_uid  = -1;
+static int     g_rwpool_tried = 0;
+unsigned int   dyn86_rwpool_size = 0;   /* publie dans la ligne MEM: */
+unsigned int   dyn86_rwpool_used = 0;
+#define RWPOOL_MAX_SERVE  (256u << 10)  /* MMAPSIZE de box86 = 64 Kio, et de la marge */
+
+/* Reserve la piscine, UNE fois. Appele sous g_blk_mx. */
+static void rwpool_reserve(void) {
+    g_rwpool_tried = 1;
+    const char* e = getenv("WX86_RWPOOL_MB"); if (!e) e = getenv("D2_RWPOOL_MB");
+    unsigned mb = e ? (unsigned)atoi(e) : 8u;
+    if (!mb) { wx86_vita_progress_c("piscine RW: DESARMEE (D2_RWPOOL_MB=0) — box86 demande au noyau bloc par bloc");
+               return; }
+    if (mb > 24u) mb = 24u;             /* la partition phycont fait 26 Mo */
+    /* Echelle descendante puis repli de partition : la meme forme que
+     * jitpool_grow, pour la meme raison — prendre les 4 Mo qui SONT libres
+     * vaut mieux que ne rien prendre. */
+    SceUID u = -1; void* pb = 0; size_t want = 0; int last_rc = 0; int phy = 1;
+    for (int pass = 0; pass < 2 && !pb; ++pass) {
+        const SceKernelMemBlockType ty = pass == 0
+            ? SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW
+            : SCE_KERNEL_MEMBLOCK_TYPE_USER_RW;
+        phy = (pass == 0);
+        for (unsigned m = mb; m >= 1u; m >>= 1) {
+            want = (size_t)m << 20;
+            u = sceKernelAllocMemBlock("dyn86_rwpool", ty, want, 0);
+            if (u >= 0 && sceKernelGetMemBlockBase(u, &pb) >= 0 && pb) break;
+            last_rc = u;
+            if (u >= 0) sceKernelFreeMemBlock(u);
+            u = -1; pb = 0;
+        }
+    }
+    char m2[224];
+    if (!pb) {
+        snprintf(m2, sizeof m2,
+            "piscine RW: REFUSEE en phycont ET en user, de %u Mo jusqu'a 1 Mo (sce=0x%08x)"
+            " — box86 redemande au noyau bloc par bloc, comme avant", mb, (unsigned)last_rc);
+        wx86_vita_progress_c(m2);
+        return;
+    }
+    g_rwpool_base = pb; g_rwpool_uid = u; g_rwpool_used = 0;
+    dyn86_rwpool_size = (unsigned int)want;
+    {   SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
+        int frc = sceKernelGetFreeMemorySize(&fi);
+        snprintf(m2, sizeof m2,
+            "piscine RW: %u Mo reserves en %s a %p — libre user %d Ko, phycont %d Ko",
+            (unsigned)(want >> 20), phy ? "PHYCONT" : "USER_RW (repli)", pb,
+            frc < 0 ? -1 : fi.size_user >> 10, frc < 0 ? -1 : fi.size_phycont >> 10);
+    }
+    wx86_vita_progress_c(m2);
+}
+
+/* Sert une demande depuis la piscine, ou 0. Appele sous g_blk_mx.
+ * Allocateur a pointeur qui avance : box86 ne rend ses blocs qu'au teardown
+ * (custommem.c ne munmap qu'a fini_custommem), donc rien a recycler. */
+static void* rwpool_fit(size_t size) {
+    if (!g_rwpool_tried) rwpool_reserve();
+    if (!g_rwpool_base) return 0;
+    size = (size + 0xFFFu) & ~(size_t)0xFFFu;
+    if (g_rwpool_used + size > dyn86_rwpool_size) {
+        static int said = 0;
+        if (!said) { said = 1; char m[200];
+            snprintf(m, sizeof m,
+                "piscine RW: PLEINE a %u/%u Ko — box86 repasse par le noyau, qui peut refuser"
+                " (c'est la que menait le plantage 0.1.7/0.1.9)",
+                (unsigned)(g_rwpool_used >> 10), dyn86_rwpool_size >> 10);
+            wx86_vita_progress_c(m); }
+        return 0;
+    }
+    void* p = (char*)g_rwpool_base + g_rwpool_used;
+    g_rwpool_used += size;
+    dyn86_rwpool_used = (unsigned int)g_rwpool_used;
+    return p;
+}
+
 static Blk* blk_find(const void* p) {
     for (int i = 0; i < DYN86_MAXBLK; ++i)
         if (g_blk[i].base && (const char*)p >= (const char*)g_blk[i].base
@@ -536,6 +652,25 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
         uid = sceKernelAllocMemBlockForVM("dyn86_jit", size);
     } else {
         size = (length + 0xFFFu) & ~(size_t)0xFFFu;          /* 4 KiB */
+        /* Piscine RW d'abord, pour les PETITES demandes seulement : les blocs
+         * de metadonnees de box86. L'arene elle-meme passe par ici au boot
+         * (295 Mo) et ne doit surtout pas etre servie depuis la piscine. */
+        if (size <= RWPOOL_MAX_SERVE) {
+            void* pp = rwpool_fit(size);
+            if (pp) {
+                g_blk[slot].base = pp;  g_blk[slot].size = size;
+                g_blk[slot].uid  = g_rwpool_uid;   /* le bloc noyau, c'est la piscine entiere */
+                g_blk[slot].vm   = 0;
+                g_blk[slot].pool = 1;              /* munmap ne rend rien au noyau */
+                dyn86_rw_cur += (unsigned int)size;
+                pthread_mutex_unlock(&g_blk_mx);
+                /* Meme parite qu'mmap(MAP_ANONYMOUS) que le reste du chemin RW
+                 * restaure plus bas : le noyau ne zero-remplit pas, et le code
+                 * invite compte sur le zero garanti par Windows. */
+                memset(pp, 0, size);
+                return pp;
+            }
+        }
         uid = sceKernelAllocMemBlock("dyn86_rw", SCE_KERNEL_MEMBLOCK_TYPE_USER_RW,
                                      size, 0);
     }

@@ -46,8 +46,14 @@
 /* ---- fake kernel ------------------------------------------------------- */
 
 #define FAKE_MAXBLK 64
-static struct { void* base; size_t size; int live; } g_fk[FAKE_MAXBLK];
+static struct { void* base; size_t size; int live; int phy; } g_fk[FAKE_MAXBLK];
 static long   g_free_user  = 0;           /* bytes */
+/* Budget PHYCONT, d'ou la piscine RW des metadonnees de box86 se sert. Sur
+ * console il vaut 26 624 Ko et AUCUNE session ne l'a jamais vu bouger — c'est
+ * precisement ce qui en fait la reserve candidate. Modelise a part de
+ * g_free_user, sans quoi les scenarios ne pourraient pas montrer ce qui compte :
+ * la piscine tient alors meme que la RAM utilisateur est a zero. */
+static long   g_free_phycont = 0;         /* bytes */
 static size_t g_vm_max     = 0;           /* biggest VM block grantable NOW   */
 static size_t g_vm_translated = 0;        /* VM bytes handed out so far       */
 static size_t g_vm_close_at   = (size_t)-1;  /* past this, VM grants stop     */
@@ -74,16 +80,23 @@ SceUID sceKernelAllocMemBlockForVM(const char* name, SceSize size) {
     return u;
 }
 SceUID sceKernelAllocMemBlock(const char* name, int type, SceSize size, void* opt) {
-    (void)name; (void)type; (void)opt;
-    if ((long)size > g_free_user) return (SceUID)0x80020190; /* generic ENOMEM-ish */
+    (void)name; (void)opt;
+    /* Le TYPE decide de la partition ponctionnee : c'est tout l'interet de la
+     * piscine RW en phycont, et un faux noyau qui ignorerait le type ferait
+     * passer les scenarios pour de mauvaises raisons. */
+    const int phy = (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW);
+    long* budget = phy ? &g_free_phycont : &g_free_user;
+    if ((long)size > *budget) return (SceUID)0x80020190; /* generic ENOMEM-ish */
     int u = fk_new(size);
     if (u < 0) return (SceUID)0x80020190;
-    g_free_user -= (long)size;
+    *budget -= (long)size;
+    g_fk[u].phy = phy;
     return u;
 }
 int sceKernelFreeMemBlock(SceUID uid) {
     if (uid <= 0 || uid >= FAKE_MAXBLK || !g_fk[uid].live) return -1;
-    g_free_user += (long)g_fk[uid].size;
+    if (g_fk[uid].phy) g_free_phycont += (long)g_fk[uid].size;
+    else               g_free_user    += (long)g_fk[uid].size;
     free(g_fk[uid].base); memset(&g_fk[uid], 0, sizeof g_fk[uid]);
     return 0;
 }
@@ -92,8 +105,13 @@ int sceKernelGetMemBlockBase(SceUID uid, void** base) {
     *base = g_fk[uid].base; return 0;
 }
 int sceKernelGetFreeMemorySize(SceKernelFreeMemorySizeInfo* info) {
-    info->size_user = (SceSize)(g_free_user < 0 ? 0 : g_free_user);
-    info->size_cdram = 0; info->size_phycont = 0; return 0;
+    /* NEGATIF si le budget est depasse : c'est ce que la console rend
+     * reellement (« libre user=-2048 Ko »), et le pincer a zero ici
+     * effacerait le seul cas ou le plancher est interrogeable. */
+    info->size_user = (int)g_free_user;
+    info->size_cdram = 0;
+    info->size_phycont = (int)g_free_phycont;
+    return 0;
 }
 int sceKernelOpenVMDomain(void)  { return 0; }
 int sceKernelCloseVMDomain(void) { return 0; }
@@ -211,6 +229,87 @@ static void sc_eager_nonlatch(void) {
     CHECK(got == (10u << 20),                    "non-latch : la traduction reprend");
 }
 
+
+/* ---- piscine RW (metadonnees de box86) --------------------------------- */
+/* box86 demande ses blocs de metadonnees par MMAPSIZE = 64 Kio, en RW pur
+ * (custommem.c, customMalloc). C'est cette demande-la, et elle seule, que la
+ * piscine RW doit servir. */
+extern unsigned int dyn86_rwpool_size, dyn86_rwpool_used;
+static void* rw64(void) {
+    return mmap(NULL, 64u << 10, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+}
+/* Combien de blocs de 64 Kio on obtient d'affilee avant un refus. */
+static int rw_runs(int n) {
+    int got = 0;
+    for (int i = 0; i < n; ++i) { if (rw64() == MAP_FAILED) break; ++got; }
+    return got;
+}
+
+/* --- scenario 6 : la situation de la console. RAM utilisateur a ZERO (le
+ * journal de terrain dit « libre user=-2048 Ko » des la 13e seconde), phycont
+ * intact. Avant la piscine, le premier bloc de 64 Kio demande au noyau etait
+ * refuse et customMalloc ecrivait a travers MAP_FAILED. Attendu : la piscine
+ * est prise en phycont, les 32 blocs passent, et la RAM utilisateur n'est pas
+ * touchee d'un octet. */
+static void sc_rwpool_phycont(void) {
+    g_free_user    = 0;                          /* partition user epuisee */
+    g_free_phycont = 26u << 20;                  /* ce que la console annonce */
+    int got = rw_runs(32);
+    CHECK(got == 32,                             "phycont : 32 blocs de 64 Kio servis malgre user a zero");
+    CHECK(dyn86_rwpool_size == (8u << 20),       "phycont : 8 Mo reserves");
+    CHECK(log_has("en PHYCONT"),                 "phycont : le journal dit d'ou vient la memoire");
+    CHECK(g_free_user == 0,                      "phycont : pas un octet pris a la RAM utilisateur");
+    CHECK(g_free_phycont == (18L << 20),         "phycont : 18 Mo de phycont laisses libres");
+}
+
+/* --- scenario 7 : phycont indisponible (firmware, fragmentation, un service
+ * systeme qui l'a pris). La piscine doit se replier sur USER_RW plutot que de
+ * renoncer — et le dire, sans quoi un banc attribuerait au phycont une mesure
+ * faite en user. */
+static void sc_rwpool_repli(void) {
+    g_free_user    = 16u << 20;
+    g_free_phycont = 0;
+    int got = rw_runs(32);
+    CHECK(got == 32,                             "repli : les blocs passent quand meme");
+    CHECK(log_has("USER_RW (repli)"),            "repli : le journal nomme le repli");
+    CHECK(dyn86_rwpool_size > 0,                 "repli : une piscine a bien ete prise");
+}
+
+/* --- scenario 8 : les deux partitions refusent. La piscine ne doit pas etre
+ * un nouveau mode de mort : on retombe exactement sur le comportement
+ * d'avant elle — le noyau refuse, mmap rend MAP_FAILED, et c'est a
+ * customMalloc de le traiter (ce qu'il fait desormais). */
+static void sc_rwpool_absente(void) {
+    g_free_user    = 0;
+    g_free_phycont = 0;
+    void* p = rw64();
+    CHECK(p == MAP_FAILED,                       "absente : le refus remonte, il n'est pas masque");
+    CHECK(log_has("REFUSEE en phycont ET en user"), "absente : le journal nomme les deux refus");
+    CHECK(dyn86_rwpool_size == 0,                "absente : aucune piscine fantome");
+}
+
+/* --- scenario 9 : LE PLANCHER EST INOPERANT QUAND IL FAUDRAIT QU'IL SERVE.
+ * Sur console, sceKernelGetFreeMemorySize rend un size_user NEGATIF des la
+ * 13e seconde (« libre user=-2048 Ko », tous les journaux de terrain). Or
+ * jitpool_grow ne consulte le plancher que si free_kb >= 0 — un garde pose
+ * pour ne pas laisser une jauge illisible interdire une allocation legitime.
+ * Consequence non voulue : la seule situation ou le plancher aurait quelque
+ * chose a proteger est justement celle ou il ne s'applique pas. Le segment
+ * anticipe part alors demander au noyau, qui refuse (0x80024B0B sur console,
+ * a 88 s).
+ * Ce scenario EPINGLE ce comportement. Il n'affirme pas qu'il est correct :
+ * il le rend visible, pour qu'un changement de politique soit un choix et non
+ * une surprise. La piscine RW en phycont retire de toute facon au plancher
+ * son objet — les metadonnees ne viennent plus de la RAM utilisateur. */
+static void sc_plancher_jauge_negative(void) {
+    g_free_user  = -(2L << 20);                  /* ce que la console annonce */
+    g_vm_max     = 16u << 20;
+    g_vm_close_at = 9u << 20;
+    (void)translate(20u << 20);
+    CHECK(!log_has("ajourne"),                   "jauge negative : le plancher n'est JAMAIS consulte");
+    CHECK(log_has("REFUSE"),                     "jauge negative : c'est le noyau qui tranche, pas la politique");
+}
+
 int main(void) {
     static const struct { const char* nom; void (*fn)(void); } SC[] = {
         { "0.1.7 tel que livre (anticipation desarmee)", sc_0_1_7 },
@@ -218,6 +317,10 @@ int main(void) {
         { "plancher de RAM user respecte",               sc_plancher },
         { "plancher non fatal (la demande passe outre)", sc_plancher_pas_fatal },
         { "refus anticipe : pas de latch",               sc_eager_nonlatch },
+        { "piscine RW en phycont (user a zero)",         sc_rwpool_phycont },
+        { "piscine RW : repli en USER_RW",               sc_rwpool_repli },
+        { "piscine RW : les deux refus, pas de mort",    sc_rwpool_absente },
+        { "plancher inoperant sur jauge negative",       sc_plancher_jauge_negative },
     };
     int bad = 0;
     for (unsigned i = 0; i < sizeof SC / sizeof SC[0]; ++i) {
