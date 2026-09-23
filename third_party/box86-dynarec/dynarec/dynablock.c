@@ -690,14 +690,15 @@ static void dyn86_ev_say(const char* what) { dyn86_ev_dump(what); }
  * a echoue ou n'a simplement jamais ete sollicite. */
 void dyn86_ev_dump(const char* what)
 {
-    char m[208];
+    char m[256];
     snprintf(m, sizeof m,
-        "JIT eviction: %s — tours=%u retires=%u rendus=%u ajournes=%u octets=%lluKo sauvees=%u rendues-au-reessai=%u sorties=%u morts=%u integrite=%u emus=%d retient=%d(prof=%u gen=%u/%u)",
+        "JIT eviction: %s — tours=%u retires=%u rendus=%u ajournes=%u octets=%lluKo sauvees=%u rendues-au-reessai=%u sorties=%u morts=%u integrite=%u emus=%d retient=%d(prof=%u gen=%u/%u) arenefail=%u metafail=%u",
         what, dyn86_ev_rounds, dyn86_ev_retired, dyn86_ev_reclaimed,
         dyn86_ev_deferred, (unsigned long long)(dyn86_ev_bytes>>10),
         dyn86_ev_refills, dyn86_ev_handback, dyn86_ev_oomexit, dyn86_ev_fatal, dyn86_ev_corrupt,
         g_emureg_n, g_grace_blocker, g_grace_bd, g_grace_bg,
-        (g_grace_blocker>=0 && g_grace_blocker<DYN86_MAXEMU) ? g_retire_gen[g_grace_blocker] : 0u);
+        (g_grace_blocker>=0 && g_grace_blocker<DYN86_MAXEMU) ? g_retire_gen[g_grace_blocker] : 0u,
+        dyn86_jit_allocfail, dyn86_meta_allocfail);
     fprintf(stderr, "[jit] %s\n", m);
     wx86_vita_progress_c(m);
 }
