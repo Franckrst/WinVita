@@ -33,6 +33,7 @@ extern uint32_t dyn86_ev_fatal;
 extern uint32_t dyn86_ev_oomexit;
 extern uint32_t dyn86_ev_reclaimed;
 extern int  dyn86_evict_armed(void);
+extern int  dyn86_pool_near_full(void);
 extern void dyn86_ev_dump(const char* what);
 /* Combien de sorties reprenables d'affilee un meme fil peut obtenir avant
  * qu'on renonce. Voir le commentaire au site : c'est la borne qui interdit
@@ -377,7 +378,7 @@ int DynaRun(x86emu_t* emu)
                  * blocage, et le fil retombe alors sur la mort nommee. Le
                  * compteur est aussi remis a zero des qu'une traduction de ce
                  * fil aboutit (branche else, plus bas). */
-                if(dyn86_jit_allocfail && dyn86_evict_armed()
+                if((dyn86_jit_allocfail || dyn86_pool_near_full()) && dyn86_evict_armed()
                    && emu->dyn86_oomexit < DYN86_OOM_EXITS) {
                     if(dyn86_ev_reclaimed != emu->dyn86_oomwatch) {
                         emu->dyn86_oomwatch = dyn86_ev_reclaimed;

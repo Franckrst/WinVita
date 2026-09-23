@@ -637,6 +637,23 @@ int dyn86_evict_armed(void)
     return armed && !g_emureg_overflow;
 }
 
+/* Vraie quand la piscine JIT est pres de pleine, MEME SI l'allocateur n'a
+ * encore rien refuse. Sous qemu-arm (pas de mman_vita.c, donc pas de
+ * jauge), toujours faux : le seul signal disponible y reste
+ * dyn86_jit_allocfail, exactement comme avant ce lot — voir
+ * tools/qemu_jitfail_repro.sh pour la seule facon d'y observer une
+ * saturation (l'injection D2_JITFAILAFTER, qui EST dyn86_jit_allocfail). */
+#ifdef __vita__
+extern unsigned int dyn86_jitpool_used, dyn86_jitpool_size;
+int dyn86_pool_near_full(void)
+{
+    if(!dyn86_jitpool_size) return 0;
+    return (uint64_t)dyn86_jitpool_used * 100ull >= (uint64_t)dyn86_jitpool_size * 95ull;
+}
+#else
+int dyn86_pool_near_full(void) { return 0; }
+#endif
+
 /* Taille de vague ADAPTATIVE. 64 blocs (~40 Kio) suffisent largement quand
  * l'arene a juste besoin d'un peu d'air — c'est le cas nominal, « evincer un
  * peu, rarement ». Sous pression reelle, en revanche, chaque recuperation qui
@@ -820,7 +837,7 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
      * mutex_dyndump dans LinkNext (box86_dynarec_wait=1). On rend NULL, et
      * c'est la boucle de reessai de DBGetBlock qui cede HORS VERROU : c'est
      * elle, la fenetre de grace, et elle ne coute rien de plus. */
-    if(!ret && dyn86_jit_allocfail != dyn86_af0 && dyn86_evict_armed()) {
+    if(!ret && (dyn86_jit_allocfail != dyn86_af0 || dyn86_pool_near_full()) && dyn86_evict_armed()) {
         for(int ev=0; ev<DYN86_EV_ROUNDS && !ret; ++ev) {
             if(!dyn86_evict_round(emu, (size_t)block->x86_size))
                 break;                       /* rien rendu : la grace n'est pas passee */
