@@ -38,7 +38,9 @@ extern void dyn86_ev_dump(const char* what);
 /* Combien de sorties reprenables d'affilee un meme fil peut obtenir avant
  * qu'on renonce. Voir le commentaire au site : c'est la borne qui interdit
  * d'echanger un plantage contre un gel. */
-#define DYN86_OOM_EXITS 64
+#define DYN86_OOM_EXITS 192     /* releve depuis 64 en meme temps que
+                                 * DYN86_EV_ROUNDS (dynablock.c) — meme
+                                 * raison, meme date */
 
 #ifdef ARM
 void arm_prolog(x86emu_t* emu, void* addr) EXPORTDYN;

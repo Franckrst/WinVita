@@ -329,7 +329,15 @@ void wx86_vita_progress_c(const char* msg);
  * il passe la grace sans rien couter. */
 #define DYN86_MAXEMU    64
 #define DYN86_RETIRE_MAX 512    /* blocs retires par vague */
-#define DYN86_EV_ROUNDS  8      /* tours d'eviction avant d'abandonner */
+#define DYN86_EV_ROUNDS  24     /* tours d'eviction avant d'abandonner (releve
+                                 * depuis 8 le 2026-09-23 : sous injection
+                                 * D2_JITFAILAFTER, l'eviction reclame des
+                                 * dizaines de milliers de blocs avec succes
+                                 * mais perd occasionnellement UNE requete —
+                                 * budget releve en pari a faible risque (meme
+                                 * verrouillage, memes bornes de securite) plutot
+                                 * que sur une preuve ferme — voir
+                                 * tools/qemu_jitfail_repro.sh) */
 
 static x86emu_t* g_emureg[DYN86_MAXEMU];
 static volatile int g_emureg_n = 0;
