@@ -171,6 +171,12 @@ static void sc_0_1_7(void) {
     CHECK(dyn86_jitpool_size == (16u << 20), "0.1.7 : piscine figee a 16 Mo");
     CHECK(got < (20u << 20),                  "0.1.7 : une traduction est REFUSEE (fil invite mort)");
     CHECK(log_has("piscine figee"),           "0.1.7 : le refus est nomme dans le journal");
+    /* dyn86_pool_near_full() (dynablock.c) lit ce meme couple used/size a
+     * >=95% pour declencher l'eviction meme sans refus de l'allocateur — la
+     * scene qui a motive ce chantier est exactement celle-ci : la piscine EST
+     * pleine ici, le seuil doit donc lire vrai. */
+    CHECK(dyn86_jitpool_used * 100ull >= (uint64_t)dyn86_jitpool_size * 95ull,
+          "0.1.7 : la piscine pleine franchit bien le seuil 95% de dyn86_pool_near_full");
 }
 
 /* --- scenario 2: the fix. Same kernel timeline, anticipation at 50%. The
