@@ -715,7 +715,14 @@ static void dyn86_ev_say(const char* what) { dyn86_ev_dump(what); }
  * a echoue ou n'a simplement jamais ete sollicite. */
 void dyn86_ev_dump(const char* what)
 {
-    char m[256];
+    /* 256 mesurait large pour une session courte, mais tronquait deja
+     * metafail= sur une VRAIE mort sous injection D2_JITFAILAFTER (264
+     * octets mesures le 2026-09-23, tools/qemu_jitfail_repro.sh) : c'est
+     * justement la ligne la plus longue (compteurs cumules au plus haut) sur
+     * l'evenement le plus precieux que ce fichier journalise. snprintf ne
+     * deborde jamais, mais un champ perdu sur CETTE ligne coute cher a un
+     * futur rapport de terrain — marge relevee en consequence. */
+    char m[384];
     snprintf(m, sizeof m,
         "JIT eviction: %s — tours=%u retires=%u rendus=%u ajournes=%u octets=%lluKo sauvees=%u rendues-au-reessai=%u sorties=%u morts=%u integrite=%u emus=%d retient=%d(prof=%u gen=%u/%u) arenefail=%u metafail=%u",
         what, dyn86_ev_rounds, dyn86_ev_retired, dyn86_ev_reclaimed,
