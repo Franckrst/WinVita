@@ -825,10 +825,17 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
      * dyndump -> dynarec -> g_blk_mx que FreeDynablock utilise depuis
      * toujours. Aucun ordre de verrou nouveau n'est introduit par l'eviction.
      *
-     * La condition porte sur dyn86_jit_allocfail, pas sur `!ret` : FillBlock
-     * rend aussi NULL pour un opcode non implemente ou un abandon de passe,
-     * et evincer du code chaud n'y changerait rien. Seul un refus de
-     * l'ALLOCATEUR justifie de rendre de la memoire.
+     * La condition porte sur dyn86_jit_allocfail OU dyn86_pool_near_full(),
+     * pas sur `!ret` seul : FillBlock rend aussi NULL pour un opcode non
+     * implemente ou un abandon de passe, et evincer du code chaud n'y
+     * changerait rien. dyn86_jit_allocfail reste le signal causal (l'ALLOCATEUR
+     * a refuse CETTE demande) ; dyn86_pool_near_full() est delibrement non
+     * causal (piscine >=95 %, meme si CETTE demande a echoue pour une autre
+     * raison) — ajoute le 2026-09-23 pour couvrir un second fil invite qui
+     * mourrait sans jamais faire bouger dyn86_jit_allocfail. Cout accepte :
+     * sous pression, un echec non memoire peut gaspiller jusqu'a
+     * DYN86_EV_ROUNDS tours d'eviction qui ne le reparent pas — borne, jamais
+     * un interblocage, juste moins de tours utiles pour le fil suivant.
      *
      * La borne est ici, pas dans une boucle d'attente : DYN86_EV_ROUNDS
      * tentatives, chacune une retraduction immediate si de la memoire a ete
