@@ -400,18 +400,19 @@ int DynaRun(x86emu_t* emu)
                 }
                 /* LA mort. Run() est un talon sans interpreteur
                  * (shim/shim_impl.c), donc franchir cette ligne TUE le fil
-                 * invite. Le compteur n'est incremente que si l'allocateur JIT
-                 * a deja refuse quelque chose : sinon la cause est un opcode
-                 * non implemente, pas la saturation, et les confondre ferait
-                 * accuser l'eviction d'un defaut qui n'est pas le sien. */
+                 * invite. Le compteur `dyn86_ev_fatal` reste reserve au cas
+                 * allocateur (ci-dessous) pour ne pas fausser sa propre
+                 * semantique historique, mais le DUMP, lui, est maintenant
+                 * inconditionnel : distinguer "l'allocateur avait refuse" de
+                 * "il n'a jamais refuse" EST la question, et elle ne se lit
+                 * qu'ici, jamais sur le battement 10s qui arrive trop tard
+                 * (voir vita_present.cpp, commentaire jitp=). */
                 if(dyn86_jit_allocfail) {
                     ++dyn86_ev_fatal;
-                    /* La PREMIERE mort reelle emporte le bilan complet : sans
-                     * ca, les compteurs d'eviction ne sont visibles qu'aux
-                     * paliers d'affichage, et un journal peut montrer une mort
-                     * sans dire si l'eviction avait tire, ajourne, ou jamais
-                     * ete appelee. */
-                    if(dyn86_ev_fatal==1) dyn86_ev_dump("MORT d'un fil invite");
+                    if(dyn86_ev_fatal==1) dyn86_ev_dump("MORT d'un fil invite — allocateur avait refuse");
+                } else {
+                    static int dyn86_ev_fatal_noalloc = 0;
+                    if(!dyn86_ev_fatal_noalloc++) dyn86_ev_dump("MORT d'un fil invite — allocateur JAMAIS refuse");
                 }
                 skip = 0;
                 // no block, of block doesn't have DynaRec content (yet, temp is not null)
