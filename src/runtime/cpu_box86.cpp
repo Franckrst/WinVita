@@ -357,6 +357,94 @@ static void diag_segv(int sig, siginfo_t* si, void* uctx) {
 }
 #endif // !__vita__
 
+#ifdef __vita__
+// ---- Vita: the kubridge abort handler's decision (fault_vita.c calls this) --
+// Same facts as diag_segv above, from the kernel's context instead of a
+// ucontext: r4..r11 are the live x86 registers at the faulting instruction,
+// the host pc names the dynablock and therefore the exact x86 address.
+extern "C" {
+typedef struct dyn86_fault {
+    uint32_t type, pc, lr, sp, r0, r1, r2, far, fsr;
+    uint32_t live[8];
+    uint32_t x86insn, gaddr;
+} dyn86_fault_t;
+uint32_t dyn86_seh_filter_get(void);  // fault_vita.c: the guest's top-level filter, 0 = none
+int  dyn86_seh_exit_requested(void);  // fault_vita.c (port hook): the guest asked to leave
+void dyn86_seh_terminate(const char*);// fault_vita.c (port hook): clean exit, nobody handled it
+void dyn86_seh_before_dispatch(uint32_t gaddr); // fault_vita.c (port hook): e.g. reopen a test guard page
+uint32_t dyn86_seh_sentinel(void);          // fault_vita.c (port hook): the bridge sentinel VA
+int  dyn86_vita_unguard(uintptr_t host_addr, size_t len);   // fault_vita.c
+uint32_t* dyn86_fault_counters(void); // fault_vita.c: [0] SMC stores served, [1] fatal records (C linkage; a
+                                      // variable declared here would bind to this anonymous namespace)
+extern uint32_t dyn86_vita_mprotect_calls;
+int dyn86_vita_guard(uintptr_t host_addr, size_t len);   // mman_vita.c
+int dyn86_protectdb(void);                                // dyn86.c
+void dyn86_vita_set_arena(uintptr_t host_base, size_t len); // mman_vita.c: bounds the real mprotect
+void dyn86_vita_mprotect_exclude(uintptr_t host_lo, size_t len); // mman_vita.c: ranges the barrier skips
+void wx86_vita_progress_c(const char* msg);               // platform/vita_host.h (included further down)
+}
+static uint32_t g_arena_span_fwd;     // set with g_arena_span below (declared later in this file)
+extern "C" int dyn86_fault_handle(dyn86_fault_t* f) {
+    const uintptr_t far = f->far;
+    const bool in_arena = g_mb && far >= g_mb && far < g_mb + g_arena_span_fwd;
+    const uint32_t gaddr = in_arena ? (uint32_t)(far - g_mb) : 0;
+    const bool is_write = (f->fsr & 0x800u) != 0;   // DFSR.WnR
+    // 1. SMC write barrier: a translated page is read-only (protectDB via the
+    //    real mprotect); mark its blocks dirty, reopen it, resume the store.
+    if (f->type == 0 && is_write && in_arena && dyn86_protectdb() && isprotectedDB(gaddr, 1)) {
+        unprotectDB(gaddr, 1, 1);
+        const uint32_t nsmc = ++dyn86_fault_counters()[0];
+        if (nsmc <= 8) {
+            dynablock_t* db = FindDynablockFromNativeAddress((void*)(uintptr_t)f->pc);
+            char m[160];
+            snprintf(m, sizeof m, "SMC: ecriture invitee dans une page de code traduite (guest %08x, depuis %s x86=%08x) — blocs marques, reprise",
+                     gaddr, db ? "bloc" : "hote", db ? (unsigned)(uintptr_t)db->x86_addr : 0u);
+            wx86_vita_progress_c(m);
+        }
+        return 1;
+    }
+    // 2. The durable record first, whatever happens next.
+    ++dyn86_fault_counters()[1];
+    dynablock_t* db = FindDynablockFromNativeAddress((void*)(uintptr_t)f->pc);
+    uint32_t x86insn = 0;
+    // db->x86_addr is the GUEST address of the block (what the emu sees);
+    // no membase arithmetic here -- diag_segv's DYN86_H2G was only ever
+    // exercised with membase 0 and reads wrong on console.
+    if (db && db->instsize && db->x86_addr) {
+        uintptr_t x86a = (uintptr_t)db->x86_addr, arma = (uintptr_t)db->block; int i = 0;
+        while (db->instsize[i].x86 || db->instsize[i].nat) {
+            int xs = 0, as = 0;
+            do { xs += db->instsize[i].x86; as += db->instsize[i].nat * 4; ++i; }
+            while (db->instsize[i-1].x86 == 15 || db->instsize[i-1].nat == 15);
+            if (f->pc >= arma && f->pc < arma + (uintptr_t)as) { x86insn = (uint32_t)x86a; break; }
+            arma += as; x86a += xs;
+        }
+    }
+    char cb[300];
+    int n = snprintf(cb, sizeof cb,
+        "CRASH abort type=%u host-pc=%08x fault-addr=%08x%s fsr=%08x %s | x86-insn=%08x bloc=%08x | VIVANTS EAX=%08x ECX=%08x EDX=%08x EBX=%08x ESP=%08x EBP=%08x ESI=%08x EDI=%08x\n",
+        f->type, f->pc, f->far, in_arena ? " (arene)" : "", f->fsr, is_write ? "ecriture" : "lecture/exec",
+        x86insn, db ? (unsigned)(uintptr_t)db->x86_addr : 0u,
+        f->live[0], f->live[1], f->live[2], f->live[3], f->live[4], f->live[5], f->live[6], f->live[7]);
+    if (n > 0 && dyn86_crash_fd >= 0) { ssize_t w = write(dyn86_crash_fd, cb, (size_t)n); (void)w; fsync(dyn86_crash_fd); }
+    if (n > 0) { cb[n-1] = 0; wx86_vita_progress_c(cb); }
+    f->x86insn = x86insn; f->gaddr = in_arena ? gaddr : f->far;
+    // 3. A guest access violation with a registered top-level filter: deliver
+    //    it as Windows would (dyn86_seh_deliver, via the trampoline). Only
+    //    faults raised by translated code qualify -- a fault in host code has
+    //    no x86 instruction to report.
+    if (f->type == 0 && db && x86insn && dyn86_seh_filter_get()) return 2;
+    return 0;
+}
+// Port-side hooks, in guest addresses.
+extern "C" int dyn86_vita_guard_guest(uint32_t gva, uint32_t len) { return g_mb ? dyn86_vita_guard(g_mb + gva, len) : 0; }
+extern "C" int dyn86_vita_unguard_guest(uint32_t gva, uint32_t len) { return g_mb ? dyn86_vita_unguard(g_mb + gva, len) : 0; }
+extern "C" void dyn86_vita_smc_exclude(uint32_t gva, uint32_t len) {
+    if (g_mb) dyn86_vita_mprotect_exclude(g_mb + gva, len);
+}
+extern "C" int dyn86_vita_fault_install(void);
+#endif // __vita__
+
 
 // fastmmu: guest->host delta (env WX86_MEMBASE, falls back to D2MEMBASE; hex,
 // low 24 bits zero; 0 = identity). The guest keeps its validated memory
@@ -661,6 +749,10 @@ public:
             // without going through write()/arena_check, so it must carry
             // the SAME bound, or a wild pointer would alias the host heap.
             dyn86_mi_set_span(g_arena_span);
+#ifdef __vita__
+            g_arena_span_fwd = g_arena_span;
+            dyn86_vita_set_arena(g_mb, g_arena_span);
+#endif
             fprintf(stderr, "[cpu_box86] arena: block=%p size=0x%llx membase=0x%lx (Vita single-block model)\n",
                     blk, (unsigned long long)sz, (unsigned long)g_mb);
         } else if (const char* mbs = getenv("WX86_MEMBASE") ? getenv("WX86_MEMBASE")
@@ -683,7 +775,9 @@ public:
         emu_.df = d_none;
         dyn86_emu_register(&emu_);     // grace de l'eviction JIT: l'emu de base aussi
         dyn86_diag_emu = &emu_;
-#ifndef __vita__
+#ifdef __vita__
+        dyn86_vita_fault_install();    // kubridge abort handler (no-op without the plugin)
+#else
         struct sigaction sa;
         std::memset(&sa, 0, sizeof sa);
         sa.sa_sigaction = diag_segv;
@@ -1548,3 +1642,125 @@ Cpu* make_cpu_box86() {
 } // namespace d2rt
 
 #endif // __arm__
+
+#ifdef __vita__
+extern "C" { void DynaCall(x86emu_t* emu, uintptr_t addr); void arm_epilog_fast(void); }   // dynarec.c / arm_epilog.S
+#include <psp2/kernel/processmgr.h>
+namespace d2rt { namespace {
+// Deliver a guest access violation to the game's top-level exception filter
+// (SetUnhandledExceptionFilter), the way ntdll's dispatcher would when no
+// frame-based handler claims it: EXCEPTION_RECORD + CONTEXT built on the
+// guest stack below ESP (scratch by the Win32 contract), EXCEPTION_POINTERS
+// as the single argument, then the filter runs as ordinary translated code.
+// Fog's filter writes Crash.txt from that CONTEXT and calls ExitProcess --
+// the runtime's clean-exit path, logs flushed, the report picked up at the
+// next boot. If the filter returns instead, the process is ended here: the
+// faulting activation was abandoned and cannot be resumed.
+// Leave the abandoned dynablock activation for good: quit the outer DynaRun
+// the way a block does (arm_epilog_fast restores the stack pointer arm_prolog
+// saved in emu->xSPSave and returns into DynaRun's loop; quit=1 ends it), so
+// CpuBox86::run() returns to the runner, which sees the shutdown and finishes
+// the thread -- the scheduler's teardown can then join it. Parking the thread
+// instead (first attempt) blocked that join: three faulting threads, a frozen
+// game, no exit.
+static void __attribute__((noreturn)) seh_escape(x86emu_t* emu) {
+    emu->quit = 1;
+    __asm__ volatile("mov r0, %0\n\tb arm_epilog_fast" : : "r"(emu) : "r0", "memory");
+    __builtin_unreachable();
+}
+extern "C" void dyn86_seh_deliver(const dyn86_fault_t* f) {
+    x86emu_t* emu = t_emu ? t_emu : dyn86_diag_emu;
+    for (int i = 0; i < 8; ++i) emu->regs[i].dword[0] = f->live[i];
+    emu->ip.dword[0] = f->x86insn;
+    const uint32_t esp  = f->live[4];
+    const uint32_t base = (esp - 0x400u) & ~0xFu;
+    const uint32_t rec = base, ctx = base + 0x60u, ptrs = ctx + 0x2D0u;
+    auto W = [](uint32_t va, uint32_t v) { *(uint32_t*)H(va) = v; };
+    std::memset(H(base), 0, 0x400u);
+    W(rec + 0x00, 0xC0000005u);                     // EXCEPTION_ACCESS_VIOLATION
+    W(rec + 0x0C, f->x86insn);                      // ExceptionAddress
+    W(rec + 0x10, 2u);                              // NumberParameters
+    W(rec + 0x14, (f->fsr & 0x800u) ? 1u : 0u);     // 0 = read, 1 = write
+    W(rec + 0x18, f->gaddr);
+    W(ctx + 0x00, 0x10007u);                        // CONTEXT_FULL
+    W(ctx + 0x9C, f->live[7]); W(ctx + 0xA0, f->live[6]); W(ctx + 0xA4, f->live[3]);   // Edi Esi Ebx
+    W(ctx + 0xA8, f->live[2]); W(ctx + 0xAC, f->live[1]); W(ctx + 0xB0, f->live[0]);   // Edx Ecx Eax
+    W(ctx + 0xB4, f->live[5]); W(ctx + 0xB8, f->x86insn); W(ctx + 0xBC, 0x1Bu);        // Ebp Eip SegCs
+    W(ctx + 0xC0, 0x202u);     W(ctx + 0xC4, esp);        W(ctx + 0xC8, 0x23u);        // EFlags Esp SegSs
+    W(ptrs + 0, rec); W(ptrs + 4, ctx); W(ptrs + 8, 0);   // +8: DispatcherContext scratch dword
+    // Runs an x86 function with up to four cdecl arguments below the records;
+    // DynaCall pushes the return trap itself. Parks the thread if the call
+    // ended because the guest asked to leave (ExitProcess from its __except).
+    // Same protocol as Bridge::call_va (the boot's way of calling guest
+    // code): args pushed cdecl, the return address is the bridge SENTINEL --
+    // a trap-window address the dispatcher reads as "finished" without
+    // touching EAX -- and run() executes until it is reached. (A first cut
+    // used DynaCall's own exit stub: it goes through a shim trap, and the
+    // trap's return value overwrote EAX -- the "disposition" read was junk.)
+    auto call4 = [&](uint32_t fn, uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3) -> uint32_t {
+        const uint32_t sp = base - 32u;
+        W(sp + 4, a0); W(sp + 8, a1); W(sp + 12, a2); W(sp + 16, a3);
+        W(sp, dyn86_seh_sentinel());
+        emu->regs[4].dword[0] = sp;
+        emu->regs[5].dword[0] = 0;
+        // run() returns at every slice end, not only at the sentinel: the
+        // block-budget preemption (take_limit_hit) and advisory yields hand
+        // control back with EIP at the resume point -- the scheduler's runner
+        // loops on exactly this, so does this call. Only the sentinel (or the
+        // guest asking to leave, or a fault) ends it.
+        const char* fault = nullptr; bool ok = true; uint32_t eip = fn; int slices = 0;
+        for (;;) {
+            ok = g_instance->run(eip, &fault);
+            ++slices;
+            if (!ok || dyn86_seh_exit_requested()) break;
+            eip = emu->ip.dword[0];
+            if (eip == dyn86_seh_sentinel()) break;
+            (void)g_instance->take_limit_hit();
+            if (slices > 200000) { fault = "dispatch SEH sans fin"; ok = false; break; }
+        }
+        { char m[160]; snprintf(m, sizeof m, "SEH: retour de %08x : ok=%d EAX=%08x tranches=%d%s%s", fn, ok ? 1 : 0,
+                                emu->regs[0].dword[0], slices, fault ? " faute=" : "", fault ? fault : ""); wx86_vita_progress_c(m); }
+        if (dyn86_seh_exit_requested()) { wx86_vita_progress_c("SEH: le jeu a demande la sortie depuis son handler — le fil rejoint l'arret propre");
+                                          seh_escape(emu); }
+        if (!ok) { dyn86_seh_terminate("faute pendant le dispatch SEH"); seh_escape(emu); }
+        return emu->regs[0].dword[0];
+    };
+    { char m[200];
+      snprintf(m, sizeof m, "SEH: EXCEPTION_ACCESS_VIOLATION (%s %08x) a x86=%08x — dispatch sur la chaine fs:[0] puis le filtre global",
+               (f->fsr & 0x800u) ? "ecriture" : "lecture", f->gaddr, f->x86insn);
+      wx86_vita_progress_c(m); }
+    dyn86_seh_before_dispatch(f->gaddr);
+    // 1. Frame-based handlers, innermost first (RtlDispatchException): each
+    //    EXCEPTION_REGISTRATION {next, handler} gets (record, frame, context,
+    //    dispatcher). MSVC's _except_handler3 runs the __except filter and,
+    //    on EXCEPTION_EXECUTE_HANDLER, unwinds and JUMPS into the __except
+    //    block -- the call never returns here; a disposition that does come
+    //    back is 1 = ExceptionContinueSearch (0 = continue execution, which
+    //    an abandoned dynablock activation cannot honour).
+    const uint32_t tib = (uint32_t)emu->segs_offs[_FS];
+    uint32_t frame = *(uint32_t*)H(tib);
+    for (int depth = 0; frame != 0xFFFFFFFFu && frame != 0 && depth < 32; ++depth) {
+        const uint32_t next = *(uint32_t*)H(frame), handler = *(uint32_t*)H(frame + 4);
+        { char m[120]; snprintf(m, sizeof m, "SEH: cadre %d @%08x handler=%08x", depth, frame, handler); wx86_vita_progress_c(m); }
+        const uint32_t disp = call4(handler, rec, frame, ctx, ptrs + 8);
+        { char m[96]; snprintf(m, sizeof m, "SEH: cadre %d -> disposition %u", depth, disp); wx86_vita_progress_c(m); }
+        if (disp == 0) { wx86_vita_progress_c("SEH: ExceptionContinueExecution non supporte (activation abandonnee)"); break; }
+        frame = next;
+    }
+    // 2. The top-level filter (SetUnhandledExceptionFilter), then no way on:
+    //    the faulting activation is gone, so a filter that returns is the end.
+    const uint32_t filter = dyn86_seh_filter_get();
+    uint32_t r = 0;
+    if (filter) {
+        { char m[120]; snprintf(m, sizeof m, "SEH: filtre global %08x", filter); wx86_vita_progress_c(m); }
+        r = call4(filter, ptrs, 0, 0, 0);
+    }
+    { char m[180];
+      snprintf(m, sizeof m, r == 1 ? "SEH: filtre global -> EXECUTE_HANDLER : le jeu a ecrit son rapport, terminaison (comme Windows apres UnhandledExceptionFilter)"
+                                   : "SEH: personne n'a rattrape l'exception (filtre global -> %d) — arret propre", (int)r);
+      wx86_vita_progress_c(m); }
+    dyn86_seh_terminate(r == 1 ? "EXCEPTION_ACCESS_VIOLATION rapportee par le jeu" : "EXCEPTION_ACCESS_VIOLATION non rattrapee");
+    seh_escape(emu);
+}
+} } // namespace d2rt::(anon)
+#endif // __vita__

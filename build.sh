@@ -86,7 +86,7 @@ $DYN86/dyn86_emitprof.c
 $DYN86/dyn86_memintrin.c
 $DYN86/dyn86_intrin.c
 "
-[ "${TARGET:-}" = vita ] && CORE_SRC="$CORE_SRC $SHIM/vita/mman_vita.c"
+[ "${TARGET:-}" = vita ] && CORE_SRC="$CORE_SRC $SHIM/vita/mman_vita.c $SHIM/vita/fault_vita.c"
 
 ASM_SRC="
 $B86/dynarec/arm_prolog.S

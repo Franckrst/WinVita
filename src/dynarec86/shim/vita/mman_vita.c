@@ -18,6 +18,8 @@
 
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/processmgr.h>
+#include <psp2/vshbridge.h>   /* _vshKernelSearchModuleByName: is kubridge loaded? */
+#include "kubridge_min.h"
 #include <pthread.h>
 
 /* Registry of live blocks: munmap frees whole blocks by exact base (that is
@@ -35,7 +37,7 @@ void wx86_vita_progress_c(const char* msg);
  * sync (dyn86_vita_clear_cache) needs it, and a placeholder uid there makes
  * the sync fail silently: emitted code never becomes executable and boot
  * dies right after the pool is reserved. */
-typedef struct { void* base; size_t size; SceUID uid; int vm; int pool; } Blk;
+typedef struct { void* base; size_t size; SceUID uid; int vm; int pool; int ku; } Blk;   /* ku: kubridge RWX, synced by kuKernelFlushCaches */
 static Blk g_blk[DYN86_MAXBLK];
 /* Registry lock: mmap() is reached under TWO different upstream locks --
  * customMalloc holds mutex_blocks (RW blocks), AllocDynarecMap holds
@@ -179,7 +181,7 @@ unsigned int dyn86_rw_cur  = 0;   /* bytes in plain RW blocks */
  * segment count (default 2, so 32 MiB of total pool). A segment is opened
  * LAZILY, only once the previous one is full -- never all at once at boot. */
 #define JITPOOL_MAX_SEGS 8
-typedef struct { void* base; size_t size, used; SceUID uid; } JitSeg;
+typedef struct { void* base; size_t size, used; SceUID uid; int ku; } JitSeg;
 static JitSeg    g_jitseg[JITPOOL_MAX_SEGS];
 static int       g_jitseg_n = 0;          /* segments actually opened */
 static unsigned  g_jitseg_cap_mb = 0;     /* target size per segment, 0 = not read yet */
@@ -244,6 +246,59 @@ static unsigned  g_jitthresh_pct = 0;     /* fill % that arms an eager grow */
 static unsigned  g_jiteager_mark = 0;     /* pool bytes used at the last eager try */
 static int       g_jiteager_full = 0;     /* eager side done: target reached */
 
+/* kubridge (optional kernel plugin): executable memory OUTSIDE the VM domain.
+ * sceKernelAllocMemBlockForVM is a 16 MiB quota PER PROCESS, not per block:
+ * proven on console 2026-09-24 (kutest) -- a second 1 MiB VM block is refused
+ * (0x80024B0B) with 220 MiB of user memory free, so no amount of freed RAM
+ * ever bought this pool its second segment. kuKernelMemReserve(USER_RX) +
+ * kuKernelMemCommit(R|W|X) hands back memory that is written in place and
+ * executed, i.e. it behaves exactly like a VM block minus the domain sync
+ * (kuKernelFlushCaches instead). The stub is linked WEAK and these calls are
+ * only ever made when the module is loaded. */
+static int kubridge_present(void) {
+    static int v = -1;
+    if (v < 0) {
+        int unk[2] = {0, 0};
+        v = _vshKernelSearchModuleByName("kubridge", unk) >= 0 ? 1 : 0;
+        /* WX86_KUBRIDGE=0 / D2_KUBRIDGE=0: behave as if the plugin were not
+         * loaded -- the way to test the fallback path on a console that has it. */
+        { const char* e = getenv("WX86_KUBRIDGE"); if (!e) e = getenv("D2_KUBRIDGE");
+          if (v && e && *e == '0') { v = 0; wx86_vita_progress_c("JIT: kubridge IGNORE sur demande (D2_KUBRIDGE=0) — chemin sans plugin"); } }
+        wx86_vita_progress_c(v ? "JIT: kubridge present — segments RWX hors quota VM disponibles pour la piscine"
+                               : "JIT: kubridge absent — piscine limitee au quota VM du noyau (16 Mo, un seul segment)");
+    }
+    return v;
+}
+int dyn86_vita_kubridge(void) { return kubridge_present(); }
+
+/* Host range of the guest arena (cpu_box86 sets it once the block exists).
+ * The real mprotect below is bounded to it: box86 also mprotects its own
+ * JIT chunks (custommem.c) and those live in VM / kubridge segments whose
+ * protection is not ours to touch. */
+static uintptr_t g_arena_lo = 0, g_arena_hi = 0;
+void dyn86_vita_set_arena(uintptr_t host_base, size_t len) { g_arena_lo = host_base; g_arena_hi = host_base + len; }
+
+/* Guard page(s): PROT_NONE on a host range inside the arena. A guest wild
+ * pointer that lands there faults at the source instead of silently
+ * aliasing a neighbour (see cpu_box86.cpp on H(va)=va+membase). Returns 0
+ * without the plugin -- the range then stays plain RW, exactly as before. */
+int dyn86_vita_guard(uintptr_t host_addr, size_t len) {
+    if (!kubridge_present()) return 0;
+    uintptr_t lo = host_addr & ~(uintptr_t)0xFFF, hi = (host_addr + len + 0xFFF) & ~(uintptr_t)0xFFF;
+    if (hi <= lo) return 0;
+    int rc = kuKernelMemProtect((void*)lo, (SceSize)(hi - lo), KU_KERNEL_PROT_NONE);
+    return rc < 0 ? 0 : 1;
+}
+
+static int jitseg_from_kubridge(size_t want, void** pb, SceUID* uid) {
+    void* kb = 0;
+    SceUID r = kuKernelMemReserve(&kb, (SceSize)want, SCE_KERNEL_MEMBLOCK_TYPE_USER_RX);
+    if (r < 0 || !kb) return r < 0 ? (int)r : -1;
+    int rc = kuKernelMemCommit(kb, (SceSize)want, KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_EXEC, NULL);
+    if (rc < 0) { sceKernelFreeMemBlock(r); return rc; }
+    *pb = kb; *uid = r; return 0;
+}
+
 /* Tries to open ONE more segment. Returns 0 without touching the kernel if
  * the configured cap is already reached OR a previous attempt already
  * failed (no hammering the kernel on every new PROT_EXEC block request). */
@@ -289,7 +344,19 @@ static int jitpool_grow(int eager) {
      * SMRD2J34ZXU2A55I: 52 of the 62 claims received from 0.1.6, at ~45 min of
      * play, after "JIT: segment 2/2 de 16 Mo REFUSE" and 130 refused 2 MiB
      * fallbacks). Taking the 4 MiB that ARE free beats taking nothing. */
-    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0;
+    SceUID u = -1, last_rc = 0; void* pb = 0; size_t want = 0; int ku = 0;
+    /* Segment 1 is a VM block (no plugin needed, same as always). From the
+     * second one on, the VM quota is already spent, so ask kubridge when it
+     * is there; without it the VM ladder runs as before and reports the
+     * refusal it always reported. */
+    if (g_jitseg_n >= 1 && kubridge_present()) {
+        for (unsigned mb = g_jitseg_cap_mb; mb >= 1u; mb >>= 1) {
+            want = (size_t)mb << 20;
+            int rc = jitseg_from_kubridge(want, &pb, &u);
+            if (rc == 0 && pb) { ku = 1; break; }
+            last_rc = rc; u = -1; pb = 0;
+        }
+    } else
     for (unsigned mb = g_jitseg_cap_mb; mb >= 1u; mb >>= 1) {
         want = (size_t)mb << 20;
         u = sceKernelAllocMemBlockForVM("dyn86_jitpool", want);
@@ -331,7 +398,7 @@ static int jitpool_grow(int eager) {
         return 0;
     }
     g_jitseg[g_jitseg_n].base = pb; g_jitseg[g_jitseg_n].size = want; g_jitseg[g_jitseg_n].used = 0;
-    g_jitseg[g_jitseg_n].uid = u;
+    g_jitseg[g_jitseg_n].uid = u; g_jitseg[g_jitseg_n].ku = ku;
     ++g_jitseg_n;
     dyn86_jitpool_size += (unsigned int)want;
     /* Say what the pool IS, what it was asked to be, WHO asked, and what is
@@ -346,9 +413,9 @@ static int jitpool_grow(int eager) {
         SceKernelFreeMemorySizeInfo fi; fi.size = sizeof fi;
         int frc = sceKernelGetFreeMemorySize(&fi);
         snprintf(m, sizeof m,
-            "JIT: segment %d/%u de %u Mo reserve (%s) — piscine %u Mo ; cible %u Mo ; libre user %d Ko",
+            "JIT: segment %d/%u de %u Mo reserve (%s%s) — piscine %u Mo ; cible %u Mo ; libre user %d Ko",
             g_jitseg_n, g_jitseg_max, (unsigned)(want >> 20),
-            eager ? "anticipe" : "a la demande", dyn86_jitpool_size >> 20,
+            eager ? "anticipe" : "a la demande", ku ? ", via kubridge RWX hors quota VM" : "", dyn86_jitpool_size >> 20,
             g_jitseg_cap_mb * g_jitseg_max, frc < 0 ? -1 : (int)(fi.size_user >> 10));
         wx86_vita_progress_c(m); }
     return 1;
@@ -613,6 +680,7 @@ void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset)
                 g_blk[slot].uid  = s->uid;   /* the SEGMENT's uid: required by the VM sync */
                 g_blk[slot].vm   = 1;
                 g_blk[slot].pool = 1;              /* do NOT return to the kernel on munmap */
+                g_blk[slot].ku   = s->ku;
                 /* Anticipated growth. Placed HERE and not earlier because it
                  * can open a segment and therefore invalidate `s`
                  * (&g_jitseg[g_jitseg_n-1]); every dereference of `s` is
@@ -715,9 +783,36 @@ int munmap(void* addr, size_t length) {
     return 0;
 }
 
+extern int dyn86_protectdb(void);   /* dyn86.c: the SMC write-barrier switch */
+uint32_t dyn86_vita_mprotect_calls = 0;
+/* Host ranges the real mprotect leaves alone even with the barrier armed:
+ * guest code pages the host rewrites constantly (MISC: stubs next to
+ * strings; the trap window; stacks). box86's own bookkeeping (PROT_DYNAREC,
+ * isprotectedDB) stays exactly as on every other page -- FillBlock relies on
+ * it -- only the hardware protection is skipped, so a store there never
+ * faults and never costs a barrier round trip. (PROT_NEVERPROT was tried for
+ * this and made the game crawl: it also drops the bookkeeping.) */
+static uintptr_t g_excl_lo[8], g_excl_hi[8]; static int g_excl_n = 0;
+void dyn86_vita_mprotect_exclude(uintptr_t host_lo, size_t len) {
+    if (g_excl_n < 8) { g_excl_lo[g_excl_n] = host_lo; g_excl_hi[g_excl_n] = host_lo + len; ++g_excl_n; }
+}
 int mprotect(void* addr, size_t len, int prot) {
-    (void)addr; (void)len; (void)prot;
-    return 0;   /* see header: intentionally a no-op on Vita */
+    /* Historically a no-op (see the header): without a fault handler a
+     * write-protected page turned a guest self-write into a hard crash. With
+     * kubridge the barrier is real, but only inside the guest arena -- the
+     * calls box86 makes on its own JIT chunks (custommem.c) stay no-ops --
+     * and only while dyn86_protectdb() is armed. */
+    if (!dyn86_protectdb() || !g_arena_hi) return 0;
+    uintptr_t lo = (uintptr_t)addr & ~(uintptr_t)0xFFF, hi = ((uintptr_t)addr + len + 0xFFF) & ~(uintptr_t)0xFFF;
+    if (lo < g_arena_lo || hi > g_arena_hi || hi <= lo) return 0;
+    for (int i = 0; i < g_excl_n; ++i) if (lo < g_excl_hi[i] && hi > g_excl_lo[i]) return 0;
+    if (!kubridge_present()) return 0;
+    SceUInt32 kp = 0;
+    if (prot & PROT_READ)  kp |= KU_KERNEL_PROT_READ;
+    if (prot & PROT_WRITE) kp |= KU_KERNEL_PROT_WRITE;
+    if (prot & PROT_EXEC)  kp |= KU_KERNEL_PROT_EXEC;
+    ++dyn86_vita_mprotect_calls;
+    return kuKernelMemProtect((void*)lo, (SceSize)(hi - lo), kp) < 0 ? -1 : 0;
 }
 
 uint64_t dyn86_sync_us = 0;   /* cumulative cache-sync wall time (watchdog) */
@@ -743,7 +838,9 @@ void dyn86_vita_clear_cache(void* beg, void* end) {
     uintptr_t hi = ((uintptr_t)end + 0xFFF) & ~(uintptr_t)0xFFF;
     if (lo < base) lo = base;
     if (hi > top)  hi = top;
-    if (hi <= lo || sceKernelSyncVMDomain(b->uid, (void*)lo, (SceSize)(hi - lo)) < 0)
+    if (b->ku) {                                 /* kubridge segment: plain RWX pages, no VM domain */
+        if (hi > lo) kuKernelFlushCaches((void*)lo, (SceSize)(hi - lo));
+    } else if (hi <= lo || sceKernelSyncVMDomain(b->uid, (void*)lo, (SceSize)(hi - lo)) < 0)
         sceKernelSyncVMDomain(b->uid, b->base, b->size);
     dyn86_sync_us += sceKernelGetProcessTimeWide() - t0;
 }
