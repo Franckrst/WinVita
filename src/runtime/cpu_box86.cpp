@@ -40,6 +40,7 @@
 #include "runtime/cpu.h"    // MUST be included before the Box86 headers:
                             // Box86's regs.h #defines R_EAX & friends.
 #include "runtime/gil.h"    // GIL guard at the trap dispatch (inert under the cooperative backend)
+#include "runtime/host_clock.h" // wx86_now_us (g_runacc guest-run segments)
 #include "runtime/trapcnt.h"// per-slot acquisition counter: the intrinsic path
                             // bypasses the Bridge, so this is where it must be
                             // counted (dependency-free header)
@@ -229,6 +230,12 @@ static inline void wx86_prof_zooms(uint32_t rva) {
     if ((k = wx86_prof_zoom(m.zoom_256,   8, 16, rva)) >= 0) ++d2rt_eipprof_fn[k];
 }
 
+// g_runacc: see the contract above t_emu, inside the namespace. At FILE
+// scope for the same linkage reason as the extern "C" blocks above; the
+// reader/arm functions are at the end of the file.
+static bool g_runacc = false;
+static x86emu_t* g_base_emu = nullptr;   // emu_ of the (single) CpuBox86, for the reader
+
 namespace d2rt {
 namespace {
 
@@ -382,6 +389,7 @@ int dyn86_protectdb(void);                                // dyn86.c
 void dyn86_vita_set_arena(uintptr_t host_base, size_t len); // mman_vita.c: bounds the real mprotect
 void dyn86_vita_mprotect_exclude(uintptr_t host_lo, size_t len); // mman_vita.c: ranges the barrier skips
 void wx86_vita_progress_c(const char* msg);               // platform/vita_host.h (included further down)
+void wx86_vita_progress_flush_c(void);                    // idem: the fault record must reach the file now
 }
 static uint32_t g_arena_span_fwd;     // set with g_arena_span below (declared later in this file)
 extern "C" int dyn86_fault_handle(dyn86_fault_t* f) {
@@ -427,7 +435,7 @@ extern "C" int dyn86_fault_handle(dyn86_fault_t* f) {
         x86insn, db ? (unsigned)(uintptr_t)db->x86_addr : 0u,
         f->live[0], f->live[1], f->live[2], f->live[3], f->live[4], f->live[5], f->live[6], f->live[7]);
     if (n > 0 && dyn86_crash_fd >= 0) { ssize_t w = write(dyn86_crash_fd, cb, (size_t)n); (void)w; fsync(dyn86_crash_fd); }
-    if (n > 0) { cb[n-1] = 0; wx86_vita_progress_c(cb); }
+    if (n > 0) { cb[n-1] = 0; wx86_vita_progress_c(cb); wx86_vita_progress_flush_c(); }
     f->x86insn = x86insn; f->gaddr = in_arena ? gaddr : f->far;
     // 3. A guest access violation with a registered top-level filter: deliver
     //    it as Windows would (dyn86_seh_deliver, via the trampoline). Only
@@ -578,6 +586,22 @@ static bool g_noEmuOpt = false;
 // check (the pattern used by every knob in this file). Also armed by
 // D2_COEUR_SERVEUR.
 static bool g_filstat = false;
+// Per-thread GUEST RUN TIME (x86emu_t::dyn86_runacc_us, flag g_runacc
+// declared at file scope above `namespace d2rt`), armed by rt_boot
+// through wx86_runacc_arm() (D2_LAGWATCH). The scheduler's dyn86_jp_run_us
+// is only credited when cpu->run() RETURNS — and under D2SCHED=native the
+// budget is infinite, so the game thread almost never returns: the frame
+// profile read run=0 on 200 ms frames that were busy computing. Here a
+// segment opens when translated code resumes after a trap and closes when
+// the next trap reaches the Bridge, so the counter is exact at every trap
+// boundary — in particular inside d2vGlideFlush, where the frame tick runs.
+// Intrinsics do NOT close the segment (their time is guest work done
+// natively, and closing would cost two clock reads on ~20k calls/frame).
+// GIL acquisition at the trap window also stays inside the segment (it sits
+// before try_intrinsic); D2_FILSTAT's /w column measures it separately.
+// Guest callbacks run from a shim (nested run()) count for their own
+// segments, so nothing is counted twice. Cost when armed: two clock reads
+// per REAL trap (~850/frame in Act V). Off: one bool check per trap.
 static __thread x86emu_t* t_emu = nullptr;
 // D2_TIMEPROF per-thread servo state. Kept at file scope rather than a class
 // static member: a `static __thread` member needs an out-of-class
@@ -627,6 +651,7 @@ struct TrapGuard {
 class CpuBox86 : public Cpu {
 public:
     CpuBox86() {
+        g_base_emu = &emu_;
         // emutls-optimization rollback flag, read ONCE: env.txt is already
         // loaded by the time this constructor runs.
         g_noEmuOpt = getenv("WX86_NOEMUOPT") || getenv("D2_NOEMUOPT");
@@ -721,7 +746,7 @@ public:
                 { char m[112];
                     snprintf(m, sizeof m, "FATAL: arena alloc failed (%llu MB) — see the mmap FAIL line above",
                              (unsigned long long)(sz >> 20));
-                    wx86_vita_progress_c(m); }
+                    wx86_vita_progress_c(m); wx86_vita_progress_flush_c(); }
                 _exit(2); }
             // membase must have zero low 24 bits (single-ADD imm8-ror-8). mmap is
             // page-aligned; round the *guest→host delta* up to 16 MiB and rely on
@@ -1025,9 +1050,13 @@ public:
     // comparison. Inside the window, the index is exact: no more probing, no
     // more key comparison, and a SINGLE table instead of two (ikey_ and ifn_
     // were two separate cache lines on a hit).
-    // If the window exceeded kDirectMax slots, the index is NOT armed and the
-    // probe path takes over: idir_n_ == 0 rejects everything (see
-    // rebuild_direct).
+    // The window covers the LARGEST group of registered slots that fits in
+    // kDirectMax slots; a slot registered far away from it (d2vGlideDraw,
+    // allocated long after the KERNEL32 ones) is served by the probe path
+    // below. Before 26/09/2026 such a slot DISARMED the index entirely —
+    // and since this branch never fell back to the probe, EVERY intrinsic
+    // (GetTickCount, critical sections...) silently went back through the
+    // Bridge: console Act V dropped from ~21 to ~14.5 fps.
     static constexpr uint32_t kDirectMax = 256;   // 256 slots = 4 KiB of VA
 
     inline bool try_intrinsic(uint32_t slot) {
@@ -1037,8 +1066,8 @@ public:
         const unsigned long long tls0 = d2_tls_hits;
 #endif
         bool served = false;
-        if (g_b5index) {
-            const uint32_t d = (slot - idir_lo_) >> 4;   // unsigned: below lo wraps to huge
+        const uint32_t d = (slot - idir_lo_) >> 4;   // unsigned: below lo wraps to huge
+        if (g_b5index && (d < idir_n_ || !idir_out_)) {
             if (d < idir_n_) {
 #ifdef D2_B5CENSUS
                 ++d2rt_b5_loads;
@@ -1103,18 +1132,28 @@ public:
     // index is only a projection of it, so both paths serve EXACTLY the same
     // set of slots and the same function.
     void rebuild_direct() {
-        uint32_t lo = 0xFFFFFFFFu, hi = 0;
-        for (uint32_t i = 0; i <= kIntrinMask; ++i)
-            if (ikey_[i]) { if (ikey_[i] < lo) lo = ikey_[i]; if (ikey_[i] > hi) hi = ikey_[i]; }
-        idir_n_ = 0; d2rt_b5_direct_n = 0;
-        if (!hi) return;
+        // Registered slots, sorted; then the start that covers the most of
+        // them within kDirectMax slots. Slots left outside set idir_out_,
+        // which sends misses of the window to the probe path.
+        uint32_t k[kIntrinMask + 1]; uint32_t n = 0;
+        for (uint32_t i = 0; i <= kIntrinMask; ++i) if (ikey_[i]) k[n++] = ikey_[i];
+        for (uint32_t a = 1; a < n; ++a) { const uint32_t v = k[a]; uint32_t b = a;
+            while (b && k[b - 1] > v) { k[b] = k[b - 1]; --b; } k[b] = v; }
+        idir_n_ = 0; idir_out_ = false; d2rt_b5_direct_n = 0;
+        if (!n) return;
+        uint32_t best = 0, bestCnt = 0;
+        for (uint32_t a = 0, b = 0; a < n; ++a) {
+            while (b < n && ((k[b] - k[a]) >> 4) < kDirectMax) ++b;
+            if (b - a > bestCnt) { bestCnt = b - a; best = a; }
+        }
+        const uint32_t lo = k[best], hi = k[best + bestCnt - 1];
         const uint32_t span = ((hi - lo) >> 4) + 1;
-        if (span > kDirectMax) return;             // window too wide: index NOT armed
-        idir_lo_ = lo;
         for (uint32_t d = 0; d < span; ++d) idir_[d] = nullptr;
         for (uint32_t i = 0; i <= kIntrinMask; ++i)
-            if (ikey_[i]) idir_[(ikey_[i] - lo) >> 4] = ifn_[i];
+            if (ikey_[i] && ikey_[i] >= lo && ikey_[i] <= hi) idir_[(ikey_[i] - lo) >> 4] = ifn_[i];
+        idir_lo_ = lo;
         idir_n_ = span;
+        idir_out_ = bestCnt < n;
         d2rt_b5_direct_n = span; d2rt_b5_direct_lo = lo;
     }
     void set_intrinsics_enabled(bool on) override { no_intrinsics_ = !on; }
@@ -1239,6 +1278,7 @@ public:
         if (e && !g_multi_emu.load(std::memory_order_relaxed)) {
             std::fprintf(stderr, "FATAL: thread_emu_bind(non nul) sans thread_emu_create — invariant E() rompu\n");
             wx86_vita_progress_c("FATAL: invariant E() rompu (bind sans create)");
+            wx86_vita_progress_flush_c();
             std::abort();
         }
         t_emu = (x86emu_t*)e;
@@ -1438,6 +1478,12 @@ public:
             *pa = fresh;                                                // (4) deltas resume
         }
         EMU().dyn86_bbreak = 0;
+        // Guest-run segment (g_runacc): opened here and after every trap,
+        // closed before every exit from this function and at every trap
+        // that reaches the Bridge. `seg0 == 0` = no open segment.
+        uint64_t seg0 = g_runacc ? wx86_now_us() : 0;
+        auto seg_close = [&]() {
+            if (seg0) { EMU().dyn86_runacc_us += wx86_now_us() - seg0; seg0 = 0; } };
         for (;;) {
             EMU().quit = 0;
             const uint32_t start = EMU().ip.dword[0];
@@ -1456,11 +1502,13 @@ public:
                 if (g_eipProf) eipprof_sample(ip);   // block-entry-based profile
                 if (d2rt_timeprof_on)                // time-based profile
                     timeprof_sample(ip, tp_budget ? tp_budget : 2048);
+                seg_close();
                 return true; }
             // LinkNext seam break (request_stop seen at a not-yet-linked seam):
             // preempted but resumable at EIP = the pending chain target.
-            if (int b = dyn86_take_break()) { t_preempt = b; return true; }
+            if (int b = dyn86_take_break()) { t_preempt = b; seg_close(); return true; }
             if (EMU().error) {
+                seg_close();
                 t_fault_addr = ip;
                 t_fault_err = EMU().error;     // ERR_UNIMPL=1 / ERR_DIVBY0=2 / ERR_ILLEGAL=4
                 // Name the JIT-pool death. An exhausted pool surfaces here as
@@ -1497,11 +1545,14 @@ public:
                 if (g_noEmuOpt) t_fault_addr = slot;   // per-trap write RESTORED (rollback path)
                 EMU().ip.dword[0] = slot;      // consistent state, like CpuUnicorn
                 if (try_intrinsic(slot)) continue;   // fast path: never enters the Bridge
+                seg_close();               // g_runacc: the shim body is not guest time
                 bool resume = trap_fn_(*this, slot);
                 if (!resume) return true;  // sentinel: clean finish
+                if (g_runacc) seg0 = wx86_now_us();
                 continue;                  // resume at handler-set EIP
             }
             // quit without error outside the trap window: clean stop
+            seg_close();
             return true;
         }
     }
@@ -1599,6 +1650,7 @@ private:
     // everything, including before any registration.
     uint32_t    idir_lo_ = 0;
     uint32_t    idir_n_  = 0;
+    bool        idir_out_ = false;                 // some registered slot lies outside the window
     IntrinsicFn idir_[kDirectMax] = {};
     bool   no_intrinsics_ = std::getenv("WX86_DISABLE_INTRINSICS") || std::getenv("D2_DISABLE_INTRINSICS");
     // Fault/preempt state lives in the t_* __thread vars (top of file): with N
@@ -1640,6 +1692,17 @@ Cpu* make_cpu_box86() {
 }
 
 } // namespace d2rt
+
+// g_runacc reader/arm (contract above t_emu). The reader returns the CALLING
+// thread's counter: call it from that thread, inside a trap (the frame tick
+// in d2vGlideFlush), where no segment is open — the value is then exact. One
+// emutls read per call: once per frame, never per trap.
+extern "C" void wx86_runacc_arm(int on) { g_runacc = on != 0; }
+extern "C" int  wx86_runacc_on(void)    { return g_runacc ? 1 : 0; }
+extern "C" uint64_t wx86_runacc_self_us(void) {
+    x86emu_t* e = (d2rt::g_multi_emu.load(std::memory_order_relaxed) && d2rt::t_emu) ? d2rt::t_emu : g_base_emu;
+    return e ? e->dyn86_runacc_us : 0;
+}
 
 #endif // __arm__
 

@@ -51,6 +51,18 @@ extern "C" const char* const wx86_vita_progress_path;
 // under a different symbol name.
 void wx86_vita_progress(const char* msg);
 extern "C" void wx86_vita_progress_c(const char* msg);
+// Closes the log's cached descriptor; the next line reopens it. Call it
+// before renaming or removing the log file.
+void wx86_vita_progress_close();
+// Switches the log to asynchronous writes (buffer + writer thread), unless
+// WX86_JOURNAL_SYNC=1. Call once, after env.txt is loaded.
+void wx86_vita_progress_async_start();
+// Writes every buffered line now (crash paths, exit). No-op when empty.
+void wx86_vita_progress_flush();
+// Ordered teardown: drain, stop and join the writer thread, close the file.
+void wx86_vita_progress_stop();
+extern "C" void wx86_vita_progress_flush_c(void);
+extern "C" uint64_t wx86_vita_progress_self_us(void);
 
 // ---- Real sleep ----------------------------------------------------------
 // The monotonic clock is not here: it lives in runtime/host_clock.h

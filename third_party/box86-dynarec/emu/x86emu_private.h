@@ -172,6 +172,12 @@ typedef struct x86emu_s {
      * DBGetBlock de sa boucle de reessai tout de suite, pour aller chercher la
      * sortie reprenable de DynaRun qui, elle, debloquera la vague. */
     uint32_t    dyn86_evwait;
+    /* D2Vita (audit perf 26/09/2026) : temps MUR passe dans le code traduit
+     * par ce fil, intrinseques compris, traps exclus (wx86_runacc, arme par
+     * D2_LAGWATCH). Ecrit UNIQUEMENT par le fil proprietaire, dans la fenetre
+     * de trap de CpuBox86::run() ; aucun code genere n'y touche. Queue de
+     * structure : aucun offset amont ne bouge. */
+    uint64_t    dyn86_runacc_us;
 } x86emu_t;
 
 #define EMUTYPE_NONE    0
