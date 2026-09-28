@@ -928,8 +928,17 @@ static dynablock_t* internalDBGetBlock(x86emu_t* emu, uintptr_t addr, uintptr_t 
     return block;
 }
 
+/* D2Vita (measurement flavour): what a DBGetBlock costs. The block sampler
+ * put ~1 us per lookup on it (console, 28/09/2026) — far more than a jump
+ * table hit. Counted: calls, lookups that took the need-test path (block
+ * rehash + trylock + protectDB), bytes rehashed, rehashes that found the
+ * block changed. */
+volatile unsigned long long dyn86_dbg_calls = 0, dyn86_dbg_tests = 0, dyn86_dbg_hashb = 0, dyn86_dbg_inval = 0, dyn86_dbg_always = 0;
 dynablock_t* DBGetBlock(x86emu_t* emu, uintptr_t addr, int create)
 {
+#ifdef D2_BLKSAMP
+    ++dyn86_dbg_calls;
+#endif
     if(isInHotPage(addr))
         return NULL;
     // D2_JITPROFILE: time 1 lookup in DYN86_JP_SAMPLE. A single lookup costs
@@ -968,11 +977,17 @@ dynablock_t* DBGetBlock(x86emu_t* emu, uintptr_t addr, int create)
     for(;;) {
         db = internalDBGetBlock(emu, addr, addr, create, 1);
         if(db && db->done && db->block && getNeedTest(addr)) {
+#ifdef D2_BLKSAMP
+            ++dyn86_dbg_tests; dyn86_dbg_hashb += db->x86_size; if(db->always_test) ++dyn86_dbg_always;
+#endif
             if(db->always_test)
                 sched_yield();  // just calm down...
             uint32_t hash = X31_hash_code((void*)DYN86_G2H(db->x86_addr), db->x86_size);
             int need_lock = mutex_trylock(&my_context->mutex_dyndump);
             if(hash!=db->hash) {
+#ifdef D2_BLKSAMP
+                ++dyn86_dbg_inval;
+#endif
                 if(dyn86_jitprof) { ++dyn86_jp_recompiles; dyn86_jp_recomp = 1; }
                 db->done = 0;   // invalidating the block
                 dynarec_log(LOG_DEBUG, "Invalidating block %p from %p:%p (hash:%X/%X, always_test:%d) for %p\n", db, db->x86_addr, db->x86_addr+db->x86_size-1, hash, db->hash, db->always_test, (void*)addr);

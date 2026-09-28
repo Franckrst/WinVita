@@ -25,6 +25,15 @@ int dyn86_jitprof = 0;
 // in debug.h: the translator reads it AT TRANSLATION TIME, so a single binary
 // carries both arms of the A/B. Default 0 keeps the original behavior.
 int box86_dynarec_callret = 0;
+/* D2_BLKSAMP (saveur de mesure) : adresse x86 du dernier bloc ENTRE, ecrite
+ * par le code emis (dynarec_arm_pass.c). Toujours defini : 0 hors saveur, et
+ * le lecteur (d2_timesamp) retombe alors sur l'EIP de l'emu. */
+volatile uint32_t dyn86_blksamp_ip = 0;
+#ifdef D2_BLKSAMP
+const int dyn86_blksamp_built = 1;
+#else
+const int dyn86_blksamp_built = 0;
+#endif
 /* Translator expansion (dynarec_arm.c): bytes emitted / x86 bytes. */
 unsigned long long dyn86_emit_arm_bytes = 0, dyn86_emit_x86_bytes = 0, dyn86_emit_blocks = 0;
 // D2_FORWARD=<n> (default 256 = original box86 value) and D2_BUDGETTAIL=<0|1>
@@ -38,6 +47,26 @@ int box86_dynarec_forward = 256;
  * every arm of the A/B. Default 0 keeps box86 behavior byte-for-byte.
  * These count translation SITES, not executions. */
 int dyn86_nopend = 0;
+/* D2_REPMOVS=1 : REP MOVSD par paquets de 16 octets (NEON) quand DF=0 et que
+ * la destination n'est pas dans les 16 octets qui suivent la source. Lu au
+ * moment de la TRADUCTION (dynarec_arm_00.c) : un seul binaire porte les deux
+ * jambes. Defaut 0 tant que la mesure console n'a pas tranche. */
+int dyn86_repmovs = 0;
+/* D2_INTRINLINE=1 : les creneaux INTRINSEQUES (GetTickCount, sections
+ * critiques...) sont servis EN LIGNE depuis le bloc traduit — stub box86
+ * « CC 'S' 'C' wrapper creneau », appel natif, puis retour direct a
+ * l'appelant (pile CALLRET ou table de sauts) — au lieu de sortir de
+ * DynaRun, prendre le verrou dans CpuBox86::run(), puis rentrer et refaire
+ * la recherche de bloc (~4 us l'aller-retour sur console, ~700 par image a
+ * l'acte V). Lu par CpuBox86 (reecriture des stubs) et par la traduction
+ * (dynarec_arm_00.c). */
+int dyn86_intrinline = 0;
+void (*dyn86_intrin_cb)(x86emu_t* emu, uintptr_t slot) = 0;
+void dyn86_intrin_wrap(x86emu_t* emu, uintptr_t slot)
+{
+    /* The stubs are only rewritten once the callback is set (cpu_box86.cpp). */
+    dyn86_intrin_cb(emu, slot);
+}
 unsigned long dyn86_nopend_dropped = 0, dyn86_nopend_kept = 0, dyn86_nopend_seen = 0;
 /* Deferred-archiving sites, counted AT TRANSLATION TIME (all passes):
  *   need = a consumer in the block needs it (X_PEND)  -> legitimate

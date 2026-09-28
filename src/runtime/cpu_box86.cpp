@@ -79,6 +79,15 @@ extern "C" {
 #include "dynarec/dynablock_private.h"
 #include "dyn86.h"
 #include "dyn86_memintrin.h"    // native memcpy/memset intrinsics (D2_MEMINTRIN)
+// D2_BLKSAMP (measurement flavour): the block sampler's word also names the
+// ENGINE stage of a trap round trip (0xFFFD0000 | stage), so its time splits
+// into JIT exit / lock / Bridge / return path without any clock read.
+#ifdef D2_BLKSAMP
+extern "C" { extern volatile uint32_t dyn86_blksamp_ip; }
+#define BLKSAMP_STAGE(k) (dyn86_blksamp_ip = 0xFFFD0000u | (k))
+#else
+#define BLKSAMP_STAGE(k) ((void)0)
+#endif
 
 void dynarec86_setup_emu_helpers(x86emu_t* emu);    // shim_impl.c
 /* D2Vita (lot eviction JIT) — registre d'emus de la periode de grace
@@ -235,6 +244,15 @@ static inline void wx86_prof_zooms(uint32_t rva) {
 // reader/arm functions are at the end of the file.
 static bool g_runacc = false;
 static x86emu_t* g_base_emu = nullptr;   // emu_ of the (single) CpuBox86, for the reader
+// D2_INTRINLINE (dyn86.c): knob, the in-line wrapper, and its callback into
+// the (single) CpuBox86.
+extern "C" { extern int dyn86_intrinline; extern void (*dyn86_intrin_cb)(x86emu_t*, uintptr_t);
+             void dyn86_intrin_wrap(x86emu_t* emu, uintptr_t slot);
+             dynablock_t* getDB(uintptr_t addr); }
+static void* g_intrin_self = nullptr;   // the (single) CpuBox86
+static uint64_t g_intrinline_stubs = 0, g_intrinline_skip = 0;
+extern "C" void wx86_intrinline_counts(int* on, unsigned long long* stubs, unsigned long long* skip) {
+    if (on) *on = dyn86_intrinline; if (stubs) *stubs = g_intrinline_stubs; if (skip) *skip = g_intrinline_skip; }
 
 namespace d2rt {
 namespace {
@@ -652,6 +670,13 @@ class CpuBox86 : public Cpu {
 public:
     CpuBox86() {
         g_base_emu = &emu_;
+        g_intrin_self = this;
+        {   const char* e = getenv("D2_INTRINLINE"); if (!e) e = getenv("WX86_INTRINLINE");
+            // DEFAULT ON (console, Act V patrol, 8 interleaved passes,
+            // 28/09/2026: guest run -0.9 to -1.25 ms/frame, c0 -2 points).
+            // D2_INTRINLINE=0 goes back to the exit-stub path.
+            dyn86_intrinline = (e && e[0] == '0') ? 0 : 1;
+            if (dyn86_intrinline) dyn86_intrin_cb = &CpuBox86::intrin_inline_cb; }
         // emutls-optimization rollback flag, read ONCE: env.txt is already
         // loaded by the time this constructor runs.
         g_noEmuOpt = getenv("WX86_NOEMUOPT") || getenv("D2_NOEMUOPT");
@@ -1120,11 +1145,53 @@ public:
         if (!va) return;                           // 0 is the "empty slot" sentinel
         uint32_t i = (va >> 4) & kIntrinMask;
         for (uint32_t probe = 0; probe <= kIntrinMask; ++probe, i = (i + 1) & kIntrinMask) {
-            if (ikey_[i] == va) { ifn_[i] = fn; rebuild_direct(); return; }   // replace existing
+            if (ikey_[i] == va) { ifn_[i] = fn; rebuild_direct(); inline_stub(va); return; }   // replace existing
             if (!ikey_[i]) {
                 if (intrin_n_ >= (int)kIntrinMax) return;        // respects the kIntrinMax cap
-                ikey_[i] = va; ifn_[i] = fn; ++intrin_n_; rebuild_direct(); return;
+                ikey_[i] = va; ifn_[i] = fn; ++intrin_n_; rebuild_direct(); inline_stub(va); return;
             }
+        }
+    }
+    // D2_INTRINLINE: turn the slot's EXIT stub (CC 'S' 'C' 00000000) into a
+    // box86 NATIVE-CALL stub (CC 'S' 'C' <dyn86_intrin_wrap> <slot>): the
+    // dynarec then calls the intrinsic from inside the translated code and
+    // returns straight to the caller (dynarec_arm_00.c). Only while the slot
+    // has never been translated: a stub already turned into a block keeps the
+    // exit path (rewriting translated bytes would need an SMC invalidation).
+    // `tag` bit 0 = Bridge path (set_inline_shim) instead of an intrinsic.
+    void inline_stub(uint32_t va, uint32_t tag = 0) {
+        if (!dyn86_intrinline || !trap_mapped_ || va < trap_lo_ || va >= trap_hi_) return;
+        if (getDB(va)) { ++g_intrinline_skip; return; }
+        uint8_t* b = (uint8_t*)H(va);
+        const uint32_t w = (uint32_t)(uintptr_t)&dyn86_intrin_wrap;
+        const uint32_t v = va | tag;
+        b[0] = 0xCC; b[1] = 'S'; b[2] = 'C';
+        std::memcpy(b + 3, &w, 4); std::memcpy(b + 7, &v, 4);
+        ++g_intrinline_stubs;
+    }
+    void set_inline_shim(uint32_t va) override { inline_stub(va, 1u); }
+    // Called by dyn86_intrin_wrap from translated code, on the guest thread,
+    // with the registers already stored in `emu`. Same serialization and the
+    // same dispatch as the trap window of run(); a declined call leaves EIP on
+    // the slot and asks run() to go straight to the Bridge.
+    static void intrin_inline_cb(x86emu_t* emu, uintptr_t slot) {
+        CpuBox86* self = static_cast<CpuBox86*>(g_intrin_self);
+        TrapGuard gg(*emu);
+        if (slot & 1u) {
+            // Whitelisted Bridge shim (set_inline_shim): the Bridge sets EIP
+            // (return address or redirect) itself. `false` = the thread must
+            // leave run() (cooperative yield): quit, and run() sees an EIP
+            // outside the trap window — a clean, resumable stop, as before.
+            const uint32_t va = (uint32_t)slot & ~1u;
+            emu->ip.dword[0] = va;
+            if (!self || !self->trap_fn_ || !self->trap_fn_(*self, va)) emu->quit = 1;
+            return;
+        }
+        emu->ip.dword[0] = (uint32_t)slot;
+        if (!self || !self->try_intrinsic((uint32_t)slot)) {
+            emu->ip.dword[0] = (uint32_t)slot;
+            emu->dyn86_intrin_declined = 1;
+            emu->quit = 1;
         }
     }
     // Rebuilds the direct index from the hash table — a COLD path (a couple
@@ -1485,6 +1552,7 @@ public:
         auto seg_close = [&]() {
             if (seg0) { EMU().dyn86_runacc_us += wx86_now_us() - seg0; seg0 = 0; } };
         for (;;) {
+            BLKSAMP_STAGE(6);              // loop top: the trap's lock is released
             EMU().quit = 0;
             const uint32_t start = EMU().ip.dword[0];
             DynaRun(&EMU());
@@ -1526,8 +1594,10 @@ public:
                 return false;
             }
             uint32_t slot = ip & ~0xFu;    // exit stub leaves EIP inside the slot
+            BLKSAMP_STAGE(1);              // D2_BLKSAMP: back in C++ after the JIT exit
             if (slot >= trap_lo_ && slot < trap_hi_ && trap_fn_) {
                 TrapGuard gg(EMU());       // native: serialize shims/intrinsics; equivalent to gil::Guard without D2_FILSTAT
+                BLKSAMP_STAGE(2);          // lock held
                 // No "t_fault_addr = slot" here. That used to be a write to a
                 // __thread variable, i.e. a full emutls chain
                 // (__emutls_get_address -> pthread_getspecific ->
@@ -1544,9 +1614,12 @@ public:
                 // information.
                 if (g_noEmuOpt) t_fault_addr = slot;   // per-trap write RESTORED (rollback path)
                 EMU().ip.dword[0] = slot;      // consistent state, like CpuUnicorn
-                if (try_intrinsic(slot)) continue;   // fast path: never enters the Bridge
+                if (EMU().dyn86_intrin_declined) EMU().dyn86_intrin_declined = 0;   // D2_INTRINLINE: already declined in line
+                else if (try_intrinsic(slot)) { BLKSAMP_STAGE(4); continue; }   // fast path: never enters the Bridge
                 seg_close();               // g_runacc: the shim body is not guest time
+                BLKSAMP_STAGE(3);          // entering the Bridge
                 bool resume = trap_fn_(*this, slot);
+                BLKSAMP_STAGE(4);          // back from the Bridge: lock release, DynaRun re-entry, block lookup
                 if (!resume) return true;  // sentinel: clean finish
                 if (g_runacc) seg0 = wx86_now_us();
                 continue;                  // resume at handler-set EIP

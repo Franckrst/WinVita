@@ -72,6 +72,7 @@
  * post-increments by dir<<shift. With fastmmu: deref a translated copy in
  * `scr`, then post-add the guest register exactly like the AI form did.
  * AI = the original post-indexed macro, IMM = the plain imm-offset form. */
+extern int dyn86_repmovs;   /* D2_REPMOVS — chemin rapide de REP MOVSD (dyn86.c) */
 #define MMU_SAI4(AI, IMM, data, seg, dir, sh, scr) do{ if(dyn86_membase){ \
         ADD_IMM8_ROR((scr), (seg), (uint8_t)(dyn86_membase>>24), 4); \
         IMM((data), (scr), 0); \
@@ -437,6 +438,13 @@
 // Branch to MARK3 if cond (use j32)
 #define B_MARK3(cond)    \
     j32 = GETMARK3-(dyn->arm_size+8);   \
+    Bcond(cond, j32)
+// Branch to MARKF / MARKF2 if cond (use j32)
+#define B_MARKF(cond)    \
+    j32 = GETMARKF-(dyn->arm_size+8);   \
+    Bcond(cond, j32)
+#define B_MARKF2(cond)   \
+    j32 = GETMARKF2-(dyn->arm_size+8);  \
     Bcond(cond, j32)
 // Branch to next instruction if cond (use j32)
 #define B_NEXT(cond)     \

@@ -22,6 +22,7 @@
 #include "dyn86_memintrin.h"   /* D2Vita : memcpy/memset natifs sans trap */
 #include "dyn86_intrin.h"      /* D2Vita : intrinseques natives, table generique */
 extern int dyn86_nopend;                 /* D2_NOPEND — contrat plus bas */
+extern volatile uint32_t dyn86_blksamp_ip; /* D2_BLKSAMP — dyn86.c */
 extern unsigned long dyn86_nopend_dropped, dyn86_nopend_kept, dyn86_nopend_seen;
 #include "dynarec_arm_helper.h"
 #include "dyn86_memfast.h"     /* D2Vita : chemin court EN LIGNE (D2_MEMINTRIN=3) */
@@ -181,6 +182,19 @@ uintptr_t arm_pass(dynarec_arm_t* dyn, uintptr_t addr)
         D2EP_ACC(probe, D2EP_S_PROBE);
     }
     D2EP_SW(D2EP_ORPHAN);
+#endif
+#ifdef D2_BLKSAMP
+    /* D2Vita : echantillonneur de TEMPS par bloc (saveur de mesure, jamais
+     * livree). L'EIP de l'emu n'est ecrit qu'aux sorties vers le dispatcher :
+     * un fil qui le lit a intervalle fixe nomme « la region apres le dernier
+     * trap », pas le code en cours (docs/audi_perf.md §4). Ici chaque ENTREE
+     * de bloc publie l'adresse x86 du bloc dans un mot global ; le fil
+     * d2_timesamp le lit a intervalle fixe : chaque echantillon vaut le meme
+     * temps. Meme contrainte que le compteur D2_EMITPROF : AVANT la sequence
+     * de budget, taille fixe (MOV32_) identique en passes 2 et 3. */
+    MOV32_(x1, (uintptr_t)&dyn86_blksamp_ip);
+    MOV32_(x2, init_addr);
+    STR_IMM9(x2, x1, 0);
 #endif
     // ---- D2Vita block-entry preemption budget (all passes) -----------------
     // 4-insn fast path: LDR/SUBS/STR the budget in the emu, skip while > 0.
@@ -362,6 +376,16 @@ uintptr_t arm_pass(dynarec_arm_t* dyn, uintptr_t addr)
             reset_n = -1;
         }
         NEW_INST;
+#ifdef D2_BLKSAMP
+        /* Point de retour CALLRET : un `ret` revient ICI sans repasser par un
+         * prologue de bloc. Sans ce marqueur, tout le code de l'appelant
+         * apres l'appel serait compte au dernier bloc de l'appele. */
+        if(ninst && dyn->insts[ninst-1].x86.has_callret) {
+            MOV32_(x1, (uintptr_t)&dyn86_blksamp_ip);
+            MOV32_(x2, ip);
+            STR_IMM9(x2, x1, 0);
+        }
+#endif
         #if STEP == 0
         if(ninst && dyn->insts[ninst-1].x86.barrier_next) {
             BARRIER(dyn->insts[ninst-1].x86.barrier_next);

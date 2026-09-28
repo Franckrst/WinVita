@@ -146,6 +146,8 @@ public:
     // crossings/frame => ~2.3 ms, ~5%) — a measurement instrument, never
     // enabled during normal play.
     int natprof_window(char* out, unsigned n, int topk);
+    // Stable tag of slot i ("DLL!name"), or nullptr. For wx86_natprof_frame_cut.
+    const char* slot_tag(size_t i) const { return i < slots_.size() ? slots_[i].tagc : nullptr; }
 
     // Top-N slots by calls to E() (per-thread state resolution, see
     // cpu_box86.cpp d2_e_calls) and, more usefully, by calls PER CROSSING:

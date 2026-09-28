@@ -273,6 +273,11 @@ struct Cpu {
     // Runtime A/B toggle. D2_DISABLE_INTRINSICS=1 forces the historical trap path
     // from the start; this lets a self-test flip it per call for state parity.
     virtual void set_intrinsics_enabled(bool on) { (void)on; }
+    // D2_INTRINLINE: serve this Bridge slot IN LINE from translated code
+    // (no exit from the dynarec loop). ONLY for shims that never block and
+    // never end the thread: a thread parked inside the dynarec loop would
+    // hold back the JIT eviction grace period. No-op on backends without it.
+    virtual void set_inline_shim(uint32_t slot_va) { (void)slot_va; }
 
     // Run starting at `eip` until a trap returns false or a fault occurs.
     // Returns true on clean stop (sentinel), false on fault; `fault` gets a

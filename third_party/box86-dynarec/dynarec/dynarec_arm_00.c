@@ -26,6 +26,7 @@
 
 #include "dynarec_arm_functions.h"
 #include "dynarec_arm_helper.h"
+void dyn86_intrin_wrap(x86emu_t* emu, uintptr_t slot);   /* D2_INTRINLINE (src/dynarec86/dyn86.c) */
 #include "dynarec_arm_signtag.h"
 
 int isRetX87Wrapper(wrapper_t fun);
@@ -1745,7 +1746,7 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                     x87_forget(dyn, ninst, x3, x14, 0);
                     if((box86_log<2) && !cycle_log) {   // call the wrapper directly
                         uintptr_t ncall[2]; // to avoid BUSERROR!!!
-                        memcpy(ncall,  (void*)addr, 2*sizeof(void*));   // the wrapper + function
+                        memcpy(ncall,  (void*)DYN86_G2H(addr), 2*sizeof(void*));   // the wrapper + function (D2Vita: guest address -> host view, fastmmu arena)
                         addr+=8;
                         MOV32(xEIP, addr);
                         MOV_REG(x3, xEIP);
@@ -1753,6 +1754,39 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                         STM(xEmu, (1<<xEAX)|(1<<xEBX)|(1<<xECX)|(1<<xEDX)|(1<<xESI)|(1<<xEDI)|(1<<xESP)|(1<<xEBP)|(1<<xEIP)|(1<<xFlags));
                         CALL_S((void*)ncall[0], -1, (1<<x3));
                         LDM(xEmu, (1<<xEAX)|(1<<xEBX)|(1<<xECX)|(1<<xEDX)|(1<<xESI)|(1<<xEDI)|(1<<xESP)|(1<<xEBP)|(1<<xEIP)|(1<<xFlags));
+                        if(ncall[0] == (uintptr_t)&dyn86_intrin_wrap) {
+                            /* D2Vita (D2_INTRINLINE) : l'intrinseque a deja
+                             * depile l'adresse de retour x86 et pose EIP/ESP/EAX
+                             * (trap_epilogue). S'il a decline (quit), sortie vers
+                             * CpuBox86::run() qui ira au Bridge ; sinon retour
+                             * DIRECT a l'appelant, comme un `ret` : la paire
+                             * CALLRET empilee par le `call` est depilee et, si
+                             * elle correspond, on revient dans le code natif de
+                             * l'appelant sans aucune recherche. */
+                            LDR_IMM9(x1, xEmu, offsetof(x86emu_t, quit));
+                            CMPS_IMM8(x1, 0);
+                            B_MARK(cNE);
+                            if(box86_dynarec_callret) {
+                                POP(xSP, (1<<x2)|(1<<x3));
+                                CMPS_REG_LSL_IMM5(x2, xEIP, 0);
+                                BXcond(cEQ, x3);
+                                CMPS_IMM8(x3, 0);
+                                LDR_IMM9_COND(cNE, xSP, xEmu, offsetof(x86emu_t, xSPSave));
+                                SUB_COND_IMM8(cEQ, xSP, xSP, 8);
+                            }
+                            MOV32(x2, getJumpTable());
+                            MOV_REG_LSR_IMM5(x3, xEIP, JMPTABL_SHIFT);
+                            LDR_REG_LSL_IMM5(x2, x2, x3, 2);
+                            UBFX(x3, xEIP, 0, JMPTABL_SHIFT);
+                            LDR_REG_LSL_IMM5(x3, x2, x3, 2);
+                            MOV_REG(x1, xEIP);
+                            BX(x3);
+                            MARK;
+                            jump_to_epilog(dyn, 0, xEIP, ninst);
+                            *ok = 0;
+                            *need_epilog = 0;
+                            break;
+                        }
                     } else {
                         // use x86Int3 to have trace
                         MOV32(xEIP, ip+1); // read the 0xCC
@@ -2614,13 +2648,67 @@ uintptr_t dynarec00(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
                         INST_NAME("REP MOVSD");
                         TSTS_REG_LSL_IMM5(xECX, xECX, 0);
                         B_NEXT(cEQ);    // end of loop
-                        GETDIR(x3,4);
                         SMREAD();
-                        MARK;
+                        if(dyn86_repmovs) {
+                            /* D2Vita (D2_REPMOVS=1) : chemin rapide, 16 octets par tour.
+                             * Le chemin d'origine coute 8 instructions PAR MOT sous
+                             * fastmmu (2 ADD de base, 2 post-increments, LDR, STR,
+                             * SUBS, BNE) — la copie des sommets de la DLL ring y
+                             * passait 4,4 % du temps de la patrouille (profil
+                             * D2_BLKSAMP, console, 28/09/2026). Pris seulement si
+                             *   DF = 0 (copie montante), et
+                             *   EDI - ESI >= 16 en non signe : un paquet lit 16
+                             *   octets AVANT d'en ecrire 16 ; c'est l'ordre mot par
+                             *   mot tant que la destination n'est pas dans les 16
+                             *   octets qui SUIVENT la source (motif de remplissage
+                             *   dst = src+4 : chemin d'origine). dst < src donne une
+                             *   difference enorme en non signe : sans danger, les
+                             *   ecritures tombent sur des mots deja lus.
+                             * Resultat architectural identique : memes octets, ECX
+                             * = 0, ESI/EDI avances de 4*ECX. q scratch = registre
+                             * NEON de travail de CETTE instruction. */
+                            int q0 = fpu_get_scratch_quad(dyn);
+                            TSTS_IMM8_ROR(xFlags, 1, 0x0b);      // DF
+                            B_MARK2(cNE);
+                            SUB_REG_LSL_IMM5(x2, xEDI, xESI, 0);
+                            CMPS_IMM8(x2, 16);
+                            B_MARK2(cCC);
+                            MOV_REG(x3, xECX);                   // mots a copier
+                            if(dyn86_membase) {
+                                ADD_IMM8_ROR(x1, xESI, (uint8_t)(dyn86_membase>>24), 4);
+                                ADD_IMM8_ROR(x2, xEDI, (uint8_t)(dyn86_membase>>24), 4);
+                            } else {
+                                MOV_REG(x1, xESI);
+                                MOV_REG(x2, xEDI);
+                            }
+                            MARK;                                // 4 mots par tour
+                            CMPS_IMM8(xECX, 4);
+                            B_MARK3(cCC);
+                            VLD1Q_32_W(q0, x1);
+                            if(dyn86_repmovs == 9) ADD_IMM8(x2, x2, 16);   // SABOTAGE : preuve que l'oracle voit ce chemin
+                            else VST1Q_32_W(q0, x2);
+                            SUB_IMM8(xECX, xECX, 4);
+                            B_MARK(c__);
+                            MARK3;                               // 0..3 mots restants
+                            TSTS_REG_LSL_IMM5(xECX, xECX, 0);
+                            B_MARKF(cEQ);
+                            LDRAI_IMM9_W(x14, x1, 4);
+                            STRAI_IMM9_W(x14, x2, 4);
+                            SUB_IMM8(xECX, xECX, 1);
+                            B_MARK3(c__);
+                            MARKF;
+                            ADD_REG_LSL_IMM5(xESI, xESI, x3, 2);
+                            ADD_REG_LSL_IMM5(xEDI, xEDI, x3, 2);
+                            SMWRITE();
+                            B_NEXT(c__);
+                            MARK2;                               // chemin d'origine
+                        }
+                        GETDIR(x3,4);
+                        MARKF2;
                         MMU_SAI4(LDRAI_REG_LSL_IMM5, LDR_IMM9, x1, xESI, x3, 0, x14);
                         MMU_SAI4(STRAI_REG_LSL_IMM5, STR_IMM9, x1, xEDI, x3, 0, x14);
                         SUBS_IMM8(xECX, xECX, 1);
-                        B_MARK(cNE);
+                        B_MARKF2(cNE);
                         SMWRITE();
                         // done
                         break;

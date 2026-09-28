@@ -20,6 +20,19 @@ namespace {
     uint64_t g_natprof_n[d2rt::trapcnt::kMax];
     uint64_t g_natprof_prev_us[d2rt::trapcnt::kMax];
     d2rt::Bridge* g_natprof_bridge = nullptr;
+    // PER-FRAME slice of D2_NATPROF, for ONE guest cpu (the render thread,
+    // the host thread that calls wx86_natprof_frame_cut). The window lines above sum every
+    // thread over 10 s: they cannot say which shim filled a single 80 ms
+    // frame. Slots touched since the last cut are listed so a reset costs
+    // what the frame touched, not kMax.
+    // One Cpu object serves every guest thread (per-thread state is resolved
+    // inside it), so the owner is the HOST thread that calls the cut. The
+    // thread-local read costs an emutls call on Vita — only under D2_NATPROF.
+    __thread int t_nf_owner = 0;
+    uint64_t g_nf_us[d2rt::trapcnt::kMax];
+    uint32_t g_nf_n[d2rt::trapcnt::kMax];
+    uint16_t g_nf_touch[512];
+    uint32_t g_nf_nt = 0;
 }
 
 // Engine log service (platform/vita_host.h): writes a durable line on
@@ -31,6 +44,7 @@ namespace {
 // Monotonic clock lives in the engine — used directly, no per-port indirection.
 #include "runtime/host_clock.h"
 extern "C" { extern uint32_t d2rt_timeprof_base; }   // guest base (cpu_box86.cpp)
+extern "C" { extern volatile uint32_t dyn86_blksamp_ip; }   // D2_BLKSAMP (dyn86.c)
 
 namespace d2rt {
 
@@ -423,8 +437,49 @@ int d2rt::Bridge::natprof_window(char* out, unsigned n, int topk) {
     }
     return lines;
 }
+// Tag of trap slot `idx` (for the block sampler's 0xFFFF0000|idx samples).
+extern "C" const char* wx86_slot_tag(uint32_t idx) {
+    return g_natprof_bridge ? g_natprof_bridge->slot_tag(idx) : nullptr;
+}
 extern "C" int d2rt_natprof_lines(char* out, unsigned n, int topk) {
     return g_natprof_bridge ? g_natprof_bridge->natprof_window(out, n, topk) : 0;
+}
+// Closes the current frame's slice for `cpu` (and names it the owner for the
+// next one). emit != 0: writes " tag=us/n ..." for the top-k slots of the
+// slice into `out` and returns the slice total in µs. Silent (0, "")
+// without D2_NATPROF.
+extern "C" uint64_t wx86_natprof_frame_cut(const void* cpu, char* out, unsigned n, int topk, int emit) {
+    if (out && n) out[0] = 0;
+    uint64_t tot = 0;
+    (void)cpu;
+    if (!d2rt_natprof || !g_natprof_bridge) return 0;
+    t_nf_owner = 1;
+    if (emit && out && n) {
+        uint32_t best[8]; int nb = 0; if (topk > 8) topk = 8;
+        for (uint32_t k = 0; k < g_nf_nt; ++k) tot += g_nf_us[g_nf_touch[k]];
+        // Only on slow frames: a plain selection over the touched slots.
+        for (; nb < topk; ++nb) {
+            int pick = -1;
+            for (uint32_t k = 0; k < g_nf_nt; ++k) {
+                const uint32_t i = g_nf_touch[k]; bool taken = false;
+                for (int j = 0; j < nb; ++j) if (best[j] == i) { taken = true; break; }
+                if (!taken && (pick < 0 || g_nf_us[i] > g_nf_us[(uint32_t)pick])) pick = (int)i;
+            }
+            if (pick < 0) break;
+            best[nb] = (uint32_t)pick;
+        }
+        unsigned o = 0;
+        for (int k = 0; k < nb && o + 48 < n; ++k) {
+            const uint32_t i = best[k];
+            const char* t = g_natprof_bridge->slot_tag(i);
+            const char* bang = t ? std::strchr(t, '!') : nullptr;
+            o += (unsigned)std::snprintf(out + o, n - o, " %s=%lluus/%u", bang ? bang + 1 : (t ? t : "?"),
+                                         (unsigned long long)g_nf_us[i], g_nf_n[i]);
+        }
+    }
+    for (uint32_t k = 0; k < g_nf_nt; ++k) { const uint32_t i = g_nf_touch[k]; g_nf_us[i] = 0; g_nf_n[i] = 0; }
+    g_nf_nt = 0;
+    return tot;
 }
 
 bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
@@ -477,14 +532,27 @@ bool Bridge::trap_handler(Cpu& cpu, uint32_t trap_va) {
     // holder's own. Inert under coop (a single bool check). The name is the
     // slot's STABLE pointer, never shim.tag.c_str().
     gil::note_shim_enter(trap_va, slot->tagc);
+#ifdef D2_BLKSAMP
+    // Block sampler (measurement flavour): while a shim body runs, the
+    // sample names the SLOT (0xFFFF0000 | idx), not the last guest block —
+    // otherwise every Sleep/Wait would be charged to the block that called
+    // it. The next block entry overwrites it.
+    dyn86_blksamp_ip = 0xFFFF0000u | (uint32_t)idx;
+#endif
     uint32_t eax;
     if (d2rt_natprof) {
         const uint64_t t0 = wx86_now_us();
         eax = slot->shim.fn(cpu);
         const uint64_t dt = wx86_now_us() - t0;
-        if (idx < trapcnt::kMax) { g_natprof_us[idx] += dt; ++g_natprof_n[idx]; }
+        if (idx < trapcnt::kMax) { g_natprof_us[idx] += dt; ++g_natprof_n[idx];
+            if (t_nf_owner) {
+                if (!g_nf_n[idx] && g_nf_nt < 512) g_nf_touch[g_nf_nt++] = (uint16_t)idx;
+                g_nf_us[idx] += dt; ++g_nf_n[idx]; } }
     } else
     eax = slot->shim.fn(cpu);
+#ifdef D2_BLKSAMP
+    dyn86_blksamp_ip = 0xFFFD0005u;   // stage 5: Bridge tail after the shim body (redirect, cleanup)
+#endif
     gil::note_shim_exit();
     slot = &slots_[idx];   // re-derive: shim.fn may have alloc_trap'd (GetProcAddress /
                            // LoadLibrary DISK) and grown slots_ — the old pointer would dangle

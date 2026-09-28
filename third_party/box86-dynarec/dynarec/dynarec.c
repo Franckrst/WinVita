@@ -323,7 +323,13 @@ int DynaRun(x86emu_t* emu)
         if(!box86_dynarec)
             Run(emu, 0);
         else {
+#ifdef D2_BLKSAMP
+            { extern volatile uint32_t dyn86_blksamp_ip; dyn86_blksamp_ip = 0xFFFD0007u; }   /* stage 7: block lookup */
+#endif
             dynablock_t* block = (skip || ACCESS_FLAG(F_TF))?NULL:DBGetBlock(emu, R_EIP, 1);
+#ifdef D2_BLKSAMP
+            { extern volatile uint32_t dyn86_blksamp_ip; dyn86_blksamp_ip = 0xFFFD0008u; }   /* stage 8: prologue into the block */
+#endif
             // D2Vita residual TOCTOU (sequel to the DBGetBlock retry, see the
             // comment there): the lost-mark path (MarkDynablock: db->done=0,
             // under mutex_prot only) can still zero done BETWEEN DBGetBlock's

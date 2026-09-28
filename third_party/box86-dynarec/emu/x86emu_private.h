@@ -178,6 +178,11 @@ typedef struct x86emu_s {
      * de trap de CpuBox86::run() ; aucun code genere n'y touche. Queue de
      * structure : aucun offset amont ne bouge. */
     uint64_t    dyn86_runacc_us;
+    /* D2Vita (D2_INTRINLINE) : un intrinseque appele EN LIGNE depuis le bloc
+     * traduit (dyn86_intrin_wrap) a DECLINE l'appel (contention, trace) : la
+     * sortie vers CpuBox86::run() doit aller droit au Bridge sans le rappeler.
+     * Remis a zero par run() au passage. Queue de structure. */
+    uint32_t    dyn86_intrin_declined;
 } x86emu_t;
 
 #define EMUTYPE_NONE    0
