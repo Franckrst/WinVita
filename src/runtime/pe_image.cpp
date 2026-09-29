@@ -42,16 +42,18 @@ struct ExportDirRT {
 enum { DIR_EXPORT = 0, DIR_IMPORT = 1, DIR_BASERELOC = 5 };
 
 // -------- small helpers ------------------------------------------------------
+// Bounds are image_.size(), not image_size_: after release_image() the
+// buffer is empty while image_size() still reports the mapped size.
 const uint8_t* PeImage::at_rva(uint32_t rva, uint32_t need) const {
-    if (rva >= image_size_) return nullptr;
-    if (need && (uint64_t)rva + need > image_size_) return nullptr;
+    if (rva >= image_.size()) return nullptr;
+    if (need && (uint64_t)rva + need > image_.size()) return nullptr;
     return image_.data() + rva;
 }
 const char* PeImage::cstr_at_rva(uint32_t rva) const {
-    if (rva >= image_size_) return nullptr;
+    if (rva >= image_.size()) return nullptr;
     const char* p = reinterpret_cast<const char*>(image_.data() + rva);
     // ensure NUL within image
-    for (uint32_t i = rva; i < image_size_; ++i)
+    for (uint32_t i = rva; i < image_.size(); ++i)
         if (image_[i] == 0) return p;
     return nullptr;
 }
@@ -66,7 +68,7 @@ bool PeImage::read_u32(uint32_t va, uint32_t& out) const {
 bool PeImage::write_u32(uint32_t va, uint32_t val) {
     if (va < load_base_) return false;
     uint32_t rva = va - load_base_;
-    if ((uint64_t)rva + 4 > image_size_) return false;
+    if ((uint64_t)rva + 4 > image_.size()) return false;
     std::memcpy(image_.data() + rva, &val, 4);
     return true;
 }
