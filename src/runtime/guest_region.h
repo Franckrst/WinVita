@@ -101,9 +101,10 @@ public:
         freeb_[a] = sz; return true;
     }
 
-    // Base of the block that CONTAINS a, or 0. VirtualFree(MEM_RELEASE)
-    // needs this: the game may pass an interior address, not necessarily
-    // the start.
+    // Base of the block that CONTAINS a, or 0. VirtualFree uses it to tell
+    // a reservation's base from an interior address (which Win32 refuses for
+    // MEM_RELEASE and for a size-0 MEM_DECOMMIT), and VirtualAlloc to
+    // recognise a commit inside an existing reservation.
     uint32_t block_of(uint32_t a) {
         auto it = used_.upper_bound(a); if (it == used_.begin()) return 0; --it;
         return (a >= it->first && a < it->first + it->second) ? it->first : 0;

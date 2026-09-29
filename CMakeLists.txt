@@ -81,4 +81,3 @@ add_executable(pe_analyze tools/pe_analyze.cpp)
 # octet pour octet, et tourne sur bureau. Voir tools/present_scale_selftest.cpp.
 add_executable(present_scale_selftest tools/present_scale_selftest.cpp)
 target_link_libraries(present_scale_selftest PRIVATE winx86_core)
-

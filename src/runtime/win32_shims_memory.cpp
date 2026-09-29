@@ -104,13 +104,18 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
     K("VirtualFree",3,[](Cpu&c){ uint32_t a=c.arg(0),sz=c.arg(1),ft=c.arg(2);
         if(ft&0x8000u){ uint32_t blk=g_plan.va->block_of(a)?g_plan.va->block_of(a):a;  // MEM_RELEASE
             // Win32: MEM_RELEASE takes the reservation's BASE and dwSize 0;
-            // anything else fails with ERROR_INVALID_PARAMETER and frees
-            // NOTHING. Releasing the enclosing block instead freed live
+            // anything else frees NOTHING: a non-zero size fails with
+            // ERROR_INVALID_PARAMETER, an interior address with
+            // ERROR_INVALID_ADDRESS (STATUS_FREE_VM_NOT_AT_BASE, the same
+            // refusal as the decommit below). lpAddress is rounded down to
+            // its page first, so an address inside the base page IS the
+            // base. Releasing the enclosing block instead freed live
             // memory: a PE-style in-memory loader that "releases" one page
             // in the middle of the image it just mapped (seen in WoW 1.12's
             // Warden module loader, whose call Wine answers with 0) lost the
             // whole image, and the next allocation overwrote its code/vtables.
-            if(sz!=0 || (g_plan.va->block_of(a) && blk!=a)){ wx86_set_lasterr(c,87u); return 0u; }
+            if(sz!=0){ wx86_set_lasterr(c,87u); return 0u; }
+            if(blk!=a && blk!=(a&~0xFFFu)){ wx86_set_lasterr(c,487u); return 0u; }
             uint32_t bs=g_plan.va->size_of(blk);
             if(g_plan.va->free(blk)){ note(WX86_MEM_VA_RELEASE,&c,blk,bs,ft); }
             else { uint32_t ra=c.read_u32(c.reg(R_ESP));         // a LOST free = arena leak
@@ -125,7 +130,7 @@ void win32_shims_memory_install(Bridge& br, const Wx86MemoryPlan& plan){
             // memory. Measured 2537 such calls in the reference Wine trace,
             // all answered 0, and the caller ignores the result.
             if(!sz){ uint32_t b=g_plan.va->block_of(a);
-                if(b && b!=a){ wx86_set_lasterr(c,487u); return 0u; } }
+                if(b && b!=a && b!=(a&~0xFFFu)){ wx86_set_lasterr(c,487u); return 0u; } }
             uint32_t p0=a&~0xFFFu, p1=(a+(sz?sz:1)+0xFFFu)&~0xFFFu;          // but a later recommit must zero
             note(WX86_MEM_VA_DECOMMIT,&c,p0,p1-p0,ft);
             for(uint32_t p=p0;p<p1;p+=4096) g_decommitted.insert(p); }

@@ -66,7 +66,8 @@ void dyn86_intrin_setreg(void* emu, int idx, uint32_t val)
 
 void* dyn86_intrin_host(uint32_t guest_va)
 {
-    if (!dyn86_membase) return 0;
+    /* No test on dyn86_membase: 0 is the identity mode (debug.h), where the
+     * guest address IS the host address, not an unset state. */
     return (void*)DYN86_G2H(guest_va);
 }
 

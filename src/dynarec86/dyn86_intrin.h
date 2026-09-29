@@ -155,7 +155,10 @@ uint32_t dyn86_intrin_getreg(const void* emu, int idx);
 void     dyn86_intrin_setreg(void* emu, int idx, uint32_t val);
 /* Host address of a guest address, i.e. the dynarec's own G2H translation.
  * A helper works on guest memory through this — it must never assume a
- * mapping of its own. Returns NULL only if no membase has been set yet. */
+ * mapping of its own. In identity mode (membase 0) it returns guest_va
+ * itself. It is UNBOUNDED, exactly like G2H: it answers for any guest_va,
+ * so the helper must range-check against the span of its memory plan before
+ * dereferencing (cf. dyn86_mi_set_span for the memcpy intrinsics). */
 void*    dyn86_intrin_host(uint32_t guest_va);
 
 /* Arming-proof line, published by the periodic status window. Returns the

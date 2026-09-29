@@ -53,12 +53,9 @@ if [ -n "${LIBTAG:-}" ]; then
 fi
 LIB="$OUT/$LIBNAME"
 
-# -I$ROOT/src en DERNIER : les unites C de la couche platform s'incluent par
-# chemin complet ("platform/..."), comme le C++. Place apres les chemins de
-# box86, il ne peut pas detourner un include du dynarec.
 CFLAGS="-O2 -g -marm -march=armv7-a+simd -mfpu=neon -mfloat-abi=hard \
   -DDYNAREC -DARM -DUSE_MMAP -DTRACE_MEMSTAT $VITA_EXTRA \
-  -I$SHIM -I$DYN86 -I$B86/include -I$B86 -I$B86/dynarec -I$ROOT/src \
+  -I$SHIM -I$DYN86 -I$B86/include -I$B86 -I$B86/dynarec \
   -Wno-unused-variable -Wno-unused-parameter -Wno-unused-function \
   -Wno-unused-but-set-variable -Wno-pointer-sign ${EXTRA:-}"
 
