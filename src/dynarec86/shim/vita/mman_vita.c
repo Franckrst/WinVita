@@ -255,17 +255,57 @@ static int       g_jiteager_full = 0;     /* eager side done: target reached */
  * executed, i.e. it behaves exactly like a VM block minus the domain sync
  * (kuKernelFlushCaches instead). The stub is linked WEAK and these calls are
  * only ever made when the module is loaded. */
+/* The loader rewrites every import stub. kubridge is a KERNEL module, so a
+ * resolved stub is a system call: `movw r12,#sysno ; svc #0 ; bx lr` (read on
+ * console with kubridge 0.3.1: 0xe300cfb1 0xef000000). A user-module import
+ * is `movw r12,#lo ; movt r12,#hi ; bx r12`. For a WEAK import nothing
+ * exports, the stub branches to 0.
+ * kubridge before 0.3 IS loaded as "kubridge" but exports none of the 0.3
+ * entry points: a player's crash dump (06/10/2026, v0.2.0) shows pc=0 with
+ * lr right after the call to kuKernelRegisterExceptionHandler in
+ * dyn86_vita_fault_install. So "present" now means: the module is loaded AND
+ * every entry point used here resolves to a NON-ZERO address. */
+static int stub_resolved(const void* fn) {
+    const volatile unsigned* w = (const volatile unsigned*)fn;
+    const unsigned a = w[0], b = w[1];
+    if ((a & 0x0FF0F000u) != 0x0300C000u) return 0;   /* movw r12, #imm16 */
+    const unsigned lo = ((a >> 4) & 0xF000u) | (a & 0x0FFFu);
+    if (b == 0xEF000000u) return lo != 0u;            /* svc #0: syscall number in r12 */
+    if ((b & 0x0FF0F000u) != 0x0340C000u) return 0;   /* movt r12, #imm16 */
+    const unsigned hi = ((b >> 4) & 0xF000u) | (b & 0x0FFFu);
+    return ((hi << 16) | lo) != 0u;                   /* branch target */
+}
+static int kubridge_api_ok(void) {
+    return stub_resolved((const void*)kuKernelMemReserve)  && stub_resolved((const void*)kuKernelMemCommit)
+        && stub_resolved((const void*)kuKernelMemProtect)  && stub_resolved((const void*)kuKernelFlushCaches)
+        && stub_resolved((const void*)kuKernelRegisterExceptionHandler)
+        && stub_resolved((const void*)kuKernelReleaseExceptionHandler);
+}
+static int g_kubridge_old = 0;
+int dyn86_vita_kubridge_old(void) { return g_kubridge_old; }
 static int kubridge_present(void) {
     static int v = -1;
     if (v < 0) {
         int unk[2] = {0, 0};
         v = _vshKernelSearchModuleByName("kubridge", unk) >= 0 ? 1 : 0;
+        if (v && !kubridge_api_ok()) {
+            v = 0; g_kubridge_old = 1;
+            char m[160];
+            snprintf(m, sizeof m, "JIT: kubridge TROP ANCIEN (charge, mais ses points d'entree 0.3 ne sont pas resolus, stub 0x%08x 0x%08x) — ignore, installer kubridge 0.3.1+",
+                     ((const volatile unsigned*)(const void*)kuKernelRegisterExceptionHandler)[0],
+                     ((const volatile unsigned*)(const void*)kuKernelRegisterExceptionHandler)[1]);
+            wx86_vita_progress_c(m);
+        }
         /* WX86_KUBRIDGE=0 / D2_KUBRIDGE=0: behave as if the plugin were not
          * loaded -- the way to test the fallback path on a console that has it. */
         { const char* e = getenv("WX86_KUBRIDGE"); if (!e) e = getenv("D2_KUBRIDGE");
           if (v && e && *e == '0') { v = 0; wx86_vita_progress_c("JIT: kubridge IGNORE sur demande (D2_KUBRIDGE=0) — chemin sans plugin"); } }
-        wx86_vita_progress_c(v ? "JIT: kubridge present — segments RWX hors quota VM disponibles pour la piscine"
-                               : "JIT: kubridge absent — piscine limitee au quota VM du noyau (16 Mo, un seul segment)");
+        if (v) { char m[160];
+            snprintf(m, sizeof m, "JIT: kubridge present (API 0.3+ resolue, stub 0x%08x) — segments RWX hors quota VM disponibles pour la piscine",
+                     *(const volatile unsigned*)(const void*)kuKernelMemReserve);
+            wx86_vita_progress_c(m); }
+        else if (!g_kubridge_old)
+            wx86_vita_progress_c("JIT: kubridge absent — piscine limitee au quota VM du noyau (16 Mo, un seul segment)");
     }
     return v;
 }
