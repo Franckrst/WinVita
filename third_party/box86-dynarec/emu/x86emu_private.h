@@ -183,6 +183,13 @@ typedef struct x86emu_s {
      * sortie vers CpuBox86::run() doit aller droit au Bridge sans le rappeler.
      * Remis a zero par run() au passage. Queue de structure. */
     uint32_t    dyn86_intrin_declined;
+    /* D2Vita (D2_FASTSYNC) : le GuestThread* que CE emu execute (ordonnanceur
+     * natif : un emu par fil invite, pose une fois au demarrage du fil par
+     * Cpu::set_cur_guest_thread). NULL = inconnu (coop : un seul emu pour
+     * tous les fils) ; l'intrinseque sans GIL demande alors a l'ordonnanceur.
+     * Evite la resolution TLS (emutls, ~330 ns sur console) de current().
+     * Queue de structure. */
+    void*       dyn86_guest_thread;
 } x86emu_t;
 
 #define EMUTYPE_NONE    0

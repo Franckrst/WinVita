@@ -278,6 +278,27 @@ struct Cpu {
     // never end the thread: a thread parked inside the dynarec loop would
     // hold back the JIT eviction grace period. No-op on backends without it.
     virtual void set_inline_shim(uint32_t slot_va) { (void)slot_va; }
+    // D2_FASTSYNC: a LOCK-FREE intrinsic, tried from the in-line call (see
+    // set_inline_shim) BEFORE the GIL is taken. It sees only the stdcall frame
+    // — return address and first stack argument, read once by the backend —
+    // and must be safe to run concurrently with any other guest thread and
+    // with GIL holders. Contract: it either serves the call (fills eax and
+    // pop = bytes of arguments to pop, returns true; the backend then sets
+    // EAX/ESP/EIP) or DECLINES WITHOUT ANY SIDE EFFECT (returns false), in
+    // which case the call continues exactly as before: GIL, then the regular
+    // intrinsic (set_intrinsic) or the Bridge. Only reached from the in-line
+    // path: a trap that reaches run()'s dispatch (D2_INTRINLINE=0, slot
+    // translated before arming) keeps the GIL path. Returns false when the
+    // backend cannot arm it (no in-line path), so the caller can say so.
+    // `thread` = the GuestThread* running this call when the backend knows it
+    // without a TLS lookup (set_cur_guest_thread), else nullptr.
+    struct IntrinFrame { uint32_t ret, arg0, eax, pop; void* thread; };
+    using IntrinNoGilFn = bool(*)(IntrinFrame& f, uint32_t slot_va);
+    virtual bool set_intrinsic_nogil(uint32_t slot_va, IntrinNoGilFn fn) { (void)slot_va; (void)fn; return false; }
+    // Native scheduler: records, in the CALLING host thread's CPU state, which
+    // guest thread it runs (once, when the runner starts) — read back as
+    // IntrinFrame::thread. No-op default.
+    virtual void set_cur_guest_thread(void* t) { (void)t; }
 
     // Run starting at `eip` until a trap returns false or a fault occurs.
     // Returns true on clean stop (sentinel), false on fault; `fault` gets a

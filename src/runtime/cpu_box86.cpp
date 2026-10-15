@@ -1165,17 +1165,62 @@ public:
         uint8_t* b = (uint8_t*)H(va);
         const uint32_t w = (uint32_t)(uintptr_t)&dyn86_intrin_wrap;
         const uint32_t v = va | tag;
+        // A stub already in-line (D2_FASTSYNC re-tags it) is not a new one.
+        const bool was = b[0] == 0xCC && b[1] == 'S' && b[2] == 'C' && std::memcmp(b + 3, &w, 4) == 0;
         b[0] = 0xCC; b[1] = 'S'; b[2] = 'C';
         std::memcpy(b + 3, &w, 4); std::memcpy(b + 7, &v, 4);
-        ++g_intrinline_stubs;
+        if (!was) ++g_intrinline_stubs;
     }
     void set_inline_shim(uint32_t va) override { inline_stub(va, 1u); }
+    void set_cur_guest_thread(void* t) override { E().dyn86_guest_thread = t; }
+    // D2_FASTSYNC (cpu.h): tag bit 1 on the in-line stub = "try the lock-free
+    // intrinsic before the GIL". The slot must already be a regular intrinsic
+    // (set_intrinsic): a decline falls through to it, under the GIL.
+    bool set_intrinsic_nogil(uint32_t va, IntrinNoGilFn fn) override {
+        if (!va || !fn || !dyn86_intrinline || !trap_mapped_ || va < trap_lo_ || va >= trap_hi_) return false;
+        if (getDB(va)) return false;                 // already translated: the stub can no longer be rewritten
+        uint32_t i = 0;
+        for (; i < nogil_n_; ++i) if (nogil_va_[i] == va) break;
+        if (i == nogil_n_) { if (nogil_n_ >= kNoGilMax) return false; ++nogil_n_; }
+        nogil_va_[i] = va; nogil_fn_[i] = fn;
+        inline_stub(va, 2u);
+        return true;
+    }
     // Called by dyn86_intrin_wrap from translated code, on the guest thread,
     // with the registers already stored in `emu`. Same serialization and the
     // same dispatch as the trap window of run(); a declined call leaves EIP on
     // the slot and asks run() to go straight to the Bridge.
     static void intrin_inline_cb(x86emu_t* emu, uintptr_t slot) {
         CpuBox86* self = static_cast<CpuBox86*>(g_intrin_self);
+        if (slot & 2u) {
+            // D2_FASTSYNC: lock-free intrinsic, BEFORE the GIL (cpu.h,
+            // set_intrinsic_nogil). Reads the stdcall frame straight from
+            // this emu — no TLS resolution, no virtual call. A decline has
+            // no side effect: drop the tag and take the regular path below.
+            slot &= ~(uintptr_t)2u;
+            if (self && !self->no_intrinsics_) {
+                const uint32_t va = (uint32_t)slot;
+                for (uint32_t i = 0; i < self->nogil_n_; ++i) {
+                    if (self->nogil_va_[i] != va) continue;
+                    const uint32_t esp = emu->regs[R_ESP].dword[0];
+                    IntrinFrame f;
+                    f.ret  = *(const uint32_t*)H(esp);
+                    f.arg0 = *(const uint32_t*)H(esp + 4);
+                    f.eax = 0; f.pop = 0; f.thread = emu->dyn86_guest_thread;
+                    if (self->nogil_fn_[i](f, va)) {
+                        emu->regs[R_EAX].dword[0] = f.eax;
+                        emu->regs[R_ESP].dword[0] = esp + 4 + f.pop;
+                        emu->ip.dword[0] = f.ret;
+                        // Same accounting as try_intrinsic, OUTSIDE the GIL:
+                        // a lost increment between two threads only skews a
+                        // statistic (trapcnt.h), never the guest.
+                        d2rt::trapcnt::bump(va);
+                        return;
+                    }
+                    break;
+                }
+            }
+        }
         TrapGuard gg(*emu);
         if (slot & 1u) {
             // Whitelisted Bridge shim (set_inline_shim): the Bridge sets EIP
@@ -1725,6 +1770,13 @@ private:
     uint32_t    idir_n_  = 0;
     bool        idir_out_ = false;                 // some registered slot lies outside the window
     IntrinsicFn idir_[kDirectMax] = {};
+    // D2_FASTSYNC: lock-free intrinsics tried before the GIL (in-line path
+    // only, see set_intrinsic_nogil). Written once at install, before any
+    // guest thread runs; read-only afterwards.
+    static constexpr uint32_t kNoGilMax = 4;
+    uint32_t      nogil_n_ = 0;
+    uint32_t      nogil_va_[kNoGilMax] = {};
+    IntrinNoGilFn nogil_fn_[kNoGilMax] = {};
     bool   no_intrinsics_ = std::getenv("WX86_DISABLE_INTRINSICS") || std::getenv("D2_DISABLE_INTRINSICS");
     // Fault/preempt state lives in the t_* __thread vars (top of file): with N
     // native runners it is per-HOST-thread, never shared members.

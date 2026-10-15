@@ -45,12 +45,48 @@ struct WxThread : d2rt::Waitable {
 // nonzero OwningThread there routes them onto Enter/Leave paths that
 // shim-based synchronization never balances, deadlocking. Keep the real
 // struct fields at zero.
+//
+// D2_FASTSYNC (wx86_crit_fast != 0, set once before any guest thread runs):
+// Enter/Leave may also be served LOCK-FREE, outside the GIL, by the
+// consumer's fast path. `owner` then becomes the single word every party
+// agrees on, updated ONLY by atomic compare-and-swap (seq_cst), and its bit
+// 31 (WX86_CRIT_WAITERS) records "a thread failed to acquire and may be
+// blocked": a lock-free release is a CAS {owner, no waiter} -> 0, which
+// therefore FAILS — without side effect — as soon as anyone may need waking,
+// and the release goes to the GIL path (wx86_crit_leave), which notifies.
+// Setting the bit and the releasing CAS act on the same word, so a waiter
+// can never be missed (no lost wake-up). `count` is touched only by the
+// thread that owns the section (or, under the GIL, by the waker on behalf of
+// the waiter it just made owner while that waiter sleeps). The bit can stay
+// set with nobody waiting (timeouts): that costs one GIL release, never a
+// wrong result. With wx86_crit_fast == 0 the historical code runs unchanged.
+extern int wx86_crit_fast;
+static constexpr uint32_t WX86_CRIT_WAITERS = 0x80000000u;
 struct WxCrit : d2rt::Waitable {
     uint32_t va=0, owner=0; int count=0;
     bool try_acquire(d2rt::GuestThread* t) override { uint32_t me=t?t->id:1u;
+        if(wx86_crit_fast) return try_acquire_atomic(me);
         if(owner==0||owner==me){ owner=me; count++; return true; } return false; }
-    bool ready(d2rt::GuestThread* t) override { uint32_t me=t?t->id:1u; return owner==0||owner==me; }
-    const char* kind() const override { return "critsec"; } };
+    bool ready(d2rt::GuestThread* t) override { uint32_t me=t?t->id:1u;
+        const uint32_t o = __atomic_load_n(&owner, __ATOMIC_SEQ_CST) & ~WX86_CRIT_WAITERS;
+        return o==0||o==me; }
+    const char* kind() const override { return "critsec"; }
+    // Same decision as the historical try_acquire (free or already mine ->
+    // acquire, recursion count +1), as an atomic word. On failure, publishes
+    // WX86_CRIT_WAITERS before returning false.
+    bool try_acquire_atomic(uint32_t me){
+        uint32_t s = __atomic_load_n(&owner, __ATOMIC_SEQ_CST);
+        for(;;){
+            const uint32_t o = s & ~WX86_CRIT_WAITERS;
+            if(o==me){ count++; return true; }                       // recursion: only the owner gets here
+            if(o==0){
+                if(__atomic_compare_exchange_n(&owner,&s,me|(s&WX86_CRIT_WAITERS),false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST)){
+                    count++; return true; }
+                continue; }                                          // s reloaded by the failed CAS
+            if(s & WX86_CRIT_WAITERS) return false;
+            if(__atomic_compare_exchange_n(&owner,&s,s|WX86_CRIT_WAITERS,false,__ATOMIC_SEQ_CST,__ATOMIC_SEQ_CST))
+                return false;
+        } } };
 
 // Multi-object wait — WaitForMultipleObjects(nCount, ..., bWaitAll).
 struct WxMultiWait : d2rt::Waitable {

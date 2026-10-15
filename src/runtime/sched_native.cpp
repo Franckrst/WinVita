@@ -790,6 +790,7 @@ void NativeScheduler::runner(GuestThread* t) {
     NT* n = nt(t);
     cpu_->thread_emu_bind(n->emu);
     t_cur = t;
+    cpu_->set_cur_guest_thread(t);   // D2_FASTSYNC: identity without TLS (cpu.h)
     // GIL observability: this thread registers the interval of ITS OWN host
     // stack, BEFORE its first GIL acquire. This is what replaces the
     // pthread_self() that lock() used to pay for on every trap (gil.h).
@@ -1281,6 +1282,7 @@ void NativeScheduler::run() {
     NT* n = nt(t);
     cpu_->thread_emu_bind(nullptr);                  // base emu
     t_cur = t;
+    cpu_->set_cur_guest_thread(t);   // D2_FASTSYNC: identity without TLS (cpu.h)
     // GIL observability: main runs on the calling host thread, never through
     // pthread_create. It registers its stack like the runners do, otherwise
     // it would be reported as "host". Registered HERE and not in set_main():

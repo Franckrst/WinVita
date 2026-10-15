@@ -48,11 +48,17 @@ WxCrit* wx86_crit_lookup(uint32_t cs){
     return it->second;
 }
 
+int wx86_crit_fast = 0;   // D2_FASTSYNC (see WxCrit) — written once, before any guest thread
+
 bool wx86_crit_leave(uint32_t cs, ThreadScheduler* sched){
     WxCrit* k = wx86_crit_lookup(cs);
     if(!k) return false;
     if(k->count>0 && --k->count==0){
-        k->owner = 0;
+        // Fast mode: an atomic store (clears WX86_CRIT_WAITERS too — the
+        // notify below re-runs every blocked waiter's try_acquire, and those
+        // that still fail set it again).
+        if(wx86_crit_fast) __atomic_store_n(&k->owner, 0u, __ATOMIC_SEQ_CST);
+        else k->owner = 0;
         if(sched) sched->notify(k);
         return true;
     }
@@ -61,7 +67,7 @@ bool wx86_crit_leave(uint32_t cs, ThreadScheduler* sched){
 
 void wx86_crit_each_held(void (*fn)(uint32_t,uint32_t,int,void*), void* ud){
     if(!fn) return;
-    for(auto& p : g_crits) if(p.second->owner) fn(p.first, p.second->owner, p.second->count, ud);
+    for(auto& p : g_crits) if(p.second->owner) fn(p.first, p.second->owner & ~WX86_CRIT_WAITERS, p.second->count, ud);
 }
 
 void wx86_crit_forget(uint32_t cs){
