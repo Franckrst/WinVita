@@ -76,6 +76,14 @@ struct Voice {
     // apart "no audio out" from "audio never written". Published as flux=.
     uint64_t lockKio = 0;
     bool     volSaid = false;    // first SetVolume logged (verbose log)
+    // D2_SONDIAG only (diagnostic, never read otherwise): bytes the game has
+    // locked AHEAD of the read cursor, as of its last Lock, minus what the
+    // mixer consumed since. Negative = the cursor ran past what the game
+    // last handed over: the mixer is replaying stale ring bytes (a guest-fed
+    // stream that starved). `starved` = in such an episode.
+    int64_t  wrLead = 0;
+    bool     hasWr = false, starved = false;
+    uint64_t starvedUs = 0;      // when the episode began (host clock)
 };
 
 // Engine setting, with fallback to the port's older env var name (see install()).
@@ -100,6 +108,46 @@ HostOps           g_ops;
 bool              g_installed = false;
 bool              g_on = false;              // is D2_SON set
 bool              g_log = false;             // D2_SONLOG
+// Output limiter (WX86_SONLIMIT / D2_SONLIMIT, on by default, =0 disables).
+// The guest's voices are summed in 32 bits; a sum past 16-bit full scale used
+// to be clamped sample by sample — hard clipping, heard as crackle. Console,
+// Throne bench (Hell, 10-13 voices): 85 % of the grains clipped, ~4500 samples
+// per 10 s. The OS mixer under DirectSound is not specified to clip: since
+// Vista the Windows audio engine mixes in float and limits its output. Here:
+// one gain per grain (the whole grain is mixed before it is sent, so its peak
+// is known: 23 ms of look-ahead), instant attack over 32 frames, release over
+// ~8 grains. A grain whose sum stays within full scale while the gain is at
+// unity is sent bit for bit as before.
+int               g_limit = 1;
+uint32_t          g_limG = 65536;            // current gain, Q16 (audio thread or frame pump, never both)
+// D2_SONDIAG=1: diagnostic counters only (sondiag line, see diag_line). Off by
+// default; when off, no counter below is fed and nothing changes in mixing.
+bool              g_diag = false;
+std::atomic<unsigned long long> d_late{0}, d_gap35{0}, d_gapMax{0}, d_lockMax{0}, d_mixMax{0},
+    d_clip{0}, d_clipGr{0}, d_sdEv{0}, d_sdConf{0}, d_sdStop{0}, d_sdBytes{0},
+    d_leadMinUs{0xffffffffull}, d_outMin{0xffffffffull},
+    d_stalePk{0}, d_staleNz{0}, d_staleN{0}, d_repMs{0}, d_repMax{0}, d_finMs{0}, d_finMax{0},
+    d_overGr{0}, d_overMax{0}, d_limGr{0}, d_limMin{65536};
+uint64_t          d_lastRet = 0;             // audio thread only
+// D2_SONTRACE=<s>: logs every Lock/Unlock/Play/Stop/SetCurrentPosition of the
+// secondary voices (and GetCurrentPosition) for 150 s starting <s> seconds
+// after install, at most 40000 lines (diagnostic).
+uint64_t          d_trT0 = 0, d_trT1 = 0;
+unsigned          d_trN = 0;
+bool trace_on() {
+    if (!d_trT0) return false;
+    const uint64_t n = wx86_now_us();
+    return n >= d_trT0 && n < d_trT1 && d_trN < 40000;
+}
+unsigned          d_created = 0;             // guest thread only (CreateSoundBuffer log)
+inline void d_max(std::atomic<unsigned long long>& a, unsigned long long v) {
+    unsigned long long c = a.load(std::memory_order_relaxed);
+    while (v > c && !a.compare_exchange_weak(c, v)) {}
+}
+inline void d_min(std::atomic<unsigned long long>& a, unsigned long long v) {
+    unsigned long long c = a.load(std::memory_order_relaxed);
+    while (v < c && !a.compare_exchange_weak(c, v)) {}
+}
 int               g_voiceCap = 0;            // D2_SONVOICES, 0 = no cap
 uint64_t          g_maxFrames = 0;           // D2_SONMAXS: sink duration cap, in frames (0 = unlimited)
 std::string       g_sinkWant;                // "wav" / "null" / "vita"
@@ -218,7 +266,7 @@ void guest_zero(Cpu& c, uint32_t va, uint32_t n) {
 // `loop`: a voice without DSBPLAY_LOOPING doesn't loop — it goes silent at the
 // end and the mixer stops it (see below).
 struct Snap { const uint8_t* host; uint32_t len, cur, blockAlign, rate; uint64_t acc;
-              int ch; uint32_t gL, gR; bool loop; };
+              int ch; uint32_t gL, gR; bool loop; bool stale = false; };
 std::vector<Snap> g_snap;
 
 void mix_grain(Cpu* c, int frames) {
@@ -232,6 +280,7 @@ void mix_grain(Cpu* c, int frames) {
     int nmix = 0;
     {
         std::lock_guard<std::mutex> lk(g_mx);
+        if (g_diag) d_max(d_lockMax, wx86_now_us() - t0);
         g_snap.clear();
         for (Voice& v : g_voices) {
             if (!v.alive || !v.playing || v.primary || !v.len) continue;
@@ -245,7 +294,7 @@ void mix_grain(Cpu* c, int frames) {
             if (!v.host) c_nohost.fetch_add(1, std::memory_order_relaxed);
             else if (!g_voiceCap || (int)g_snap.size() < g_voiceCap) {
                 g_snap.push_back(Snap{v.host, v.len, v.cursor, v.blockAlign, v.rate, acc0,
-                                      v.ch, v.gL, v.gR, v.looping});
+                                      v.ch, v.gL, v.gR, v.looping, g_diag && v.starved});
                 if (v.rate != (uint32_t)kRate) c_resamp.fetch_add(1, std::memory_order_relaxed);
             }
             // Cursor advances for every voice that's playing, mixed or not: a
@@ -270,6 +319,19 @@ void mix_grain(Cpu* c, int frames) {
                 } else {
                     v.cursor = (uint32_t)p;
                 }
+                if (g_diag && v.hasWr && v.looping) {
+                    if (v.starved) d_sdBytes.fetch_add(adv, std::memory_order_relaxed);
+                    else {
+                        v.wrLead -= (int64_t)adv;
+                        if (v.wrLead < 0) {
+                            v.starved = true; v.starvedUs = wx86_now_us(); d_sdEv.fetch_add(1, std::memory_order_relaxed);
+                            d_sdBytes.fetch_add((unsigned long long)(-v.wrLead), std::memory_order_relaxed);
+                        } else if (v.rate && v.blockAlign) {
+                            d_min(d_leadMinUs, (unsigned long long)v.wrLead * 1000000ull
+                                               / ((unsigned long long)v.rate * v.blockAlign));
+                        }
+                    }
+                }
             }
         }
         nmix = (int)g_snap.size();
@@ -291,6 +353,7 @@ void mix_grain(Cpu* c, int frames) {
 
     const int ns = frames * kOutCh;
     std::memset(g_acc, 0, sizeof(int32_t) * (size_t)ns);
+    unsigned stPk = 0, stNz = 0, stN = 0;     // D2_SONDIAG: what a starved voice actually replays
     for (const Snap& s : g_snap) {
         if (!s.blockAlign) continue;
         // Actual read width, distinct from blockAlign: a buffer whose
@@ -309,10 +372,13 @@ void mix_grain(Cpu* c, int frames) {
                 int16_t l, r; std::memcpy(&l, s.host + pos, 2); std::memcpy(&r, s.host + pos + 2, 2);
                 g_acc[2*i]   += (int32_t)(((int64_t)l * (int64_t)s.gL) >> 16);
                 g_acc[2*i+1] += (int32_t)(((int64_t)r * (int64_t)s.gR) >> 16);
+                if (s.stale) { const unsigned a = (unsigned)(l < 0 ? -l : l), b = (unsigned)(r < 0 ? -r : r);
+                               const unsigned m = a > b ? a : b; if (m > stPk) stPk = m; if (m > 64) stNz++; stN++; }
             } else {
                 int16_t v; std::memcpy(&v, s.host + pos, 2);
                 g_acc[2*i]   += (int32_t)(((int64_t)v * (int64_t)s.gL) >> 16);
                 g_acc[2*i+1] += (int32_t)(((int64_t)v * (int64_t)s.gR) >> 16);
+                if (s.stale) { const unsigned m = (unsigned)(v < 0 ? -v : v); if (m > stPk) stPk = m; if (m > 64) stNz++; stN++; }
             }
             // Advances by rate/kRate, exact integer arithmetic (no drift).
             acc += s.rate;
@@ -326,9 +392,42 @@ void mix_grain(Cpu* c, int frames) {
             }
         }
     }
+    if (g_limit || g_diag) {
+        int32_t pk = 0;
+        for (int k = 0; k < ns; k++) { const int32_t a = g_acc[k] < 0 ? -g_acc[k] : g_acc[k]; if (a > pk) pk = a; }
+        if (g_diag && pk > 32767) { d_overGr.fetch_add(1, std::memory_order_relaxed); d_max(d_overMax, (unsigned long long)pk); }
+        if (g_limit) {
+            const uint32_t need = pk > 32767 ? (uint32_t)(((uint64_t)32767 << 16) / (uint64_t)pk) : 65536u;
+            const uint32_t g0 = g_limG;
+            uint32_t step = (65536u - g0) >> 3;               // release toward unity...
+            if (!step) step = 65536u - g0;                     // ...and reach it exactly
+            uint32_t g1 = g0 + step;
+            if (g1 > need) g1 = need;
+            if (g0 != 65536u || g1 != 65536u) {
+                const int attackLen = frames < 32 ? frames : 32;
+                for (int i = 0; i < frames; i++) {
+                    int64_t g;
+                    if (g1 < g0) g = (i < attackLen) ? (int64_t)g0 + ((int64_t)g1 - (int64_t)g0) * (i + 1) / attackLen : g1;
+                    else         g = (int64_t)g0 + ((int64_t)g1 - (int64_t)g0) * (i + 1) / frames;
+                    g_acc[2*i]   = (int32_t)(((int64_t)g_acc[2*i]   * g) >> 16);
+                    g_acc[2*i+1] = (int32_t)(((int64_t)g_acc[2*i+1] * g) >> 16);
+                }
+                if (g_diag) { d_limGr.fetch_add(1, std::memory_order_relaxed); d_min(d_limMin, g1 < g0 ? g1 : g0); }
+            }
+            g_limG = g1;
+        }
+    }
     for (int k = 0; k < ns; k++) {
         int32_t v = g_acc[k];
         g_out[k] = (int16_t)(v > 32767 ? 32767 : (v < -32768 ? -32768 : v));
+    }
+    if (g_diag && stN) { d_max(d_stalePk, stPk); d_staleNz.fetch_add(stNz, std::memory_order_relaxed);
+                         d_staleN.fetch_add(stN, std::memory_order_relaxed); }
+    if (g_diag) {                       // samples the clamp above cut (saturation)
+        unsigned nclip = 0;
+        for (int k = 0; k < ns; k++) if (g_acc[k] > 32767 || g_acc[k] < -32768) nclip++;
+        if (nclip) { d_clip.fetch_add(nclip, std::memory_order_relaxed);
+                     d_clipGr.fetch_add(1, std::memory_order_relaxed); }
     }
     // Second hard bound: the console sink always consumes a fixed outLen_
     // (512 frames) regardless of `frames`, so the unused tail of g_out must
@@ -388,7 +487,22 @@ void mix_grain(Cpu* c, int frames) {
         if (rest == 0) c_famine.fetch_add(1, std::memory_order_relaxed);
         if (rest >= 0) { unsigned long long r = (unsigned long long)rest, cur = c_restmin.load();
                          while (r < cur && !c_restmin.compare_exchange_weak(cur, r)) {} }
+        const uint64_t tw = wx86_now_us();
         sk->write(g_out, frames);
+        if (g_diag && !c && sk->self_paced()) {
+            // Audio thread, realtime sink: the write blocks until the port can
+            // take the grain. A write that returns almost at once found the
+            // port's queue already drained (the thread came back late: a gap
+            // was played). trou = time between two consecutive returns; one
+            // grain is 23.2 ms, so > 35 ms cannot have been gapless.
+            const uint64_t now = wx86_now_us(), w = now - tw;
+            if (w < 2000) d_late.fetch_add(1, std::memory_order_relaxed);
+            d_min(d_outMin, w);
+            if (d_lastRet) { const uint64_t g = now - d_lastRet; d_max(d_gapMax, g);
+                             if (g > 35000) d_gap35.fetch_add(1, std::memory_order_relaxed); }
+            d_lastRet = now;
+            d_max(d_mixMax, tw - t0);
+        }
     }
     c_outus.fetch_add(wx86_now_us() - t1, std::memory_order_relaxed);
     c_grains.fetch_add(1, std::memory_order_relaxed);
@@ -532,6 +646,7 @@ uint32_t m_ds_duplicate(Cpu& c) {
     // so inheriting the original's count would make its ring look fed when
     // nobody has touched it.
     d.lockKio = 0; d.volSaid = false;
+    d.wrLead = 0; d.hasWr = false; d.starved = false;
     recompute_gains(d);
     c.write_u32(obj + 12, 1);
     c.write_u32(ppdup, obj);
@@ -613,6 +728,11 @@ uint32_t m_ds_createbuffer(Cpu& c) {
     v.ch = ch; v.bits = bits; v.rate = rate; v.blockAlign = blockAlign;
     v.primary = primary; v.playing = false; v.looping = false; v.alive = true;
     v.volmB = 0; v.panmB = 0; v.refs = 1; v.lockKio = 0; v.volSaid = false; recompute_gains(v);
+    v.wrLead = 0; v.hasWr = false; v.starved = false;
+    if (g_diag && d_created < 40) { ++d_created;
+        jpline("[son] diag: CreateSoundBuffer #%u %s %u o %dch %u Hz (%.0f ms)", d_created,
+               primary ? "primaire" : "secondaire", bytes, ch, rate,
+               (rate && blockAlign) ? 1000.0 * bytes / ((double)rate * blockAlign) : 0.0); }
     // A reused slot always comes from g_freeVoices, i.e. an owner with no
     // live shares — but reset explicitly anyway, so sharing state can never
     // survive into a reused slot.
@@ -683,6 +803,8 @@ uint32_t m_buf_getpos(Cpu& c) {
     if (!v) return DSERR_INVALIDPARAM;
     if (uint32_t p = c.arg(1)) c.write_u32(p, v->cursor);
     if (uint32_t p = c.arg(2)) c.write_u32(p, write_cursor(*v));
+    if (!v->primary && trace_on()) { ++d_trN; jpline("[sontr] %llu G v%u cur=%u", (unsigned long long)(wx86_now_us() / 1000),
+                                                    (unsigned)c.read_u32(c.arg(0) + 4), v->cursor); }
     return DS_OK;
 }
 uint32_t m_buf_getformat(Cpu& c) {
@@ -742,15 +864,40 @@ uint32_t m_buf_lock(Cpu& c) {
     if (pb2) c.write_u32(pb2, b2);
     c_lockKio.fetch_add((b1 + b2) >> 10, std::memory_order_relaxed);
     v->lockKio += (uint64_t)((b1 + b2) >> 10);
+    if (!v->primary && trace_on()) { ++d_trN;
+        jpline("[sontr] %llu L v%u off=%u n=%u/%u fl=%x cur=%u len=%u", (unsigned long long)(wx86_now_us() / 1000),
+               (unsigned)c.read_u32(c.arg(0) + 4), off, b1, b2, lf, v->cursor, v->len); }
+    if (g_diag && !v->primary && v->len && (b1 + b2)) {
+        const uint32_t end = b2 ? b2 : (off + b1) % v->len;
+        uint32_t lead = (end + v->len - v->cursor % v->len) % v->len;
+        if (!lead) lead = v->len;                     // filled right up to the cursor
+        v->wrLead = (int64_t)lead; v->hasWr = true;
+        if (v->starved) { v->starved = false; d_sdConf.fetch_add(1, std::memory_order_relaxed);
+                          const uint64_t ms = (wx86_now_us() - v->starvedUs) / 1000;
+                          d_repMs.fetch_add(ms, std::memory_order_relaxed); d_max(d_repMax, ms); }
+    }
     return DS_OK;
 }
-uint32_t m_buf_unlock(Cpu&) { return DS_OK; }   // direct write: nothing to copy back
+uint32_t m_buf_unlock(Cpu& c) {               // direct write: nothing to copy back
+    if (trace_on()) { std::lock_guard<std::mutex> lk(g_mx); Voice* v = voice_of(c, c.arg(0));
+        if (v && !v->primary) { ++d_trN;
+            jpline("[sontr] %llu U v%u p1=%x n=%u n2=%u cur=%u", (unsigned long long)(wx86_now_us() / 1000),
+                   (unsigned)c.read_u32(c.arg(0) + 4), c.arg(1) - v->buf, c.arg(2), c.arg(4), v->cursor); } }
+    return DS_OK;
+}
 uint32_t m_buf_play(Cpu& c) {
     std::lock_guard<std::mutex> lk(g_mx);
     Voice* v = voice_of(c, c.arg(0));
     if (!v) return DSERR_INVALIDPARAM;
     voice_rehost(c, *v);
     v->playing = true; v->looping = (c.arg(3) & 0x1u) != 0;      // DSBPLAY_LOOPING
+    if (trace_on()) { ++d_trN;
+        // last non-silent sample in the buffer: where the game's data really ends
+        long nz = -1;
+        if (v->host) for (long k = (long)v->len - 2; k >= 0; k -= 2) {
+            int16_t x; std::memcpy(&x, v->host + k, 2); if (x > 64 || x < -64) { nz = k; break; } }
+        jpline("[sontr] %llu P v%u fl=%x cur=%u nz=%ld", (unsigned long long)(wx86_now_us() / 1000),
+               (unsigned)c.read_u32(c.arg(0) + 4), c.arg(3), v->cursor, nz); }
     if (!v->looping) {
         // A non-looping Play is unusual — most callers always loop and stop
         // buffers themselves. Handled correctly either way (mixer stops the
@@ -767,6 +914,12 @@ uint32_t m_buf_stop(Cpu& c) {
     Voice* v = voice_of(c, c.arg(0));
     if (!v) return DSERR_INVALIDPARAM;
     v->playing = false;
+    if (trace_on()) { ++d_trN; jpline("[sontr] %llu S v%u cur=%u", (unsigned long long)(wx86_now_us() / 1000),
+                                      (unsigned)c.read_u32(c.arg(0) + 4), v->cursor); }
+    if (v->starved) { d_sdStop.fetch_add(1, std::memory_order_relaxed);   // end of the sound, not a starved feed
+                      const uint64_t ms = (wx86_now_us() - v->starvedUs) / 1000;
+                      d_finMs.fetch_add(ms, std::memory_order_relaxed); d_max(d_finMax, ms); }
+    v->starved = false; v->hasWr = false;
     c_stop.fetch_add(1, std::memory_order_relaxed);
     return DS_OK;
 }
@@ -775,6 +928,9 @@ uint32_t m_buf_setpos(Cpu& c) {
     Voice* v = voice_of(c, c.arg(0));
     if (!v || !v->len) return DSERR_INVALIDPARAM;
     v->cursor = c.arg(1) % v->len; v->posAcc = 0;
+    v->starved = false; v->hasWr = false;
+    if (trace_on()) { ++d_trN; jpline("[sontr] %llu X v%u pos=%u", (unsigned long long)(wx86_now_us() / 1000),
+                                      (unsigned)c.read_u32(c.arg(0) + 4), v->cursor); }
     return DS_OK;
 }
 uint32_t m_buf_setformat(Cpu& c) {
@@ -939,6 +1095,12 @@ void install(Bridge& br, Cpu& cpu, const HostOps& ops) {
         g_on = false;
     }
     g_log = env2("WX86_SONLOG", "D2_SONLOG") != nullptr;
+    { const char* lm = env2("WX86_SONLIMIT", "D2_SONLIMIT"); g_limit = !(lm && !std::strcmp(lm, "0")); }
+    if (g_on) jpline("[son] limiteur de sortie %s (D2_SONLIMIT)", g_limit ? "ARME" : "COUPE");
+    { const char* dg = env2("WX86_SONDIAG", "D2_SONDIAG"); g_diag = dg && *dg && std::strcmp(dg, "0"); }
+    if (const char* t = env2("WX86_SONTRACE", "D2_SONTRACE")) { const long s0 = atol(t);
+        if (s0 > 0) { d_trT0 = wx86_now_us() + (uint64_t)s0 * 1000000ull; d_trT1 = d_trT0 + 150000000ull; } }
+    if (g_on && g_diag) jpline("[son] diag: compteurs de sous-debit/ecretage ARMES (D2_SONDIAG=1, diagnostic)");
     if (const char* n = env2("WX86_SONVOICES", "D2_SONVOICES")) g_voiceCap = atoi(n);
     // Under a virtual clock, guest time can run far faster than real time, so
     // an unbounded proof WAV can grow huge. SONMAXS bounds what's written
@@ -1182,6 +1344,29 @@ int stat_line(char* out, unsigned n) {
     // may have truncated: r could then be >= n, hence the bound below.
     if (g_extra && r > 0 && (unsigned)r + 8u < n)
         r += g_extra(out + r, n - (unsigned)r);
+    return r < 0 ? 0 : r;
+}
+
+int diag_line(char* out, unsigned n) {
+    if (!g_on || !g_diag || !out || !n) return 0;
+    auto take = [](std::atomic<unsigned long long>& a, unsigned long long z) { return a.exchange(z); };
+    const unsigned long long lead = take(d_leadMinUs, 0xffffffffull), omin = take(d_outMin, 0xffffffffull);
+    char lb[24], ob[24];
+    if (lead == 0xffffffffull) std::snprintf(lb, sizeof lb, "-"); else std::snprintf(lb, sizeof lb, "%llu", lead / 1000);
+    if (omin == 0xffffffffull) std::snprintf(ob, sizeof ob, "-"); else std::snprintf(ob, sizeof ob, "%llu", omin);
+    const unsigned long long late = take(d_late, 0), g35 = take(d_gap35, 0), gmax = take(d_gapMax, 0),
+        lk = take(d_lockMax, 0), mx = take(d_mixMax, 0), cl = take(d_clip, 0), clg = take(d_clipGr, 0),
+        ev = take(d_sdEv, 0), cf = take(d_sdConf, 0), st = take(d_sdStop, 0), by = take(d_sdBytes, 0),
+        spk = take(d_stalePk, 0), snz = take(d_staleNz, 0), sn = take(d_staleN, 0),
+        rms_ = take(d_repMs, 0), rmx = take(d_repMax, 0), fms = take(d_finMs, 0), fmx = take(d_finMax, 0),
+        og = take(d_overGr, 0), om = take(d_overMax, 0), lg = take(d_limGr, 0), lmin = take(d_limMin, 65536);
+    int r = std::snprintf(out, n,
+        "sondiag(10s): sortie-vite=%llu trou>35ms=%llu trou-max=%lluus sortie-min=%sus verrou-max=%lluus"
+        " melange-max=%lluus ecretes=%llu/%llugrains | flux: depasse=%llu reprise=%llu fin=%llu"
+        " rejoue=%lluKio avance-min=%sms | rejoue: crete=%llu nonnul=%llu/%llu reprise-ms=%llu/max%llu fin-ms=%llu/max%llu"
+        " | somme>pleine-echelle=%llugrains max=%llu limiteur=%llugrains gain-min=%llu%%",
+        late, g35, gmax, ob, lk, mx, cl, clg, ev, cf, st, by >> 10, lb,
+        spk, snz, sn, rms_, rmx, fms, fmx, og, om, lg, lmin * 100 / 65536);
     return r < 0 ? 0 : r;
 }
 

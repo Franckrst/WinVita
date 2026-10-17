@@ -87,6 +87,26 @@ void shutdown();
 //   resamp=<grains mixed at a rate != the configured mix rate>  puits=  codec=h/a/fallback
 int stat_line(char* out, unsigned n);
 
+// D2_SONDIAG=1 only (0 bytes otherwise): a second 10 s window line, for
+// diagnosis. sortie-vite = grains whose realtime write returned in < 2 ms
+// (port queue already empty: a gap was played); trou>35ms / trou-max = time
+// between two consecutive realtime writes; verrou-max = mixer wait on the
+// voice lock; ecretes = samples clamped at +-32767 / grains with any;
+// flux: depasse = streaming voices whose read cursor ran past the end of the
+// game's last Lock (stale ring bytes replayed), reprise = the game came back
+// to Lock that voice afterwards (a genuinely late feed), fin = it Stopped it
+// instead (end of the sound), rejoue = stale bytes mixed, avance-min = least
+// lead of locked-ahead data seen at a grain. Then what those stale bytes
+// carried (crete / nonnul samples) and how long the episodes lasted, and the
+// output limiter: grains whose voice sum exceeded full scale (max = largest
+// sum), grains sent with a gain below unity, smallest gain.
+// D2_SONTRACE=<s> (diagnostic): one log line per Lock/Unlock/Play/Stop/
+// SetCurrentPosition/GetCurrentPosition of a secondary voice, for 150 s from
+// <s> seconds after install.
+// D2_SONLIMIT=0: output limiter off (hard clamp at full scale, the historical
+// behavior). On by default.
+int diag_line(char* out, unsigned n);
+
 // Sink-only self-test (D2_SONTEST=1): pushes a 440 Hz sine into a WAV sink,
 // then reads the file back and verifies it. Isolates "the sink works" from
 // "DirectSound emulation works". Returns 0 on PASS.

@@ -8,7 +8,9 @@
 //
 // Three constraints shape the thread:
 //   (a) sceAudioOutOutput blocks (~23ms at the grain used here), so it must
-//       never run on the guest runners' core (USER_0);
+//       never run on the guest runners' core (USER_0); it must also wake on
+//       time, so not behind a busy worker of equal priority (default USER_2,
+//       see audio_thread);
 //   (b) every host thread must pin itself: a mask set by the creator returns
 //       rc=0 but reads back as 0, and the thread migrates;
 //   (c) it must never hold the GIL — the mixer reads guest memory through a
@@ -208,13 +210,17 @@ int audio_thread(SceSize, void*) {
     // what settle it, never m=0x0.
     unsigned relu = 0;
     const char* cs = getenv("WX86_SONCPU"); if (!cs) cs = getenv("D2_SONCPU");
-    // Default placement: USER_1, deliberately. With the default core scheme,
-    // the presenter, watchdog, and anti-starvation heartbeat all sit on
-    // USER_2, and guest runners on USER_0 — USER_1 carries no production
-    // thread. It's the only core where a thread that blocks 23ms out of every
-    // 23ms steals nobody's time. Never USER_0: blocking there would steal the
-    // game's own core.
-    int mask = 0x00020000;   // SCE_KERNEL_CPU_MASK_USER_1
+    // Default placement: USER_2. Guest runners are on USER_0 (never put a
+    // thread that blocks there: it would steal the game's own core). USER_1
+    // used to be free and was the default, but a port may put its own worker
+    // there (D2Vita's Glide flush thread, same priority, ~50 % of USER_1 in a
+    // heavy scene): on console that delayed this thread's wakeups by up to
+    // 26 ms (Baal's Throne, return-to-return gap up to 49 ms for a 23.2 ms
+    // grain) and produced real underruns. USER_2 carries the presenter,
+    // watchdog and heartbeat, which mostly wait (~1 % busy in the same
+    // scene); measured there, the gap never exceeded 24.6 ms. D2_SONCPU=1
+    // restores the old placement; D2_SONPRIO raises the priority instead.
+    int mask = 0x00040000;   // SCE_KERNEL_CPU_MASK_USER_2
     if (cs && *cs) {
         switch (*cs) {
             case '0': mask = 0x00010000; break;
